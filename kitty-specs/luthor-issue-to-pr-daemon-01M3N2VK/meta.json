@@ -10,5 +10,7 @@
   "purpose_tldr": "luthor issue to pr daemon",
   "slug": "luthor-issue-to-pr-daemon-01M3N2VK",
   "target_branch": "work/luthor-issue-to-pr-daemon",
-  "topology": "single_branch"
+  "topology": "single_branch",
+  "vcs": "git",
+  "vcs_locked_at": "2026-09-28T23:29:08.065741+00:00"
 }
