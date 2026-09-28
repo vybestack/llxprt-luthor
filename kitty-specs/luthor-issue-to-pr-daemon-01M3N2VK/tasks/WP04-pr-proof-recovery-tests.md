@@ -1,21 +1,46 @@
 ---
-work_package_id: "WP04"
-title: "PR proof and recovery validation"
-dependencies: ["WP03"]
-planning_base_branch: "work/luthor-issue-to-pr-daemon"
-merge_target_branch: "work/luthor-issue-to-pr-daemon"
-branch_strategy: "Planning artifacts were generated on work/luthor-issue-to-pr-daemon; completed changes must merge back into work/luthor-issue-to-pr-daemon."
+work_package_id: WP04
+title: PR proof and recovery validation
+dependencies:
+- WP03
+requirement_refs:
+- FR-006
+- FR-008
+- FR-009
+- FR-012
+- NFR-002
+- NFR-003
+- NFR-004
+- NFR-005
+planning_base_branch: work/luthor-issue-to-pr-daemon
+merge_target_branch: work/luthor-issue-to-pr-daemon
+branch_strategy: Planning artifacts for this mission were generated on work/luthor-issue-to-pr-daemon. During /spec-kitty.implement this WP may branch from a dependency-specific base, but completed changes must merge back into work/luthor-issue-to-pr-daemon unless the human explicitly redirects the landing branch.
 subtasks:
-  - "T001"
-  - "T002"
-phase: "Phase 3 - Verification"
-assignee: ""
-agent: ""
-shell_pid: ""
+- T001
+- T002
+phase: Phase 3 - Verification
 history:
-  - timestamp: "2026-09-28T22:43:00Z"
-    agent: "system"
-    action: "Authored from implementation plan and architecture."
+- timestamp: '2026-09-28T22:43:00Z'
+  agent: system
+  action: Authored from implementation plan and architecture.
+authoritative_surface: src/
+create_intent:
+- src/github/pull_request.rs
+- src/pr_evidence.rs
+- src/recovery.rs
+- tests/pr_evidence.rs
+- tests/recovery.rs
+- tests/fault_injection.rs
+execution_mode: code_change
+owned_files:
+- src/github/pull_request.rs
+- src/pr_evidence.rs
+- src/recovery.rs
+- tests/pr_evidence.rs
+- tests/recovery.rs
+- tests/fault_injection.rs
+tags: []
+tracker_refs: []
 ---
 
 # Work Package Prompt: WP04 - PR proof and recovery validation
@@ -24,7 +49,7 @@ history:
 Make verified PR evidence the only completion path and demonstrate conservative behavior under failures and restarts.
 
 ## Requirements
-Requirement References: FR-006, FR-008, FR-009, FR-012, NFR-002, NFR-003, NFR-004
+**Requirement Refs**: FR-006, FR-008, FR-009, FR-012, NFR-002, NFR-003, NFR-004, NFR-005
 
 ## Scope
 - Implement PR lookup outcomes open, absent, ambiguous and error; absent requires exhaustive successful pagination.

@@ -1,22 +1,41 @@
 ---
-work_package_id: "WP05"
-title: "Cross-platform dry run and supervised acceptance"
-dependencies: ["WP01", "WP04"]
-planning_base_branch: "work/luthor-issue-to-pr-daemon"
-merge_target_branch: "work/luthor-issue-to-pr-daemon"
-branch_strategy: "Planning artifacts were generated on work/luthor-issue-to-pr-daemon; completed changes must merge back into work/luthor-issue-to-pr-daemon."
+work_package_id: WP05
+title: Cross-platform dry run and supervised acceptance
+dependencies:
+- WP01
+- WP04
+requirement_refs:
+- C-003
+- C-004
+- C-005
+- FR-010
+- FR-011
+- FR-012
+- NFR-005
+planning_base_branch: work/luthor-issue-to-pr-daemon
+merge_target_branch: work/luthor-issue-to-pr-daemon
+branch_strategy: Planning artifacts for this mission were generated on work/luthor-issue-to-pr-daemon. During /spec-kitty.implement this WP may branch from a dependency-specific base, but completed changes must merge back into work/luthor-issue-to-pr-daemon unless the human explicitly redirects the landing branch.
 subtasks:
-  - "T001"
-  - "T002"
-  - "T003"
-phase: "Phase 4 - Delivery and acceptance"
-assignee: ""
-agent: ""
-shell_pid: ""
+- T001
+- T002
+- T003
+phase: Phase 4 - Delivery and acceptance
 history:
-  - timestamp: "2026-09-28T22:43:00Z"
-    agent: "system"
-    action: "Authored from implementation plan and architecture."
+- timestamp: '2026-09-28T22:43:00Z'
+  agent: system
+  action: Authored from implementation plan and architecture.
+authoritative_surface: src/
+create_intent:
+- src/platform.rs
+- tests/platform_dry_run.rs
+- tests/acceptance_evidence.rs
+execution_mode: code_change
+owned_files:
+- src/platform.rs
+- tests/platform_dry_run.rs
+- tests/acceptance_evidence.rs
+tags: []
+tracker_refs: []
 ---
 
 # Work Package Prompt: WP05 - Cross-platform dry run and supervised acceptance
@@ -25,7 +44,7 @@ history:
 Verify the runnable daemon on macOS and Linux, then perform a separately authorized five-PR acceptance run through Luthor.
 
 ## Requirements
-Requirement References: FR-005, FR-008, FR-009, FR-010, FR-011, C-003, C-004
+**Requirement Refs**: FR-010, FR-011, FR-012, NFR-005, C-003, C-004, C-005
 
 ## Scope
 - Build and run automated checks on macOS and Linux; investigate OS-specific process and identity behavior.

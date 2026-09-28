@@ -1,21 +1,38 @@
 ---
-work_package_id: "WP01"
-title: "Preflight and adapter contracts"
+work_package_id: WP01
+title: Preflight and adapter contracts
 dependencies: []
-planning_base_branch: "work/luthor-issue-to-pr-daemon"
-merge_target_branch: "work/luthor-issue-to-pr-daemon"
-branch_strategy: "Planning artifacts were generated on work/luthor-issue-to-pr-daemon; completed changes must merge back into work/luthor-issue-to-pr-daemon."
+requirement_refs:
+- C-002
+- C-004
+- FR-001
+- FR-002
+- FR-003
+- FR-005
+- FR-008
+- FR-011
+- NFR-005
+planning_base_branch: work/luthor-issue-to-pr-daemon
+merge_target_branch: work/luthor-issue-to-pr-daemon
+branch_strategy: Planning artifacts for this mission were generated on work/luthor-issue-to-pr-daemon. During /spec-kitty.implement this WP may branch from a dependency-specific base, but completed changes must merge back into work/luthor-issue-to-pr-daemon unless the human explicitly redirects the landing branch.
 subtasks:
-  - "T001"
-  - "T002"
-phase: "Phase 0 - Preflight"
-assignee: ""
-agent: ""
-shell_pid: ""
+- T001
+- T002
+phase: Phase 0 - Preflight
 history:
-  - timestamp: "2026-09-28T22:43:00Z"
-    agent: "system"
-    action: "Authored from implementation plan and architecture."
+- timestamp: '2026-09-28T22:43:00Z'
+  agent: system
+  action: Authored from implementation plan and architecture.
+authoritative_surface: dev-docs/
+create_intent: []
+execution_mode: code_change
+scope: codebase-wide
+owned_files:
+- dev-docs/**
+- src/**
+- tests/**
+tags: []
+tracker_refs: []
 ---
 
 # Work Package Prompt: WP01 - Preflight and adapter contracts
@@ -24,7 +41,7 @@ history:
 Resolve external contracts and create implementation-ready interface decisions before daemon code depends on them.
 
 ## Requirements
-Requirement References: FR-001, FR-002, FR-003, FR-005, FR-008, C-002, C-004
+**Requirement Refs**: FR-001, FR-002, FR-003, FR-005, FR-008, FR-011, NFR-005, C-002, C-004
 
 ## Scope
 - Verify read-only GitHub Project item enumeration, membership, pagination, fields and selected ready-marker representation.

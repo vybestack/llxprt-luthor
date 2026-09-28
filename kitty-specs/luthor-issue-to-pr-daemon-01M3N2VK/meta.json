@@ -1,0 +1,14 @@
+{
+  "created_at": "2026-09-28T22:41:05.439431+00:00",
+  "flattened": false,
+  "friendly_name": "luthor issue to pr daemon",
+  "mission_id": "01M3N2VKCY63H0QY6Z1TXCMKNH",
+  "mission_number": null,
+  "mission_slug": "luthor-issue-to-pr-daemon-01M3N2VK",
+  "mission_type": "software-dev",
+  "purpose_context": "This mission advances luthor issue to pr daemon on work/luthor-issue-to-pr-daemon so stakeholders can track the work from mission creation onward.",
+  "purpose_tldr": "luthor issue to pr daemon",
+  "slug": "luthor-issue-to-pr-daemon-01M3N2VK",
+  "target_branch": "work/luthor-issue-to-pr-daemon",
+  "topology": "single_branch"
+}

@@ -1,22 +1,56 @@
 ---
-work_package_id: "WP03"
-title: "Verified claim, worktree and agent supervision"
-dependencies: ["WP02"]
-planning_base_branch: "work/luthor-issue-to-pr-daemon"
-merge_target_branch: "work/luthor-issue-to-pr-daemon"
-branch_strategy: "Planning artifacts were generated on work/luthor-issue-to-pr-daemon; completed changes must merge back into work/luthor-issue-to-pr-daemon."
+work_package_id: WP03
+title: Verified claim, worktree and agent supervision
+dependencies:
+- WP02
+requirement_refs:
+- FR-003
+- FR-004
+- FR-005
+- FR-006
+- FR-007
+- NFR-001
+- NFR-002
+- NFR-003
+- NFR-004
+planning_base_branch: work/luthor-issue-to-pr-daemon
+merge_target_branch: work/luthor-issue-to-pr-daemon
+branch_strategy: Planning artifacts for this mission were generated on work/luthor-issue-to-pr-daemon. During /spec-kitty.implement this WP may branch from a dependency-specific base, but completed changes must merge back into work/luthor-issue-to-pr-daemon unless the human explicitly redirects the landing branch.
 subtasks:
-  - "T001"
-  - "T002"
-  - "T003"
-phase: "Phase 2 - Execution"
-assignee: ""
-agent: ""
-shell_pid: ""
+- T001
+- T002
+- T003
+phase: Phase 2 - Execution
 history:
-  - timestamp: "2026-09-28T22:43:00Z"
-    agent: "system"
-    action: "Authored from implementation plan and architecture."
+- timestamp: '2026-09-28T22:43:00Z'
+  agent: system
+  action: Authored from implementation plan and architecture.
+authoritative_surface: src/
+create_intent:
+- src/claim.rs
+- src/worktree.rs
+- src/supervisor.rs
+- src/coordinator.rs
+- src/cli.rs
+- tests/claim.rs
+- tests/worktree.rs
+- tests/supervisor.rs
+- tests/coordinator.rs
+- tests/cli.rs
+execution_mode: code_change
+owned_files:
+- src/claim.rs
+- src/worktree.rs
+- src/supervisor.rs
+- src/coordinator.rs
+- src/cli.rs
+- tests/claim.rs
+- tests/worktree.rs
+- tests/supervisor.rs
+- tests/coordinator.rs
+- tests/cli.rs
+tags: []
+tracker_refs: []
 ---
 
 # Work Package Prompt: WP03 - Verified claim, worktree and agent supervision
@@ -25,7 +59,7 @@ history:
 Claim eligible work safely, isolate changes per task and account for configured agent processes across normal execution and interruption.
 
 ## Requirements
-Requirement References: FR-003, FR-004, FR-005, FR-006, FR-007, NFR-001, NFR-002, NFR-003
+**Requirement Refs**: FR-003, FR-004, FR-005, FR-006, FR-007, NFR-001, NFR-002, NFR-003, NFR-004
 
 ## Scope
 - Persist claim intent, perform one assignment write, and independently verify expected sole assignee, unchanged source readiness and exclusion due to assignment. Ambiguity holds; never retry automatically.
