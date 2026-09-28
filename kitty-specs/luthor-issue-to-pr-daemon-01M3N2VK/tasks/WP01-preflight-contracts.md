@@ -26,11 +26,8 @@ history:
 authoritative_surface: dev-docs/
 create_intent: []
 execution_mode: code_change
-scope: codebase-wide
 owned_files:
 - dev-docs/**
-- src/**
-- tests/**
 tags: []
 tracker_refs: []
 ---
@@ -46,7 +43,7 @@ Resolve external contracts and create implementation-ready interface decisions b
 ## Scope
 - Verify read-only GitHub Project item enumeration, membership, pagination, fields and selected ready-marker representation.
 - Confirm direct issue reads expose stable IDs, state, all assignees and exact milestone; confirm PR lookup capabilities and permissions.
-- Record authorized account, assignment/push/PR permissions, tracker-to-code mappings and operational single-dispatcher constraint.
+- Record authorized account, read-visible permission evidence, tracker-to-code mappings and operational single-dispatcher constraint. Mark assignment/push/PR write permissions unverified when read-only probes cannot establish them; validate before authorized live writes.
 - Validate empty-remote issue-branch PR bootstrap options without remote writes, fake default branches or direct-main pushes.
 - Define typed adapter results and errors that distinguish absent, ambiguous, incomplete and failed data.
 - Verify installed rs executable and no-write initial/resume command, session root, worktree identity and stop behavior.

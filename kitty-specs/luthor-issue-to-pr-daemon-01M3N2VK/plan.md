@@ -39,7 +39,7 @@ Define validated JSON config and command interpolation allowlist; normalized ada
 
 ### Stage 2: Read-only discovery, claim and worktree
 
-Implement source enumeration and direct validation, deduplication/conflict handling, candidate reporting, mapping validation, prior-PR check, persisted single assignment intent, and independent claim verification. Add safe unique branch/worktree creation and reconciliation of partial state. No agent execution until claim and worktree checks pass.
+Implement source enumeration and direct validation, deduplication/conflict handling, candidate reporting, mapping validation, a reusable exhaustive open-PR lookup for pre-claim and pre-resume absence checks, persisted single assignment intent, and independent claim verification. An absent result requires successful full pagination; ambiguous or failed reads block claim and resume. Add safe unique branch/worktree creation and reconciliation of partial state. No agent execution until claim, PR and worktree checks pass.
 
 **Exit evidence**: fake adapter tests cover membership, pagination, eligibility, optional milestone, duplicate source, stale issue, ambiguous claim and no retry; worktree tests prove unknown paths/branches are not adopted or deleted.
 
@@ -51,7 +51,7 @@ Implement capacity and task scheduling, durable launch intent, gated detached su
 
 ### Stage 4: PR verification and failure-injection suite
 
-Implement exhaustive PR lookup and exact linkage/identity checks. Add tests across claim/worktree/launch/stop/log/receipt/PR boundaries, including daemon and supervisor crashes, PID reuse, escaped descendants, partial writes, API errors and telemetry-loss resolution. Verify absent differs from ambiguous or failed.
+Extend the Stage 2 PR lookup with exact completion linkage/identity checks; do not defer the pre-claim or pre-resume lookup until this stage. Add tests across claim/worktree/launch/stop/log/receipt/PR boundaries, including daemon and supervisor crashes, PID reuse, escaped descendants, partial writes, API errors and telemetry-loss resolution. Verify absent differs from ambiguous or failed.
 
 **Exit evidence**: only matching open PR completes; draft/red/pending checks pass as completion evidence; all uncertain cases hold or require explicit attention; no automatic retry, review, repair, merge or unassignment exists.
 

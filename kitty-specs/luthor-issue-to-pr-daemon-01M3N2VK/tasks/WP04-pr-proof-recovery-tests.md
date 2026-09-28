@@ -16,8 +16,8 @@ planning_base_branch: work/luthor-issue-to-pr-daemon
 merge_target_branch: work/luthor-issue-to-pr-daemon
 branch_strategy: Planning artifacts for this mission were generated on work/luthor-issue-to-pr-daemon. During /spec-kitty.implement this WP may branch from a dependency-specific base, but completed changes must merge back into work/luthor-issue-to-pr-daemon unless the human explicitly redirects the landing branch.
 subtasks:
-- T001
-- T002
+- T009
+- T010
 phase: Phase 3 - Verification
 history:
 - timestamp: '2026-09-28T22:43:00Z'
@@ -25,7 +25,6 @@ history:
   action: Authored from implementation plan and architecture.
 authoritative_surface: src/
 create_intent:
-- src/github/pull_request.rs
 - src/pr_evidence.rs
 - src/recovery.rs
 - tests/pr_evidence.rs
@@ -34,6 +33,8 @@ create_intent:
 execution_mode: code_change
 owned_files:
 - src/github/pull_request.rs
+- src/coordinator.rs
+- src/state.rs
 - src/pr_evidence.rs
 - src/recovery.rs
 - tests/pr_evidence.rs
@@ -52,7 +53,7 @@ Make verified PR evidence the only completion path and demonstrate conservative 
 **Requirement Refs**: FR-006, FR-008, FR-009, FR-012, NFR-002, NFR-003, NFR-004, NFR-005
 
 ## Scope
-- Implement PR lookup outcomes open, absent, ambiguous and error; absent requires exhaustive successful pagination.
+- Extend WP03's exhaustive pre-claim/pre-resume PR lookup for completion; preserve its open, absent, ambiguous and error outcomes and successful-pagination requirement for absence.
 - Verify exact tracker issue URL, target repository, base, head repository and unique task branch, PR identity and configured authorized account.
 - Record draft state and checks as advisory evidence; a matching open draft or red-check PR counts.
 - Keep attempt outcome distinct from task completion; exit zero without matching PR becomes attention, not completion.

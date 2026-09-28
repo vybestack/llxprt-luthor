@@ -34,13 +34,13 @@ Depends on WP01.
 
 ## Work Package WP03: Verified claim, worktree and agent supervision (Priority: P1)
 
-**Goal**: Make one verified claim per task, then run a configured agent in an isolated worktree with durable process evidence.
-**Independent Test**: Fake GitHub and child-process tests prove claim verification, safe worktree creation, pause/resume and uncertain-capacity holds.
+**Goal**: Make one verified claim per task after exhaustive pre-existing PR lookup, then run a configured agent in an isolated worktree with durable process evidence.
+**Independent Test**: Fake GitHub and child-process tests prove PR absence and failure distinctions before claim/resume, claim verification, safe worktree creation, pause/resume and uncertain-capacity holds.
 **Prompt**: `tasks/WP03-claim-worktree-agent.md`
 **Requirement Refs**: FR-003, FR-004, FR-005, FR-006, FR-007, NFR-001, NFR-002, NFR-003, NFR-004
 
 ### Included Subtasks
-T006 Persist assignment intent, assign once and independently verify claim and worktree ownership.
+T006 Implement reusable exhaustive open-PR lookup before claim/resume; persist assignment intent, assign once and independently verify claim and worktree ownership.
 T007 Implement supervisor, capacity holds, receipts and restart reconciliation with crash tests.
 T008 Implement local controls and explicit same-session resume with tests.
 
@@ -49,13 +49,13 @@ Depends on WP02.
 
 ## Work Package WP04: PR proof and recovery validation (Priority: P1)
 
-**Goal**: Complete tasks only on exact, verified open PR evidence and retain uncertainty through failures.
+**Goal**: Extend WP03's lookup with exact open-PR completion evidence and retain uncertainty through failures.
 **Independent Test**: Fault injection distinguishes absent, ambiguous and failed PR lookups and preserves reservations on uncertain process state.
 **Prompt**: `tasks/WP04-pr-proof-recovery-tests.md`
 **Requirement Refs**: FR-006, FR-008, FR-009, FR-012, NFR-002, NFR-003, NFR-004, NFR-005
 
 ### Included Subtasks
-T009 Implement exhaustive PR lookup, exact linkage checks and attempt/task outcome separation.
+T009 Extend the exhaustive PR lookup with exact completion linkage checks and attempt/task outcome separation.
 T010 Test crash, telemetry-loss, process identity and storage failure boundaries.
 
 ### Dependencies

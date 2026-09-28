@@ -16,9 +16,9 @@ planning_base_branch: work/luthor-issue-to-pr-daemon
 merge_target_branch: work/luthor-issue-to-pr-daemon
 branch_strategy: Planning artifacts for this mission were generated on work/luthor-issue-to-pr-daemon. During /spec-kitty.implement this WP may branch from a dependency-specific base, but completed changes must merge back into work/luthor-issue-to-pr-daemon unless the human explicitly redirects the landing branch.
 subtasks:
-- T001
-- T002
 - T003
+- T004
+- T005
 phase: Phase 1 - Foundation
 history:
 - timestamp: '2026-09-28T22:43:00Z'

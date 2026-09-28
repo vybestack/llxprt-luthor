@@ -16,9 +16,9 @@ planning_base_branch: work/luthor-issue-to-pr-daemon
 merge_target_branch: work/luthor-issue-to-pr-daemon
 branch_strategy: Planning artifacts for this mission were generated on work/luthor-issue-to-pr-daemon. During /spec-kitty.implement this WP may branch from a dependency-specific base, but completed changes must merge back into work/luthor-issue-to-pr-daemon unless the human explicitly redirects the landing branch.
 subtasks:
-- T001
-- T002
-- T003
+- T011
+- T012
+- T013
 phase: Phase 4 - Delivery and acceptance
 history:
 - timestamp: '2026-09-28T22:43:00Z'
@@ -54,7 +54,7 @@ Verify the runnable daemon on macOS and Linux, then perform a separately authori
 - Run dispatch only through Luthor, no manual code or PR fixes; collect task/claim/worktree/attempt/authorized identity and exact PR linkage evidence for five distinct open PRs.
 
 ## Out of Scope
-This mission setup's local changes are planning artifacts only. This WP does not authorize implementation beyond its later mission scope, pushes, issue creation, labels, merges, or live acceptance before prerequisites and authorization are satisfied.
+The analysis/setup gate creates planning artifacts only. This later WP covers implementation verification and delivery, but does not authorize pushes, issue creation, labels, merges or live acceptance before their prerequisites and authorization are satisfied.
 
 ## Verification
 No-write rs dry run must prove the installed binary behavior. Live acceptance must verify five unique issue and open PR identities, milestone, exact tracker reference, configured target/base/head/account, and current draft/check status. Draft and non-green checks count. If source access, identity, permissions, single-dispatcher policy, or empty-remote bootstrap is unresolved, stop and record the exact blocker.
