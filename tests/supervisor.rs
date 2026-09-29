@@ -699,6 +699,18 @@ fn stop_term_has_durable_intent_and_keeps_slot_until_reconcile() {
         Reconciliation::Completed { .. }
     ));
     assert_eq!(store.reservation_count().unwrap(), 0);
+    assert_eq!(store.task_phase("task").unwrap().as_deref(), Some("paused"));
+    drop(store);
+    let mut reopened = StateStore::open(&config.state_root, config.capacity).unwrap();
+    assert_eq!(
+        reopened.task_phase("task").unwrap().as_deref(),
+        Some("paused")
+    );
+    assert_eq!(reopened.reservation_count().unwrap(), 0);
+    assert!(matches!(
+        reconcile_attempt(&mut reopened, "task", "attempt-real").unwrap(),
+        Reconciliation::Completed { .. }
+    ));
 }
 
 #[cfg(unix)]

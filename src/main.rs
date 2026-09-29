@@ -32,6 +32,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         }
         Some("status" | "show" | "logs") => operator(args),
+        Some(command @ ("pause" | "reconcile")) => mutate(command, args.collect()),
         Some("discover") => discover(args.collect()),
         Some("dispatch") => dispatch(args.collect()),
         Some("--help" | "-h") => {
@@ -93,6 +94,55 @@ fn discover(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     }).collect::<Result<Vec<_>, _>>()?;
     for line in lines {
         println!("{line}");
+    }
+    Ok(())
+}
+fn mutate(command: &str, mut values: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
+    let task_id = values.first().cloned().ok_or("task id is required")?;
+    values.remove(0);
+    let mut attempt_id = None;
+    if command == "reconcile" && values.first().is_some_and(|value| value == "--attempt") {
+        values.remove(0);
+        attempt_id = Some(values.first().cloned().ok_or("attempt id is required")?);
+        values.remove(0);
+    }
+    if values.len() != 2 || values[0] != "--config" || values[1].starts_with('-') {
+        return Err("expected TASK [--attempt ID] --config PATH".into());
+    }
+    let config = Config::from_json(&fs::read_to_string(&values[1])?)?;
+    let mut store = StateStore::open(&config.state_root, config.capacity)?;
+    if store.task_phase(&task_id)?.is_none() {
+        return Err("task not found".into());
+    }
+    let attempt = match attempt_id {
+        Some(id) => id,
+        None => store.latest_attempt(&task_id)?.ok_or("attempt not found")?,
+    };
+    if !store.has_attempt(&task_id, &attempt)? {
+        return Err("attempt not found for task".into());
+    }
+    match command {
+        "pause" => {
+            luthor::supervisor::request_stop(&mut store, &task_id, &attempt)?;
+            println!(
+                "{}",
+                json!({"task_id":task_id,"attempt_id":attempt,"status":"stop_requested"})
+            );
+        }
+        "reconcile" => {
+            let result = luthor::supervisor::reconcile_attempt(&mut store, &task_id, &attempt)?;
+            match result {
+                luthor::supervisor::Reconciliation::Completed { exit_code, signal } => println!(
+                    "{}",
+                    json!({"task_id":task_id,"attempt_id":attempt,"status":"completed","exit_code":exit_code,"signal":signal})
+                ),
+                luthor::supervisor::Reconciliation::Held { reason } => println!(
+                    "{}",
+                    json!({"task_id":task_id,"attempt_id":attempt,"status":"held","reason":reason})
+                ),
+            }
+        }
+        _ => return Err("invalid control command".into()),
     }
     Ok(())
 }

@@ -438,6 +438,27 @@ impl StateStore {
         Ok(())
     }
 
+    pub fn has_attempt(&self, task_id: &str, attempt_id: &str) -> Result<bool, StateError> {
+        self.connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM attempts WHERE task_id=?1 AND id=?2)",
+                rusqlite::params![task_id, attempt_id],
+                |row| row.get(0),
+            )
+            .map_err(StateError::from)
+    }
+
+    pub fn latest_attempt(&self, task_id: &str) -> Result<Option<String>, StateError> {
+        self.connection
+            .query_row(
+                "SELECT id FROM attempts WHERE task_id=?1 ORDER BY created_at DESC,rowid DESC LIMIT 1",
+                [task_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(StateError::from)
+    }
+
     pub fn task_phase(&self, task_id: &str) -> Result<Option<String>, StateError> {
         self.connection
             .query_row("SELECT state FROM tasks WHERE id=?1", [task_id], |row| {
@@ -846,6 +867,23 @@ impl StateStore {
         tx.execute("UPDATE reservations SET status='released' WHERE attempt_id=?1 AND task_id=?2 AND status='reserved'", params![attempt_id, task_id])?;
         if tx.changes() != 1 {
             return Err(StateError::LaunchBlocked);
+        }
+        let stopped: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM intents WHERE task_id=?1 AND attempt_id=?2 AND kind='stop'",
+            params![task_id, attempt_id],
+            |row| row.get(0),
+        )?;
+        if stopped > 0 {
+            let receipt: crate::supervisor::ExitReceipt = serde_json::from_str(evidence)?;
+            if !receipt.stop_signals.is_empty() {
+                tx.execute(
+                    "UPDATE tasks SET state='paused' WHERE id=?1 AND state='held'",
+                    [task_id],
+                )?;
+                if tx.changes() != 1 {
+                    return Err(StateError::LaunchBlocked);
+                }
+            }
         }
         tx.commit()?;
         Ok(())

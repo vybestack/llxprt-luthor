@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 use std::{
     fs,
     path::{Path, PathBuf},
+    process::Command,
 };
 
 struct Fixture {
@@ -247,4 +248,32 @@ fn logs_reject_symlinks_and_receipt_path_mismatch() {
     fs::write(&other, "hello").unwrap();
     f.receipt("task", "attempt", other, stderr);
     assert_eq!(f.run(&["logs", "task"]), Err(CliError::UnsafeLog));
+}
+
+#[test]
+fn pause_and_reconcile_reject_bad_arguments_and_unknown_tasks() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.json");
+    let state = dir.path().join("state");
+    fs::write(&config, format!(r#"{{"state_root":"{}","worktree_root":"{}","capacity":1,"assignment_login":"operator","sources":[{{"project_id":"project","repositories":["org/tracker"],"ready_marker":{{"kind":"label","name":"ready"}},"milestone":null}}],"mappings":[{{"tracker_repository":"org/tracker","code_repository":"org/code","checkout":"/code","base_branch":"main","push_remote":"origin","allowed_pr_head_repository":"org/code","allowed_pr_author":"operator"}}],"initial":{{"executable":"/worker","args":[]}},"resume":{{"executable":"/worker","args":[]}}}}"#, state.display(), dir.path().display())).unwrap();
+    let binary = env!("CARGO_BIN_EXE_luthor");
+    let bad = Command::new(binary)
+        .args(["pause", "--config", config.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!bad.status.success());
+
+    for command in ["pause", "reconcile"] {
+        let output = Command::new(binary)
+            .args([
+                command,
+                "missing-task",
+                "--config",
+                config.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("task not found"));
+    }
 }
