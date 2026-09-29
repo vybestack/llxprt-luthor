@@ -82,7 +82,7 @@
     },
     "WP03": {
       "actor": "llxprt",
-      "agent": null,
+      "agent": "llxprt",
       "agent_profile": "__resolved_profile_absent__",
       "agent_profile_version": "__resolved_profile_version_absent__",
       "force_count": 10,
@@ -94,7 +94,8 @@
         "WP03 fix integrated; root fmt, locked offline all-target tests, and strict Clippy passed.",
         "Review passed: verified claim and optional milestone identity, exhaustive PR preflight, worktree and session identity, gated supervision, conservative restart capacity, operator controls and root checks. Shared state and coordinator ownership is recorded in WP03.",
         "Documented command JSON now parses and renders initial/resume argv with task-scoped session and distinct attempt prompt; root checks passed.",
-        "WP03 rejected: log-failure evidence-write error leaves worker running; shared supervisor/test lane needs coordinated rework"
+        "WP03 rejected: log-failure evidence-write error leaves worker running; shared supervisor/test lane needs coordinated rework",
+        "WP03 fault fix integrated as 9bc8442; fmt, serial supervisor suite, strict clippy passed; full all-target test had transient supervisor receipt failures under parallel test execution."
       ],
       "provider": "__resolved_provider_absent__",
       "review": null,
