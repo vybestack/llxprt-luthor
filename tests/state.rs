@@ -230,11 +230,13 @@ fn invalid_config_does_not_create_task_or_selection_evidence() {
     let dir = tempfile::tempdir().unwrap();
     let mut store = StateStore::open(dir.path(), 1).unwrap();
     let mut invalid = config();
-    invalid.initial.args = vec!["--header".into(), "PRIVATE-TOKEN: DEMO_VALUE".into()];
+    invalid.initial.args = vec!["--prompt".into(), "PRIVATE-TOKEN: DEMO_VALUE".into()];
     let error = store
         .create_task("t1", &candidate("i1", 1), "rev", &invalid)
-        .unwrap_err();
-    assert_eq!(error.to_string(), "invalid configuration");
+        .unwrap_err()
+        .to_string();
+    assert_eq!(error, "invalid configuration");
+    assert!(!error.contains("DEMO_VALUE"));
     assert_eq!(store.task_count().unwrap(), 0);
     assert_eq!(store.selection_evidence("t1").unwrap(), None);
 }

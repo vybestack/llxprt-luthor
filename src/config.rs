@@ -217,13 +217,21 @@ impl Config {
 }
 
 fn is_sensitive_header(value: &str) -> bool {
-    let name = value
-        .split_once([':', '='])
-        .map(|(name, _)| name.trim().to_ascii_lowercase());
-    matches!(
-        name.as_deref(),
-        Some("authorization" | "x-api-key" | "cookie" | "proxy-authorization")
-    )
+    value.match_indices(':').any(|(colon, _)| {
+        let before = value[..colon].trim_end();
+        let start = before
+            .char_indices()
+            .rev()
+            .find(|(_, character)| {
+                !(character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+            })
+            .map_or(0, |(index, character)| index + character.len_utf8());
+        let name = before[start..].to_ascii_lowercase();
+        matches!(
+            name.as_str(),
+            "authorization" | "proxy-authorization" | "cookie" | "set-cookie"
+        ) || has_sensitive_marker(&name)
+    })
 }
 
 fn has_sensitive_marker(value: &str) -> bool {

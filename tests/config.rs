@@ -101,6 +101,11 @@ fn rejects_embedded_credential_fields() {
 #[test]
 fn rejects_credential_headers_and_executable_secrets_without_echoing_values() {
     let mut value: serde_json::Value = serde_json::from_str(valid()).unwrap();
+    value["initial"]["args"] = serde_json::json!(["--prompt", "PRIVATE-TOKEN: DEMO_VALUE"]);
+    let error = Config::from_json(&value.to_string())
+        .unwrap_err()
+        .to_string();
+    assert!(!error.contains("DEMO_VALUE"));
     value["initial"]["args"] =
         serde_json::json!(["--prompt", "Authorization: Bearer SECRET_MARKER"]);
     let error = Config::from_json(&value.to_string())
@@ -130,6 +135,15 @@ fn rejects_secret_flags_bad_braces_and_accepts_benign_prompt() {
     assert!(
         Config::from_json(&valid().replace("{task.issue_url}", "Please fix this issue")).is_ok()
     );
+    for prompt in [
+        "Fix {task.issue_url} using API",
+        "Tracker-Issue: {task.issue_url}",
+    ] {
+        assert!(Config::from_json(&valid().replace("Work on {task.issue_url}", prompt)).is_ok());
+    }
+    for prompt in ["PRIVATE-TOKEN:", "X-API-KEY:", "password:"] {
+        assert!(Config::from_json(&valid().replace("Work on {task.issue_url}", prompt)).is_err());
+    }
 }
 
 fn task_values() -> TaskValues {
