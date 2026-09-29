@@ -30,9 +30,17 @@ create_intent:
 - tests/pr_evidence.rs
 - tests/recovery.rs
 - tests/fault_injection.rs
+- tests/state.rs
+- tests/claim.rs
+- tests/coordinator.rs
+- tests/supervisor.rs
 execution_mode: code_change
 owned_files:
 - src/github/pull_request.rs
+- tests/state.rs
+- tests/claim.rs
+- tests/coordinator.rs
+- tests/supervisor.rs
 - src/coordinator.rs
 - src/state.rs
 - src/pr_evidence.rs
