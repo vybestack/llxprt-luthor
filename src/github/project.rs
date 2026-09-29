@@ -213,7 +213,7 @@ impl ProjectReader for GhProjectReader {
         project_id: &str,
         cursor: Option<&str>,
     ) -> Result<Page<ProjectItem>, ProjectReadError> {
-        const QUERY: &str = "query($projectId: ID!, $cursor: String) { node(id: $projectId) { ... on ProjectV2 { items(first: 100, after: $cursor) { nodes { id content { __typename ... on Issue { id number repository { id nameWithOwner } } } fieldValues(first: 100) { nodes { __typename ... on ProjectV2ItemFieldSingleSelectValue { name field { ... on ProjectV2SingleSelectField { name } ... on ProjectV2Field { name } } } ... on ProjectV2ItemFieldTextValue { text field { ... on ProjectV2SingleSelectField { name } ... on ProjectV2Field { name } } } ... on ProjectV2ItemFieldIterationValue { field { ... on ProjectV2IterationField { name } } } } pageInfo { hasNextPage endCursor } } } pageInfo { hasNextPage endCursor } } } } }";
+        const QUERY: &str = "query($projectId: ID!, $cursor: String) { node(id: $projectId) { ... on ProjectV2 { items(first: 100, after: $cursor) { nodes { id content { __typename ... on Issue { id number repository { id nameWithOwner } } } fieldValues(first: 100) { nodes { __typename ... on ProjectV2ItemFieldSingleSelectValue { name field { ... on ProjectV2SingleSelectField { name } ... on ProjectV2Field { name } } } ... on ProjectV2ItemFieldTextValue { text field { ... on ProjectV2SingleSelectField { name } ... on ProjectV2Field { name } } } ... on ProjectV2ItemFieldIterationValue { field { ... on ProjectV2IterationField { name } } } ... on ProjectV2ItemFieldDateValue { field { ... on ProjectV2Field { name } } } } pageInfo { hasNextPage endCursor } } } pageInfo { hasNextPage endCursor } } } } }";
         let query_arg = format!("query={QUERY}");
         let project_id_arg = format!("projectId={project_id}");
         let cursor_arg = cursor.map(|cursor| format!("cursor={cursor}"));
@@ -355,7 +355,7 @@ impl ProjectReader for GhProjectReader {
                         )?,
                         required_string(field, "text", "invalid-project-field")?,
                     )),
-                    Some("ProjectV2ItemFieldIterationValue") => {
+                    Some("ProjectV2ItemFieldIterationValue" | "ProjectV2ItemFieldDateValue") => {
                         unsupported_fields.push(required_string(
                             field
                                 .get("field")
@@ -365,8 +365,7 @@ impl ProjectReader for GhProjectReader {
                         )?)
                     }
                     Some(
-                        "ProjectV2ItemFieldDateValue"
-                        | "ProjectV2ItemFieldNumberValue"
+                        "ProjectV2ItemFieldNumberValue"
                         | "ProjectV2ItemFieldUserValue"
                         | "ProjectV2ItemFieldRepositoryValue"
                         | "ProjectV2ItemFieldLabelValue"

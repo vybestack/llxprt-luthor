@@ -442,7 +442,7 @@ fn non_issue_item_aborts_discovery_even_when_an_issue_is_eligible() {
 #[test]
 fn unsupported_configured_marker_field_errors_but_unrelated_field_does_not() {
     let mut unsupported = item("I1", "N7", vec![]);
-    unsupported.unsupported_fields.push("Sprint".into());
+    unsupported.unsupported_fields.push("Due".into());
     let mut fake = Fake {
         pages: vec![Page {
             items: vec![unsupported],
@@ -457,8 +457,8 @@ fn unsupported_configured_marker_field_errors_but_unrelated_field_does_not() {
         &mut fake,
         &[source(
             Marker::ProjectField {
-                name: "Sprint".into(),
-                value: "Ready".into(),
+                name: "Due".into(),
+                value: "2026-01-01".into(),
             },
             None,
         )],
@@ -470,7 +470,7 @@ fn unsupported_configured_marker_field_errors_but_unrelated_field_does_not() {
         luthor::eligibility::EligibilityError::UnsupportedMarkerField {
             project_id: "P1".into(),
             item_id: "I1".into(),
-            name: "Sprint".into(),
+            name: "Due".into(),
         }
     );
 
