@@ -11,7 +11,7 @@ fn migrates_v1_database_atomically_and_preserves_records_and_capacity() {
     let version: i32 = connection
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 2);
+    assert_eq!(version, 3);
     for (table, expected) in [
         ("tasks", 1),
         ("attempts", 1),
@@ -182,4 +182,43 @@ fn duplicate_identity_does_not_leave_partial_task() {
         .unwrap();
     let _ = store.create_task("t2", "100", "ISSUE1", "org/tracker", 1, "rev");
     assert_eq!(store.task_count().unwrap(), 1);
+}
+
+#[test]
+fn reservation_history_allows_a_new_attempt_after_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = StateStore::open(dir.path(), 1).unwrap();
+    store
+        .create_task("task", "repo", "issue", "org/repo", 1, "rev")
+        .unwrap();
+    store
+        .record_evidence("task", Some("first"), "result", "prior evidence")
+        .unwrap();
+    store.reserve("task", "first").unwrap();
+    assert!(matches!(
+        store.reserve("task", "blocked"),
+        Err(StateError::Capacity { .. })
+    ));
+    assert_eq!(store.release_reservation("first").unwrap(), 1);
+    drop(store);
+
+    let mut store = StateStore::open(dir.path(), 1).unwrap();
+    store.reserve("task", "second").unwrap();
+    assert_eq!(store.reservation_count().unwrap(), 1);
+    assert_eq!(store.evidence_kinds("task").unwrap(), vec!["result"]);
+    let connection = Connection::open(dir.path().join("state.sqlite3")).unwrap();
+    let rows: Vec<(String, String)> = connection
+        .prepare("SELECT attempt_id,status FROM reservations ORDER BY attempt_id")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            ("first".into(), "released".into()),
+            ("second".into(), "reserved".into())
+        ]
+    );
 }
