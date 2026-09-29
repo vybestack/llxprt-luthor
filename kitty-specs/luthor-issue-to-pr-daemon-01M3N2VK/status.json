@@ -29,7 +29,8 @@
       "model": "__resolved_model_absent__",
       "notes": [
         "Ready for review",
-        "WP01 evidence recorded; live probe is explicitly held for WP05"
+        "WP01 evidence recorded; live probe is explicitly held for WP05",
+        "Review passed: documented 12-page Project membership and direct issue joins, distinct tracker/target and PR/error contracts, empty-remote options, and installed rs localhost initial/continuation/stop with same session root and cwd; live credentials, writes, dispatcher exclusivity and real provider remain gated"
       ],
       "provider": "__resolved_provider_absent__",
       "review": null,
