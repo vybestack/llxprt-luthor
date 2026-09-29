@@ -1197,7 +1197,10 @@ fn resume_environment_mismatch_child() {
         Err(SupervisorError::Conflict)
     ));
     assert_eq!(store.reservation_count().unwrap(), 0);
-    assert_eq!(store.latest_attempt(&task).unwrap().as_deref(), Some("attempt-real"));
+    assert_eq!(
+        store.latest_attempt(&task).unwrap().as_deref(),
+        Some("attempt-real")
+    );
     assert!(store.launch_intent(&attempt).unwrap().is_none());
 }
 
@@ -1207,7 +1210,10 @@ fn resume_rejects_different_root_environment_before_reservation_in_child_process
     let (_dir, config, store, initial) = paused_fixture();
     let root = config.state_root.clone();
     let home_b = tempfile::tempdir().unwrap();
-    assert_ne!(initial.session_environment.home, fs::canonicalize(home_b.path()).unwrap());
+    assert_ne!(
+        initial.session_environment.home,
+        fs::canonicalize(home_b.path()).unwrap()
+    );
     assert_eq!(store.reservation_count().unwrap(), 0);
     drop(store);
 
