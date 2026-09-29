@@ -330,6 +330,17 @@ impl PullRequestReader for FakePr {
         }
         Ok(vec![])
     }
+    fn repository_identity(&mut self, name: &str) -> Result<u64, LookupError> {
+        match name {
+            "org/code" => Ok(10),
+            "org/head" => Ok(20),
+            _ => Err(LookupError {
+                category: ErrorCategory::Malformed,
+                code: "unexpected-repository",
+                status: None,
+            }),
+        }
+    }
     fn detail(&mut self, _: &str, _: u64) -> Result<Value, LookupError> {
         Ok(
             json!({"id": 77, "number": 7, "state": "open", "html_url": "https://github.com/org/code/pull/7",

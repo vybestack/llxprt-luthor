@@ -666,6 +666,18 @@ mod tests {
             }
         }
 
+        fn repository_identity(&mut self, name: &str) -> Result<u64, LookupError> {
+            match name {
+                "org/code" => Ok(10),
+                "org/head" => Ok(20),
+                _ => Err(LookupError {
+                    category: ErrorCategory::Malformed,
+                    code: "unexpected-repository",
+                    status: None,
+                }),
+            }
+        }
+
         fn detail(&mut self, repository: &str, number: u64) -> Result<Value, LookupError> {
             assert_eq!(repository, "org/code");
             Ok(json!({

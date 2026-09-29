@@ -99,6 +99,17 @@ impl PullRequestReader for Fake {
         }
         Ok(self.pages.get(&page).cloned().unwrap_or_default())
     }
+    fn repository_identity(&mut self, name: &str) -> Result<u64, LookupError> {
+        match name {
+            "org/code" => Ok(10),
+            "fork/project" => Ok(20),
+            _ => Err(LookupError {
+                category: ErrorCategory::Malformed,
+                code: "unexpected-repository",
+                status: None,
+            }),
+        }
+    }
     fn detail(&mut self, _: &str, number: u64) -> Result<Value, LookupError> {
         self.details.get(&number).cloned().ok_or(LookupError {
             category: ErrorCategory::Malformed,
@@ -664,6 +675,17 @@ impl luthor::github::pull_request::PullRequestReader for EmptyPullRequests {
     }
     fn detail(&mut self, _: &str, _: u64) -> Result<Value, LookupError> {
         unreachable!()
+    }
+    fn repository_identity(&mut self, name: &str) -> Result<u64, LookupError> {
+        match name {
+            "org/code" => Ok(10),
+            "fork/project" => Ok(20),
+            _ => Err(LookupError {
+                category: ErrorCategory::Malformed,
+                code: "unexpected-repository",
+                status: None,
+            }),
+        }
     }
 }
 

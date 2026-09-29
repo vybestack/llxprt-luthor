@@ -864,6 +864,17 @@ impl PullRequestReader for ExitPr {
     fn detail(&mut self, _: &str, _: u64) -> Result<serde_json::Value, LookupError> {
         unreachable!()
     }
+    fn repository_identity(&mut self, name: &str) -> Result<u64, LookupError> {
+        match name {
+            "org/code" => Ok(10),
+            "org/head" => Ok(20),
+            _ => Err(LookupError {
+                category: ErrorCategory::Malformed,
+                code: "unexpected-repository",
+                status: None,
+            }),
+        }
+    }
 }
 
 #[cfg(unix)]
