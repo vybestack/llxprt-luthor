@@ -210,8 +210,39 @@ impl Config {
     }
 }
 
+fn is_sensitive_header(value: &str) -> bool {
+    let name = value
+        .split_once([':', '='])
+        .map(|(name, _)| name.trim().to_ascii_lowercase());
+    matches!(
+        name.as_deref(),
+        Some("authorization" | "x-api-key" | "cookie" | "proxy-authorization")
+    )
+}
+
+fn has_sensitive_marker(value: &str) -> bool {
+    let compact: String = value
+        .to_ascii_lowercase()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect();
+    [
+        "apikey",
+        "token",
+        "authkey",
+        "credential",
+        "password",
+        "secret",
+    ]
+    .iter()
+    .any(|needle| compact.contains(needle))
+}
+
 fn contains_credential(value: &str) -> bool {
     let lower = value.to_ascii_lowercase();
+    if is_sensitive_header(value) || lower.trim_start().starts_with("bearer ") {
+        return true;
+    }
     let compact: String = lower
         .chars()
         .filter(|c| c.is_ascii_alphanumeric())
@@ -225,7 +256,7 @@ fn contains_credential(value: &str) -> bool {
         "secret",
     ]
     .iter()
-    .any(|needle| compact.contains(needle));
+    .any(|needle| compact.contains(needle) || compact.starts_with(needle));
     sensitive && (value.starts_with('-') || value.contains('=') || lower.starts_with("bearer "))
 }
 
@@ -252,12 +283,26 @@ fn validate_command(command: &CommandTemplate) -> Result<(), ConfigError> {
             "command executable is required".into(),
         ));
     }
+    if has_sensitive_marker(&command.executable.to_string_lossy()) {
+        return Err(ConfigError::Invalid(
+            "credential-bearing command executable is forbidden".into(),
+        ));
+    }
+    let mut previous_option = "";
     for arg in &command.args {
-        if contains_credential(arg) {
+        if contains_credential(arg)
+            || (matches!(previous_option, "--header" | "-H")
+                && (is_sensitive_header(arg) || arg.to_ascii_lowercase().starts_with("bearer ")))
+        {
             return Err(ConfigError::Invalid(
                 "credential-bearing command argument is forbidden".into(),
             ));
         }
+        previous_option = if arg.starts_with('-') {
+            arg.as_str()
+        } else {
+            ""
+        };
         if arg.contains("${")
             || arg.contains("$(")
             || arg.contains('`')

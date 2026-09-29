@@ -63,6 +63,42 @@ fn rejects_embedded_credential_fields() {
 }
 
 #[test]
+fn rejects_credential_headers_and_executable_secrets_without_echoing_values() {
+    let safe = valid().replace(r#""--issue""#, r#""--session""#).replace(
+        r#""--session","{task.issue_number}""#,
+        r#""--session","session-1","--profile","default","Fix this task""#,
+    );
+    assert!(Config::from_json(&safe).is_ok());
+
+    for (json, marker) in [
+        (
+            valid()
+                .replace("\"--issue\"", "\"--header\"")
+                .replace("{task.issue_number}", "Authorization: Bearer SECRET_MARKER"),
+            "SECRET_MARKER",
+        ),
+        (
+            valid().replace("{task.issue_number}", "Authorization=Bearer SECRET_MARKER"),
+            "SECRET_MARKER",
+        ),
+        (
+            valid().replace("{task.issue_number}", "--api-key=SECRET_MARKER"),
+            "SECRET_MARKER",
+        ),
+        (
+            valid().replace("/bin/agent", "/bin/agent-SECRET_MARKER"),
+            "SECRET_MARKER",
+        ),
+    ] {
+        let error = Config::from_json(&json).unwrap_err().to_string();
+        assert!(
+            !error.contains(marker),
+            "error leaked credential marker: {error}"
+        );
+    }
+}
+
+#[test]
 fn rejects_secret_flags_bad_braces_and_accepts_benign_prompt() {
     for bad in [
         "--api-key=abc",
