@@ -1,7 +1,10 @@
 //! Launch planning and the Unix gated child runner.
 use crate::{
     config::{ConfigError, RenderedCommand, TaskValues},
-    state::{StateError, StateStore, WorktreeIdentity},
+    state::{
+        SelectionEvidence, StateError, StateStore, WorktreeIdentity, WorktreeIntent, WorktreeRecord,
+    },
+    worktree::{self, WorktreeError},
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -29,6 +32,8 @@ use thiserror::Error;
 pub enum SupervisorError {
     #[error(transparent)]
     State(#[from] StateError),
+    #[error(transparent)]
+    Worktree(#[from] WorktreeError),
     #[error(transparent)]
     Sql(#[from] rusqlite::Error),
     #[error(transparent)]
@@ -194,6 +199,7 @@ pub struct LaunchPlan {
     pub attempt_id: String,
     pub session_id: String,
     pub worktree: PathBuf,
+    pub expected_worktree: WorktreeIdentity,
     pub executable: PathBuf,
     pub args: Vec<String>,
     pub config_revision: String,
@@ -314,24 +320,7 @@ pub fn prepare_initial(
     attempt_id: &str,
 ) -> Result<LaunchPlan, SupervisorError> {
     let selection = store.claimed_worktree_context(task_id)?;
-    let record = store
-        .worktree_record(task_id)?
-        .ok_or(SupervisorError::Conflict)?;
-    let identity = record.identity.ok_or(SupervisorError::Conflict)?;
-    if identity.path != record.intent.path
-        || identity.repository != selection.candidate.mapping.code_repository
-        || identity.path != fs::canonicalize(&identity.path)?
-    {
-        return Err(SupervisorError::Conflict);
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        let metadata = fs::metadata(&identity.path)?;
-        if metadata.dev() != identity.device || metadata.ino() != identity.inode {
-            return Err(SupervisorError::Conflict);
-        }
-    }
+    let identity = worktree::verify_existing_worktree(store, task_id)?;
     let values = TaskValues {
         task_issue_number: selection.candidate.issue_number.to_string(),
         task_repository: selection.candidate.repository.clone(),
@@ -344,7 +333,7 @@ pub fn prepare_initial(
         executable,
         mut args,
     } = selection.effective_config.initial.render(&values)?;
-    let worktree = identity.path;
+    let worktree = identity.path.clone();
     let cwd = worktree.to_str().ok_or(SupervisorError::Conflict)?;
     if !requires_pair(&args, "--session", task_id)
         || !requires_pair(&args, "--cwd", cwd)
@@ -371,6 +360,7 @@ pub fn prepare_initial(
         attempt_id: attempt_id.to_owned(),
         session_id: task_id.to_owned(),
         worktree,
+        expected_worktree: identity,
         executable,
         args,
         config_revision: selection.config_revision,
@@ -396,33 +386,21 @@ pub fn prepare_resume(
     let selection = store
         .selection_evidence(task_id)?
         .ok_or(SupervisorError::Conflict)?;
-    let record = store
-        .worktree_record(task_id)?
-        .ok_or(SupervisorError::Conflict)?;
-    let identity = record.identity.ok_or(SupervisorError::Conflict)?;
+    let identity = worktree::verify_existing_worktree(store, task_id)?;
     if first.task_id != task_id
         || latest.task_id != task_id
         || first.session_id != task_id
         || latest.session_id != task_id
         || first.worktree != identity.path
         || latest.worktree != identity.path
+        || first.expected_worktree != identity
+        || latest.expected_worktree != identity
         || first.config_revision != selection.config_revision
         || latest.config_revision != selection.config_revision
-        || identity.path != record.intent.path
-        || identity.repository != selection.candidate.mapping.code_repository
-        || identity.path != fs::canonicalize(&identity.path)?
     {
         return Err(SupervisorError::Conflict);
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        let metadata = fs::metadata(&identity.path)?;
-        if metadata.dev() != identity.device || metadata.ino() != identity.inode {
-            return Err(SupervisorError::Conflict);
-        }
-    }
-    let worktree = identity.path;
+    let worktree = identity.path.clone();
     let cwd = worktree.to_str().ok_or(SupervisorError::Conflict)?;
     let values = TaskValues {
         task_issue_number: selection.candidate.issue_number.to_string(),
@@ -465,6 +443,7 @@ pub fn prepare_resume(
         attempt_id: attempt_id.to_owned(),
         session_id: task_id.to_owned(),
         worktree,
+        expected_worktree: identity,
         executable,
         args,
         config_revision: selection.config_revision,
@@ -899,6 +878,37 @@ where
 }
 
 #[cfg(unix)]
+fn verify_launch_worktree(
+    connection: &Connection,
+    plan: &LaunchPlan,
+) -> Result<(), SupervisorError> {
+    let (selection, intent, identity): (String, String, String) = connection.query_row(
+        "SELECT (SELECT payload FROM evidence WHERE task_id=?1 AND kind='selection'),
+                (SELECT detail FROM intents WHERE task_id=?1 AND kind='worktree_create'),
+                (SELECT payload FROM evidence WHERE task_id=?1 AND kind='worktree_created')",
+        [plan.task_id.as_str()],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    let selection: SelectionEvidence = serde_json::from_str(&selection)?;
+    let record = WorktreeRecord {
+        intent: serde_json::from_str::<WorktreeIntent>(&intent)?,
+        identity: Some(serde_json::from_str(&identity)?),
+    };
+    if selection.config_revision != plan.config_revision
+        || plan.worktree != plan.expected_worktree.path
+        || worktree::verify_record(
+            &record,
+            &selection.candidate.mapping,
+            &selection.effective_config.worktree_root,
+            &plan.task_id,
+        )? != plan.expected_worktree
+    {
+        return Err(SupervisorError::Conflict);
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
 pub fn worker_gate(plan_path: &Path) -> Result<(), SupervisorError> {
     let plan: LaunchPlan = serde_json::from_slice(&fs::read(plan_path)?)?;
     let mut byte = [0];
@@ -907,6 +917,28 @@ pub fn worker_gate(plan_path: &Path) -> Result<(), SupervisorError> {
         .map_err(|_| SupervisorError::GateClosed)?;
     if byte != *b"R" {
         return Err(SupervisorError::GateClosed);
+    }
+    worktree::verify_snapshot(&plan.expected_worktree)?;
+    let db = plan_path
+        .parent()
+        .ok_or(SupervisorError::Conflict)?
+        .parent()
+        .ok_or(SupervisorError::Conflict)?
+        .join("state.sqlite3");
+    if plan_path
+        .parent()
+        .is_some_and(|dir| dir.file_name() == Some(std::ffi::OsStr::new("attempts")))
+    {
+        let connection = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let persisted: String = connection.query_row(
+            "SELECT detail FROM intents WHERE task_id=?1 AND attempt_id=?2 AND kind='launch'",
+            params![plan.task_id, plan.attempt_id],
+            |row| row.get(0),
+        )?;
+        if serde_json::from_str::<LaunchPlan>(&persisted)? != plan {
+            return Err(SupervisorError::Conflict);
+        }
+        verify_launch_worktree(&connection, &plan)?;
     }
     let mut command = Command::new(&plan.executable);
     command.args(&plan.args).current_dir(&plan.worktree);
@@ -1107,6 +1139,7 @@ where
             if registered != 1 || released != 1 {
                 return Err(SupervisorError::Conflict);
             }
+            verify_launch_worktree(&connection, plan)?;
         }
         shim_gate.write_all(b"R")?;
         Ok(identity)
@@ -1584,7 +1617,11 @@ pub fn supervise(root: &Path, attempt: &str) -> Result<(), SupervisorError> {
             return Err(SupervisorError::Conflict);
         }
         let identity: WorktreeIdentity = serde_json::from_str(&worktree)?;
-        if identity.path != plan.worktree || fs::canonicalize(&plan.worktree)? != plan.worktree {
+        verify_launch_worktree(&connection, &plan)?;
+        if identity != plan.expected_worktree
+            || identity.path != plan.worktree
+            || fs::canonicalize(&plan.worktree)? != plan.worktree
+        {
             return Err(SupervisorError::Conflict);
         }
         #[cfg(unix)]

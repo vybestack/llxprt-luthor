@@ -40,6 +40,69 @@ pub enum WorktreeInspection {
     IdentityMismatch,
 }
 
+/// Read-only inspection of the persisted selection and Git worktree before reservation.
+pub fn verify_existing_worktree(
+    store: &StateStore,
+    task_id: &str,
+) -> Result<WorktreeIdentity, WorktreeError> {
+    let selection = store
+        .selection_evidence(task_id)?
+        .ok_or(WorktreeError::Conflict("missing selection"))?;
+    let record = store
+        .worktree_record(task_id)?
+        .ok_or(WorktreeError::Conflict("missing worktree intent"))?;
+    verify_record(
+        &record,
+        &selection.candidate.mapping,
+        &selection.effective_config.worktree_root,
+        task_id,
+    )
+}
+
+/// Recheck the same durable snapshot from a read-only supervisor connection.
+pub fn verify_record(
+    record: &WorktreeRecord,
+    mapping: &Mapping,
+    root: &Path,
+    task_id: &str,
+) -> Result<WorktreeIdentity, WorktreeError> {
+    let expected = record
+        .identity
+        .as_ref()
+        .ok_or(WorktreeError::Conflict("missing worktree identity"))?;
+    if record.intent.path != check_root(root)?.join(task_id)
+        || expected.path != record.intent.path
+        || expected.branch != record.intent.branch
+        || expected.base != record.intent.base
+        || expected.repository != record.intent.repository
+        || inspect_record(record, mapping)? != WorktreeInspection::IdentityMatches
+    {
+        return Err(WorktreeError::Conflict(
+            "persisted worktree identity differs from disk",
+        ));
+    }
+    Ok(expected.clone())
+}
+
+/// Check the live Git identity against an immutable launch snapshot without writing to Git.
+pub fn verify_snapshot(expected: &WorktreeIdentity) -> Result<(), WorktreeError> {
+    let actual = identity(
+        &expected.path,
+        &WorktreeIntent {
+            path: expected.path.clone(),
+            branch: expected.branch.clone(),
+            base: expected.base.clone(),
+            repository: expected.repository.clone(),
+        },
+        &expected.git_directory,
+        &expected.remote,
+    )?;
+    if actual != *expected {
+        return Err(WorktreeError::Conflict("live worktree identity changed"));
+    }
+    Ok(())
+}
+
 /// Read-only inspection never turns an unfinished intent into a verified worktree.
 pub fn inspect_record(
     record: &WorktreeRecord,

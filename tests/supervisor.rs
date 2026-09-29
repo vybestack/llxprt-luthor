@@ -1,12 +1,13 @@
 use luthor::{
     config::{CommandTemplate, Config, Mapping, Marker, Source},
     eligibility::Candidate,
-    state::{StateError, StateStore, WorktreeIdentity, WorktreeIntent},
+    state::{StateError, StateStore, WorktreeIdentity},
     supervisor::{
         Reconciliation, SupervisorError, execute_with_binary, prepare_initial, prepare_resume,
         reconcile_attempt, request_stop, run_gated_child_with_binary,
         run_gated_child_with_log_writers,
     },
+    worktree::ensure_worktree,
 };
 use std::{fs, io::Cursor, path::Path};
 #[cfg(unix)]
@@ -21,7 +22,7 @@ fn configured(root: &Path) -> (Config, Candidate) {
     let mapping = Mapping {
         tracker_repository: "org/tracker".into(),
         code_repository: "org/code".into(),
-        checkout: root.into(),
+        checkout: root.join("checkout"),
         base_branch: "main".into(),
         push_remote: "origin".into(),
         allowed_pr_head_repository: "org/code".into(),
@@ -88,7 +89,21 @@ fn configured(root: &Path) -> (Config, Candidate) {
     (config, candidate)
 }
 
-fn claimed(store: &mut StateStore, config: &Config, candidate: &Candidate, root: &Path) {
+fn git(dir: &Path, args: &[&str]) {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn claimed(store: &mut StateStore, config: &Config, candidate: &Candidate, _root: &Path) {
     store.create_task("task", candidate, "rev", config).unwrap();
     store
         .record_claim_intent("task", "operator", "org/tracker", 7)
@@ -97,31 +112,19 @@ fn claimed(store: &mut StateStore, config: &Config, candidate: &Candidate, root:
         .record_evidence("task", None, "claim_verified", "operator")
         .unwrap();
     store.set_task_phase("task", "claimed").unwrap();
-    let path = root.join("worktrees");
-    fs::create_dir_all(&path).unwrap();
-    let path = path.canonicalize().unwrap();
-    let intent = WorktreeIntent {
-        path: path.clone(),
-        branch: "luthor/task".into(),
-        base: "main".into(),
-        repository: "org/code".into(),
-    };
-    store.begin_worktree("task", &intent).unwrap();
-    #[cfg(unix)]
-    use std::os::unix::fs::MetadataExt;
-    let metadata = fs::metadata(&path).unwrap();
-    let identity = WorktreeIdentity {
-        path,
-        device: metadata.dev(),
-        inode: metadata.ino(),
-        branch: intent.branch.clone(),
-        base: intent.base.clone(),
-        head: "abc".into(),
-        repository: intent.repository.clone(),
-        git_directory: root.into(),
-        remote: "origin".into(),
-    };
-    store.finish_worktree("task", &identity).unwrap();
+    let checkout = &candidate.mapping.checkout;
+    fs::create_dir(checkout).unwrap();
+    git(checkout, &["init", "-b", "main"]);
+    git(checkout, &["config", "user.name", "Fixture"]);
+    git(checkout, &["config", "user.email", "fixture@example.org"]);
+    git(
+        checkout,
+        &["remote", "add", "origin", "git@github.com:org/code.git"],
+    );
+    fs::write(checkout.join("README"), "fixture").unwrap();
+    git(checkout, &["add", "README"]);
+    git(checkout, &["commit", "-m", "initial"]);
+    ensure_worktree(store, "task", &config.worktree_root, &candidate.mapping).unwrap();
 }
 
 #[test]
@@ -137,7 +140,7 @@ fn intent_and_slot_survive_restart_and_failed_dispatch_stays_held() {
     for required in [
         "Work only in code repository org/code",
         "mapped base branch main",
-        "PR head in repository org/code on branch luthor/task, pushed to remote origin",
+        "PR head in repository org/code on branch luthor/task, pushed to remote git@github.com:org/code.git",
         "Tracker-Issue: https://github.com/org/tracker/issues/7",
         "authorized PR author is operator",
         "already claimed; do not reassign it",
@@ -212,19 +215,70 @@ fn unverified_worktree_or_missing_session_cannot_reserve_or_launch() {
 }
 
 #[test]
+fn branch_switch_before_initial_does_not_reserve_or_launch() {
+    let dir = tempfile::tempdir().unwrap();
+    let (config, candidate) = configured(dir.path());
+    let mut store = StateStore::open(&config.state_root, 1).unwrap();
+    claimed(&mut store, &config, &candidate, dir.path());
+    git(
+        &config.worktree_root.join("task"),
+        &["switch", "-c", "foreign"],
+    );
+    assert!(prepare_initial(&mut store, "task", "attempt-1").is_err());
+    assert_eq!(store.reservation_count().unwrap(), 0);
+    assert!(store.launch_intent("attempt-1").unwrap().is_none());
+    assert!(
+        !config
+            .state_root
+            .join("attempts/attempt-1.child.json")
+            .exists()
+    );
+}
+
+#[test]
 fn changed_worktree_identity_blocks_before_reservation() {
     let dir = tempfile::tempdir().unwrap();
     let (config, candidate) = configured(dir.path());
     let mut store = StateStore::open(&config.state_root, 1).unwrap();
     claimed(&mut store, &config, &candidate, dir.path());
     fs::rename(
-        dir.path().join("worktrees"),
+        dir.path().join("worktrees/task"),
         dir.path().join("old-worktrees"),
     )
     .unwrap();
-    fs::create_dir(dir.path().join("worktrees")).unwrap();
+    fs::create_dir(dir.path().join("worktrees/task")).unwrap();
     assert!(prepare_initial(&mut store, "task", "attempt-1").is_err());
     assert_eq!(store.reservation_count().unwrap(), 0);
+}
+
+#[cfg(unix)]
+fn direct_snapshot(root: &Path) -> WorktreeIdentity {
+    use std::os::unix::fs::MetadataExt;
+    git(root, &["init", "-b", "main"]);
+    git(root, &["config", "user.name", "Fixture"]);
+    git(root, &["config", "user.email", "fixture@example.org"]);
+    fs::write(root.join("README"), "fixture").unwrap();
+    git(root, &["add", "README"]);
+    git(root, &["commit", "-m", "initial"]);
+    let head = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .unwrap()
+        .stdout;
+    let meta = fs::metadata(root).unwrap();
+    WorktreeIdentity {
+        path: fs::canonicalize(root).unwrap(),
+        device: meta.dev(),
+        inode: meta.ino(),
+        branch: "main".into(),
+        base: "main".into(),
+        head: String::from_utf8(head).unwrap().trim().into(),
+        repository: "org/code".into(),
+        git_directory: fs::canonicalize(root.join(".git")).unwrap(),
+        remote: "origin".into(),
+    }
 }
 
 #[cfg(unix)]
@@ -245,6 +299,7 @@ fn fake_plan(root: &Path, attempt: &str, code: i32) -> luthor::supervisor::Launc
         attempt_id: attempt.into(),
         session_id: "session".into(),
         worktree: root.into(),
+        expected_worktree: direct_snapshot(root),
         executable,
         args: vec![],
         config_revision: "rev".into(),
@@ -276,6 +331,7 @@ fn gate_eof_never_spawns_and_does_not_write_receipt() {
         attempt_id: "held".into(),
         session_id: "s".into(),
         worktree: dir.path().into(),
+        expected_worktree: direct_snapshot(dir.path()),
         executable,
         args: vec![],
         config_revision: "rev".into(),
@@ -314,7 +370,12 @@ fn released_gate_captures_durable_logs_and_receipts_real_exit() {
             Path::new(env!("CARGO_BIN_EXE_luthor")),
         )
         .unwrap();
-        assert_eq!(status.code(), Some(code));
+        assert_eq!(
+            status.code(),
+            Some(code),
+            "{}",
+            fs::read_to_string(dir.path().join(format!("{attempt}.stderr.log"))).unwrap()
+        );
         let stdout_path = dir.path().join(format!("{attempt}.stdout.log"));
         let stderr_path = dir.path().join(format!("{attempt}.stderr.log"));
         assert_eq!(
@@ -850,6 +911,84 @@ fn live_child_group_is_not_released() {
     assert_eq!(store.reservation_count().unwrap(), 1);
     live.kill().unwrap();
     live.wait().unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn branch_switch_after_ready_blocks_release_and_holds_slot() {
+    use std::{
+        io::Write,
+        os::unix::fs::{DirBuilderExt, OpenOptionsExt},
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (config, mut store, plan, marker) = prepared_fake_worker(&dir);
+    let attempts = config.state_root.join("attempts");
+    fs::DirBuilder::new().mode(0o700).create(&attempts).unwrap();
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(attempts.join("attempt-real.plan.json"))
+        .unwrap();
+    serde_json::to_writer(&mut file, &plan).unwrap();
+    file.sync_all().unwrap();
+    store
+        .begin_supervision(
+            "task",
+            "attempt-real",
+            &serde_json::to_string(&plan).unwrap(),
+        )
+        .unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_luthor"))
+        .args([
+            "__supervise",
+            config.state_root.to_str().unwrap(),
+            "attempt-real",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut ready = String::new();
+    std::io::BufReader::new(child.stdout.take().unwrap())
+        .read_line(&mut ready)
+        .unwrap();
+    assert_eq!(ready, "READY\n");
+    git(&plan.worktree, &["switch", "-c", "foreign"]);
+    let registered = fs::read_to_string(attempts.join("attempt-real.child.json")).unwrap();
+    store
+        .record_evidence(
+            "task",
+            Some("attempt-real"),
+            "child_registered",
+            registered.trim(),
+        )
+        .unwrap();
+    let (boot, start) = test_process_identity(child.id());
+    let process = serde_json::json!({"pid":child.id(),"boot_identity":boot,"start_identity":start});
+    store
+        .record_evidence(
+            "task",
+            Some("attempt-real"),
+            "supervisor_ready",
+            &process.to_string(),
+        )
+        .unwrap();
+    store
+        .record_intent(
+            "gate-attempt-real",
+            "task",
+            Some("attempt-real"),
+            "gate_release",
+            &process.to_string(),
+        )
+        .unwrap();
+    child.stdin.take().unwrap().write_all(b"R").unwrap();
+    assert!(!child.wait().unwrap().success());
+    assert!(!marker.exists());
+    assert!(!attempts.join("attempt-real.receipt.json").exists());
+    assert_eq!(store.reservation_count().unwrap(), 1);
 }
 
 #[cfg(unix)]
@@ -1406,6 +1545,26 @@ fn resume_rejects_different_root_environment_before_reservation_in_child_process
         .status()
         .unwrap();
     assert!(status.success());
+}
+
+#[cfg(unix)]
+#[test]
+fn branch_switch_before_resume_does_not_reserve_or_launch() {
+    let (_dir, config, mut store, initial) = paused_fixture();
+    git(&initial.worktree, &["switch", "-c", "foreign"]);
+    assert!(prepare_resume(&mut store, "task", "attempt-next").is_err());
+    assert_eq!(store.reservation_count().unwrap(), 0);
+    assert_eq!(
+        store.latest_attempt("task").unwrap().as_deref(),
+        Some("attempt-real")
+    );
+    assert!(store.launch_intent("attempt-next").unwrap().is_none());
+    assert!(
+        !config
+            .state_root
+            .join("attempts/attempt-next.child.json")
+            .exists()
+    );
 }
 
 #[cfg(unix)]
