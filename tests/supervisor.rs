@@ -7,7 +7,9 @@ use luthor::{
         project::{Issue, Page, ProjectItem, ProjectReadError, ProjectReader},
         pull_request::{ErrorCategory, LookupError, PullRequestReader},
     },
-    state::{ExitPrEvidence, PausePrStatus, StateError, StateStore, WorktreeIdentity},
+    state::{
+        ExitPrEvidence, PausePrEvidence, PausePrStatus, StateError, StateStore, WorktreeIdentity,
+    },
     supervisor::{
         Reconciliation, SupervisorError, execute_with_binary, prepare_initial, prepare_resume,
         reconcile_attempt, request_stop, run_gated_child_with_binary,
@@ -842,6 +844,16 @@ fn exit_proof(config: &Config) -> ExitPrEvidence {
 }
 
 #[cfg(unix)]
+fn pause_proof(config: &Config) -> PausePrEvidence {
+    let connection = rusqlite::Connection::open(config.state_root.join("state.sqlite3")).unwrap();
+    let payload: String = connection.query_row(
+        "SELECT payload FROM evidence WHERE task_id='task' AND attempt_id='attempt-real' AND kind='pause_pr_lookup'",
+        [], |row| row.get(0),
+    ).unwrap();
+    serde_json::from_str(&payload).unwrap()
+}
+
+#[cfg(unix)]
 #[derive(Default)]
 struct ExitPr {
     reads: usize,
@@ -950,6 +962,69 @@ fn natural_exit_matching_pr_is_proved_and_persisted() {
         "exit_code=Some(7);signal=None"
     );
     assert_eq!(prs.reads, 1);
+}
+#[cfg(unix)]
+#[test]
+fn stopped_exit_matching_pr_is_proved_and_persisted() {
+    let (_dir, config, mut store) = dispatched_fixture(7);
+    store.record_stop_intent("task", "attempt-real").unwrap();
+    edit_receipt(&config, |receipt| {
+        receipt.stop_signals = vec![libc::SIGTERM]
+    });
+    let selection = store.selection_evidence("task").unwrap().unwrap();
+    let identity = store
+        .worktree_record("task")
+        .unwrap()
+        .unwrap()
+        .identity
+        .unwrap();
+    let mut prs = ExitPr {
+        matching: Some((selection.candidate.issue_url, identity.branch)),
+        ..ExitPr::default()
+    };
+    let result =
+        luthor::coordinator::reconcile_with_pr(&mut store, "task", "attempt-real", &mut prs)
+            .unwrap();
+    assert_eq!(
+        result,
+        Reconciliation::Completed {
+            exit_code: Some(7),
+            signal: None
+        }
+    );
+    let receipt: luthor::supervisor::ExitReceipt =
+        serde_json::from_slice(&fs::read(receipt_path(&config)).unwrap()).unwrap();
+    assert_eq!(receipt.stop_signals, vec![libc::SIGTERM]);
+    assert_eq!(
+        store.task_phase("task").unwrap().as_deref(),
+        Some("pr_complete")
+    );
+    assert_eq!(pause_proof(&config).status, PausePrStatus::Open);
+    let output = luthor::cli::execute(&config.state_root, &["show".into(), "task".into()]).unwrap();
+    let shown: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(
+        shown["attempts"][0]["outcome"],
+        "exit_code=Some(7);signal=None"
+    );
+    assert_eq!(prs.reads, 1);
+    drop(store);
+
+    let mut reopened = StateStore::open(&config.state_root, config.capacity).unwrap();
+    assert_eq!(
+        reopened.task_phase("task").unwrap().as_deref(),
+        Some("pr_complete")
+    );
+    let output = luthor::cli::execute(&config.state_root, &["show".into(), "task".into()]).unwrap();
+    let shown: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(
+        shown["attempts"][0]["outcome"],
+        "exit_code=Some(7);signal=None"
+    );
+    assert_eq!(pause_proof(&config).status, PausePrStatus::Open);
+    assert!(matches!(
+        prepare_resume(&mut reopened, "task", "attempt-next"),
+        Err(SupervisorError::State(StateError::LaunchBlocked))
+    ));
 }
 
 #[cfg(unix)]
