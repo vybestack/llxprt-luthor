@@ -848,26 +848,23 @@ pub fn reconcile_attempt(
     {
         return Ok(held("missing, unsafe or incomplete logs"));
     }
-    let mut supervisor = None;
-    for (evidence, kind) in [
-        (true, "supervisor_ready"),
-        (false, "gate_release"),
-        (true, "gate_sent"),
-    ] {
-        let payload = if evidence {
-            store.evidence_payload(task_id, Some(attempt_id), kind)?
-        } else {
-            store.intent_payload(task_id, attempt_id, kind)?
-        };
-        let Some(process) = payload.as_deref().and_then(recorded_process) else {
-            return Ok(held("missing or invalid supervisor identity"));
-        };
-        if supervisor.as_ref().is_some_and(|prior| prior != &process) {
-            return Ok(held("supervisor identity contradiction"));
-        }
-        supervisor = Some(process);
+    let Some(release) = store.intent_payload(task_id, attempt_id, "gate_release")? else {
+        return Ok(held("missing gate release decision"));
+    };
+    let Some(ready) = store.evidence_payload(task_id, Some(attempt_id), "supervisor_ready")? else {
+        return Ok(held("missing or invalid supervisor identity"));
+    };
+    let Some(supervisor) = recorded_process(&ready) else {
+        return Ok(held("missing or invalid supervisor identity"));
+    };
+    if recorded_process(&release).as_ref() != Some(&supervisor) {
+        return Ok(held("supervisor identity contradiction"));
     }
-    let supervisor = supervisor.expect("three verified process identities");
+    if let Some(sent) = store.evidence_payload(task_id, Some(attempt_id), "gate_sent")?
+        && recorded_process(&sent).as_ref() != Some(&supervisor)
+    {
+        return Ok(held("supervisor identity contradiction"));
+    }
     if supervisor.pid == receipt.child_pid {
         return Ok(held("supervisor and child identity contradiction"));
     }

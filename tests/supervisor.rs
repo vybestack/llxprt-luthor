@@ -630,6 +630,40 @@ fn reused_child_pid_with_contradictory_start_identity_keeps_slot() {
 
 #[cfg(unix)]
 #[test]
+fn gate_release_decision_reconciles_without_gate_sent_evidence() {
+    let (_dir, config, mut store) = dispatched_fixture(0);
+    let db = rusqlite::Connection::open(config.state_root.join("state.sqlite3")).unwrap();
+    db.execute(
+        "DELETE FROM evidence WHERE task_id='task' AND attempt_id='attempt-real' AND kind='gate_sent'",
+        [],
+    )
+    .unwrap();
+    let expected = Reconciliation::Completed {
+        exit_code: Some(0),
+        signal: None,
+    };
+    assert_eq!(
+        reconcile_attempt(&mut store, "task", "attempt-real").unwrap(),
+        expected
+    );
+    assert_eq!(store.reservation_count().unwrap(), 0);
+    assert_eq!(
+        reconcile_attempt(&mut store, "task", "attempt-real").unwrap(),
+        expected
+    );
+    assert_eq!(
+        store
+            .evidence_kinds("task")
+            .unwrap()
+            .iter()
+            .filter(|kind| *kind == "attempt_exit")
+            .count(),
+        1
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn live_child_group_is_not_released() {
     use std::os::unix::process::CommandExt;
     let (_dir, config, mut store) = dispatched_fixture(0);

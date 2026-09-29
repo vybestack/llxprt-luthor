@@ -980,7 +980,9 @@ impl StateStore {
                AND (SELECT COUNT(*) FROM intents WHERE attempt_id=?1 AND task_id=?2 AND kind='supervisor_dispatch')=1
                AND (SELECT COUNT(*) FROM intents WHERE attempt_id=?1 AND task_id=?2 AND kind='gate_release')=1
                AND (SELECT COUNT(*) FROM evidence WHERE attempt_id=?1 AND task_id=?2 AND kind='supervisor_ready')=1
-               AND (SELECT COUNT(*) FROM evidence WHERE attempt_id=?1 AND task_id=?2 AND kind='gate_sent')=1
+               AND (SELECT COUNT(*) FROM evidence WHERE attempt_id=?1 AND task_id=?2 AND kind='gate_sent')<=1
+               AND (SELECT COUNT(*) FROM intents WHERE attempt_id=?1 AND task_id=?2 AND kind='launch')+
+                   (SELECT COUNT(*) FROM evidence WHERE attempt_id=?1 AND task_id=?2 AND kind='attempt_exit')=1
                AND (SELECT COUNT(*) FROM evidence WHERE task_id=?2 AND kind='claim_verified')=1
                AND (SELECT COUNT(*) FROM evidence WHERE task_id=?2 AND kind='worktree_created')=1
                AND (SELECT COUNT(*) FROM evidence WHERE attempt_id=?1 AND kind='attempt_exit')=0",
