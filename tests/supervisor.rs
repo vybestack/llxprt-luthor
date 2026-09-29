@@ -358,8 +358,22 @@ fn prepared_fake_worker(
     luthor::supervisor::LaunchPlan,
     std::path::PathBuf,
 ) {
+    prepared_fake_worker_with_resume_prompt(dir, "Continue {task.issue_url} for {attempt.id}")
+}
+
+#[cfg(unix)]
+fn prepared_fake_worker_with_resume_prompt(
+    dir: &tempfile::TempDir,
+    resume_prompt: &str,
+) -> (
+    Config,
+    StateStore,
+    luthor::supervisor::LaunchPlan,
+    std::path::PathBuf,
+) {
     use std::os::unix::fs::PermissionsExt;
     let (mut config, candidate) = configured(dir.path());
+    config.resume.args[5] = resume_prompt.into();
     let marker = dir.path().join("worker-started");
     let worker = dir.path().join("worker");
     fs::write(&worker, format!("#!/bin/sh\necho started > '{}'\nprintf 'worker stdout\\n'\nprintf 'worker stderr\\n' >&2\n", marker.display())).unwrap();
@@ -1170,7 +1184,29 @@ fn paused_fixture() -> (
     StateStore,
     luthor::supervisor::LaunchPlan,
 ) {
-    let (dir, config, mut store) = dispatched_fixture(0);
+    paused_fixture_with_resume_prompt("Continue {task.issue_url} for {attempt.id}")
+}
+
+#[cfg(unix)]
+fn paused_fixture_with_resume_prompt(
+    resume_prompt: &str,
+) -> (
+    tempfile::TempDir,
+    Config,
+    StateStore,
+    luthor::supervisor::LaunchPlan,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let (config, mut store, plan, _) = prepared_fake_worker_with_resume_prompt(&dir, resume_prompt);
+    execute_with_binary(&mut store, &plan, Path::new(env!("CARGO_BIN_EXE_luthor"))).unwrap();
+    let receipt = config.state_root.join("attempts/attempt-real.receipt.json");
+    for _ in 0..200 {
+        if receipt.exists() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(receipt.exists());
     let initial =
         serde_json::from_str(&store.launch_intent("attempt-real").unwrap().unwrap()).unwrap();
     store.record_stop_intent("task", "attempt-real").unwrap();
@@ -1305,6 +1341,36 @@ fn paused_attempt_prepares_distinct_continuation_after_reopen() {
         store.launch_intent("attempt-next").unwrap().unwrap(),
         serde_json::to_string(&plan).unwrap()
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn minimal_resume_template_gets_interrupted_worktree_inspection_guidance() {
+    let (_dir, config, mut store, initial) =
+        paused_fixture_with_resume_prompt("Continue {attempt.id}");
+    let plan = prepare_resume(&mut store, "task", "attempt-next").unwrap();
+    let rendered = plan
+        .args
+        .windows(2)
+        .find(|pair| pair[0] == "--prompt")
+        .unwrap()[1]
+        .as_str();
+    assert!(rendered.starts_with("Continue attempt-next"));
+    assert!(
+        rendered
+            .contains("inspect the files left in the worktree by the interrupted or canceled turn")
+    );
+    assert!(rendered.contains("Do not assume its transcript was restored"));
+    assert!(rendered.contains("Tracker-Issue: https://github.com/org/tracker/issues/7"));
+    assert!(rendered.contains("already claimed; do not reassign it"));
+    assert_eq!(plan.attempt_id, "attempt-next");
+    assert_eq!(plan.session_id, initial.session_id);
+    assert_eq!(plan.session_id, "task");
+    assert_eq!(
+        store.latest_attempt("task").unwrap().as_deref(),
+        Some("attempt-next")
+    );
+    assert!(config.state_root.exists());
 }
 
 #[cfg(unix)]

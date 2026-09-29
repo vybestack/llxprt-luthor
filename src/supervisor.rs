@@ -290,6 +290,21 @@ fn enforce_prompt(
     Ok(())
 }
 
+fn enforce_resume_inspection(args: &mut [String]) -> Result<(), SupervisorError> {
+    let indexes: Vec<usize> = args
+        .windows(2)
+        .enumerate()
+        .filter_map(|(index, pair)| matches!(pair[0].as_str(), "-p" | "--prompt").then_some(index))
+        .collect();
+    if indexes.len() != 1 {
+        return Err(SupervisorError::Conflict);
+    }
+    args[indexes[0] + 1].push_str(
+        "\n\nBefore continuing, inspect the files left in the worktree by the interrupted or canceled turn. Do not assume its transcript was restored; use the files as the source of truth for what remains to be done.",
+    );
+    Ok(())
+}
+
 /// Renders one initial attempt; the caller remains responsible for fresh claim
 /// and absent-PR evidence. This function deliberately cannot start a worker.
 pub fn prepare_initial(
@@ -443,6 +458,7 @@ pub fn prepare_resume(
             author: &selection.effective_config.assignment_login,
         },
     )?;
+    enforce_resume_inspection(&mut args)?;
     let plan = LaunchPlan {
         task_id: task_id.to_owned(),
         attempt_id: attempt_id.to_owned(),
