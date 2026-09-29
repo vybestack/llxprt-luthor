@@ -50,7 +50,7 @@
     },
     "WP02": {
       "actor": "user",
-      "agent": "deepthinker",
+      "agent": null,
       "agent_profile": "__resolved_profile_absent__",
       "agent_profile_version": "__resolved_profile_version_absent__",
       "force_count": 3,
@@ -67,12 +67,12 @@
         "verdict": "changes_requested"
       },
       "role": "reviewer",
-      "shell_pid": 44775,
-      "shell_pid_created_at": "1790667661.612608",
+      "shell_pid": null,
+      "shell_pid_created_at": null,
       "subtasks": {
-        "T003": "done",
-        "T004": "done",
-        "T005": "done"
+        "T003": "planned",
+        "T004": "planned",
+        "T005": "planned"
       }
     },
     "WP03": {
