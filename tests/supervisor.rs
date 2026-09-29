@@ -2103,6 +2103,47 @@ fn live_tracked_descendant_prevents_missing_receipt_absence_reconciliation() {
 
 #[cfg(unix)]
 #[test]
+fn reaped_supervisor_with_removed_receipt_proves_recovery_quiescence() {
+    let (_dir, config, store) = dispatched_fixture(7);
+    let payloads = store
+        .evidence_payloads("task", "attempt-real", "supervisor_ready")
+        .unwrap();
+    assert_eq!(payloads.len(), 1);
+    let identity: serde_json::Value = serde_json::from_str(&payloads[0]).unwrap();
+    let supervisor_pid = identity["pid"].as_u64().expect("supervisor PID");
+    let supervisor_pid = libc::pid_t::try_from(supervisor_pid).unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut status = 0;
+    loop {
+        let result = unsafe { libc::waitpid(supervisor_pid, &mut status, libc::WNOHANG) };
+        if result == supervisor_pid {
+            break;
+        }
+        let error = std::io::Error::last_os_error();
+        assert_eq!(result, 0, "waitpid failed: {error}");
+        assert!(Instant::now() < deadline, "supervisor was not reaped");
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(libc::WIFEXITED(status), "supervisor did not exit normally");
+    fs::remove_file(receipt_path(&config)).unwrap();
+
+    assert_eq!(
+        inspect_recovery_quiescence(&store, "task", "attempt-real").unwrap(),
+        RecoveryInspection::Quiescent
+    );
+    assert_eq!(store.reservation_count().unwrap(), 1);
+    assert!(
+        !store
+            .evidence_kinds("task")
+            .unwrap()
+            .iter()
+            .any(|kind| kind == "attempt_exit")
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn absent_and_corrupt_receipt_keep_reservation() {
     let (_dir, config, mut store) = dispatched_fixture(0);
     let receipt = receipt_path(&config);
