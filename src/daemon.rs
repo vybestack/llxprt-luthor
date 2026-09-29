@@ -189,6 +189,7 @@ fn cycle(config: &Config, options: &Options) -> Result<(), Error> {
         .iter()
         .map(|a| {
             let status = match a.review {
+                AttemptReview::Running => "running",
                 AttemptReview::Completed(_) => "completed",
                 AttemptReview::Held(_) => "held",
                 AttemptReview::Error(_) => "error",

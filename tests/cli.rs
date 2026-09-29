@@ -484,9 +484,18 @@ mod resume_cli {
         config::{CommandTemplate, Config, Mapping, Marker, Source},
         eligibility::Candidate,
         state::StateStore,
+        supervisor::{execute_with_binary, prepare_initial, request_stop},
+        worktree::ensure_worktree,
     };
-    use std::{fs, os::unix::fs::PermissionsExt, path::Path, process::Command};
-    use tempfile::{TempDir, tempdir_in};
+    use std::{
+        fs,
+        os::unix::fs::PermissionsExt,
+        path::Path,
+        process::Command,
+        thread,
+        time::{Duration, Instant},
+    };
+    use tempfile::{TempDir, tempdir};
 
     struct Harness {
         _dir: TempDir,
@@ -498,9 +507,7 @@ mod resume_cli {
 
     impl Harness {
         fn new() -> Self {
-            let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tmp");
-            fs::create_dir_all(&root).unwrap();
-            let dir = tempdir_in(root).unwrap();
+            let dir = tempdir().unwrap();
             let gh = dir.path().join("gh");
             let log = dir.path().join("invocations.log");
             fs::write(
@@ -564,6 +571,11 @@ mod resume_cli {
                 .unwrap()
         }
         fn seed_held_task(&self) {
+            self.seed_task();
+            let mut store = StateStore::open(&self.state, 2).unwrap();
+            store.hold_task("task", "fixture paused").unwrap();
+        }
+        fn seed_task(&self) {
             let config = Config::from_json(&fs::read_to_string(&self.config).unwrap()).unwrap();
             let source = config.sources[0].clone();
             let mapping = config.mappings[0].clone();
@@ -590,7 +602,104 @@ mod resume_cli {
             store
                 .create_task("task", &candidate, "rev", &config)
                 .unwrap();
-            store.hold_task("task", "fixture paused").unwrap();
+        }
+        fn seed_running_task(&self) {
+            let worker = self._dir.path().join("cooperative-worker");
+            fs::write(
+                &worker,
+                format!(
+                    "#!/bin/sh\nprintf 'started\\n' >> '{}'\nexec /bin/sleep 120\n",
+                    self._dir.path().join("a-starts.log").display()
+                ),
+            )
+            .unwrap();
+            fs::set_permissions(&worker, fs::Permissions::from_mode(0o755)).unwrap();
+            let mut config = Config::from_json(&fs::read_to_string(&self.config).unwrap()).unwrap();
+            config.initial.executable = worker;
+            config.initial.args = vec![
+                "--session".into(),
+                "{task.id}".into(),
+                "--cwd".into(),
+                "{worktree}".into(),
+                "-p".into(),
+                "Work on {task.issue_url}".into(),
+            ];
+            fs::write(&self.config, serde_json::to_vec(&config).unwrap()).unwrap();
+            self.seed_task();
+            let mut store = StateStore::open(&self.state, 2).unwrap();
+            let candidate = store.selection_evidence("task").unwrap().unwrap().candidate;
+            store
+                .record_claim_intent("task", "agent", "org/tracker", 7)
+                .unwrap();
+            store
+                .record_evidence("task", None, "claim_verified", "agent")
+                .unwrap();
+            store.set_task_phase("task", "claimed").unwrap();
+            let checkout = &candidate.mapping.checkout;
+            fs::create_dir(checkout).unwrap();
+            for args in [
+                vec!["init", "-b", "main"],
+                vec!["config", "user.name", "Fixture"],
+                vec!["config", "user.email", "fixture@example.org"],
+                vec!["remote", "add", "origin", "git@github.com:org/code.git"],
+            ] {
+                assert!(
+                    Command::new("git")
+                        .arg("-C")
+                        .arg(checkout)
+                        .args(args)
+                        .status()
+                        .unwrap()
+                        .success()
+                );
+            }
+            fs::write(checkout.join("README"), "fixture").unwrap();
+            for args in [vec!["add", "README"], vec!["commit", "-m", "initial"]] {
+                assert!(
+                    Command::new("git")
+                        .arg("-C")
+                        .arg(checkout)
+                        .args(args)
+                        .status()
+                        .unwrap()
+                        .success()
+                );
+            }
+            ensure_worktree(
+                &mut store,
+                "task",
+                &config.worktree_root,
+                &candidate.mapping,
+            )
+            .unwrap();
+            let plan = prepare_initial(&mut store, "task", "running-attempt").unwrap();
+            execute_with_binary(&mut store, &plan, Path::new(env!("CARGO_BIN_EXE_luthor")))
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "{error}: {}",
+                        fs::read_to_string(
+                            self.state.join("attempts/running-attempt.supervisor.log")
+                        )
+                        .unwrap_or_default()
+                    )
+                });
+            assert_eq!(store.reservation_count().unwrap(), 1);
+            let marker = self._dir.path().join("a-starts.log");
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !marker.exists() && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(20));
+            }
+            assert!(marker.exists(), "worker A did not start");
+        }
+        fn stop_running_task(&self) {
+            let mut store = StateStore::open(&self.state, 2).unwrap();
+            request_stop(&mut store, "task", "running-attempt").unwrap();
+            let receipt = self.state.join("attempts/running-attempt.receipt.json");
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !receipt.exists() && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(20));
+            }
+            assert!(receipt.exists(), "cooperative child did not exit");
         }
         fn dispatch_gh(&self) -> (std::path::PathBuf, std::path::PathBuf) {
             let assignments = self._dir.path().join("assignments.log");
@@ -703,6 +812,77 @@ esac
         assert!(!h.log.exists());
         assert_eq!(fs::read_to_string(assignments).unwrap(), "");
         assert!(!worker.exists());
+    }
+
+    #[test]
+    fn dispatch_execute_admits_second_issue_beside_verified_live_worker() {
+        let h = Harness::new();
+        h.seed_running_task();
+        let (assignments, worker) = h.dispatch_gh();
+        let output = h.run(&[
+            "dispatch",
+            "--execute",
+            "--config",
+            h.config.to_str().unwrap(),
+            "--repository",
+            "org/tracker",
+            "--issue",
+            "8",
+            "--config-revision",
+            "rev",
+        ]);
+        assert!(!output.status.success());
+        assert!(
+            stderr(&output).contains("claim failed"),
+            "{}",
+            stderr(&output)
+        );
+        assert!(!stderr(&output).contains("startup reconciliation"));
+        let calls = fs::read_to_string(&h.log).unwrap();
+        assert!(calls.contains("api graphql"), "{calls}");
+        assert!(calls.contains("api user --jq .login"), "{calls}");
+        assert_eq!(fs::read_to_string(assignments).unwrap(), "");
+        assert!(!worker.exists());
+        let store = StateStore::open(&h.state, 2).unwrap();
+        assert_eq!(
+            store.latest_attempt("task").unwrap().as_deref(),
+            Some("running-attempt")
+        );
+        assert_eq!(store.reservation_count().unwrap(), 1);
+        drop(store);
+        assert_eq!(
+            fs::read_to_string(h._dir.path().join("a-starts.log")).unwrap(),
+            "started\n"
+        );
+        h.stop_running_task();
+    }
+
+    #[test]
+    fn dispatch_execute_holds_live_child_without_gate_send_proof() {
+        let h = Harness::new();
+        h.seed_running_task();
+        let db = rusqlite::Connection::open(h.state.join("state.sqlite3")).unwrap();
+        db.execute("DELETE FROM evidence WHERE task_id='task' AND attempt_id='running-attempt' AND kind='gate_sent'", []).unwrap();
+        drop(db);
+        let (assignments, worker) = h.dispatch_gh();
+        let output = h.run(&[
+            "dispatch",
+            "--execute",
+            "--config",
+            h.config.to_str().unwrap(),
+            "--repository",
+            "org/tracker",
+            "--issue",
+            "8",
+            "--config-revision",
+            "rev",
+        ]);
+        assert!(!output.status.success());
+        assert!(stderr(&output).contains("startup reconciliation"));
+        assert!(!h.log.exists());
+        assert_eq!(fs::read_to_string(assignments).unwrap(), "");
+        assert!(!worker.exists());
+        h.stop_running_task();
     }
 
     #[test]

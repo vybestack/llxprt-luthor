@@ -20,6 +20,7 @@ use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AttemptReview {
+    Running,
     Completed(supervisor::Reconciliation),
     Held(supervisor::Reconciliation),
     Error(String),
@@ -206,6 +207,7 @@ pub fn startup_reconcile_all<Q: PullRequestReader>(
     let mut report = StartupReport::default();
     for (task_id, attempt_id) in store.pending_attempts()? {
         let review = match reconcile_with_pr(store, &task_id, &attempt_id, prs) {
+            Ok(supervisor::Reconciliation::Running) => AttemptReview::Running,
             Ok(result @ supervisor::Reconciliation::Completed { .. }) => {
                 AttemptReview::Completed(result)
             }

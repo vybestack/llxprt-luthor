@@ -1451,7 +1451,7 @@ fn registered_shim_stays_gated_and_survives_supervisor_crash_after_release() {
     assert!(kinds.contains(&"independent_group_absent".into()));
     assert!(matches!(
         reconcile_attempt(&mut store, "task", "attempt-real").unwrap(),
-        Reconciliation::Held { reason } if reason == "missing or invalid receipt"
+        Reconciliation::Held { reason } if reason == "live worker identity or reservation unverified"
     ));
     assert_eq!(store.reservation_count().unwrap(), 1);
     drop(store);

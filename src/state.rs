@@ -498,6 +498,23 @@ impl StateStore {
             .collect::<Result<_, _>>()?)
     }
 
+    /// A live worker may be admitted alongside another only while its exact
+    /// attempt still owns a reservation and has no recorded exit.
+    pub(crate) fn active_attempt_reservation(
+        &self,
+        task_id: &str,
+        attempt_id: &str,
+    ) -> Result<bool, StateError> {
+        Ok(self.connection.query_row(
+            "SELECT COUNT(*) FROM attempts a JOIN reservations r ON r.attempt_id=a.id
+             JOIN tasks t ON t.id=a.task_id WHERE a.id=?1 AND a.task_id=?2
+             AND a.lifecycle='launch_intended' AND a.outcome IS NULL
+             AND r.task_id=?2 AND r.status='reserved' AND t.state='held'
+             AND NOT EXISTS (SELECT 1 FROM evidence e WHERE e.attempt_id=a.id AND e.kind='attempt_exit')",
+            params![attempt_id, task_id], |row| row.get::<_, i64>(0)
+        )? == 1)
+    }
+
     /// Persisted source operations without their proof block new selections.
     /// Also include preparing tasks where the process died before the first intent.
     pub fn unresolved_sources(&self) -> Result<Vec<(String, String)>, StateError> {

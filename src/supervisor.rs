@@ -208,6 +208,7 @@ pub struct LaunchPlan {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reconciliation {
+    Running,
     Completed {
         exit_code: Option<i32>,
         signal: Option<i32>,
@@ -1416,10 +1417,49 @@ pub fn reconcile_attempt(
     {
         return Ok(held("log drain failed"));
     }
-    let receipt: ExitReceipt =
-        match private_bytes(&attempts.join(format!("{attempt_id}.receipt.json")))
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+    let Some(release) = store.intent_payload(task_id, attempt_id, "gate_release")? else {
+        return Ok(held("missing gate release decision"));
+    };
+    let Some(ready) = store.evidence_payload(task_id, Some(attempt_id), "supervisor_ready")? else {
+        return Ok(held("missing or invalid supervisor identity"));
+    };
+    let Some(supervisor) = recorded_process(&ready) else {
+        return Ok(held("missing or invalid supervisor identity"));
+    };
+    if recorded_process(&release).as_ref() != Some(&supervisor) {
+        return Ok(held("supervisor identity contradiction"));
+    }
+    let sent = store.evidence_payload(task_id, Some(attempt_id), "gate_sent")?;
+    if sent.is_some() && sent.as_deref().and_then(recorded_process).as_ref() != Some(&supervisor) {
+        return Ok(held("supervisor identity contradiction"));
+    }
+    if supervisor.pid == child_file.pid {
+        return Ok(held("supervisor and child identity contradiction"));
+    }
+    let receipt_path = attempts.join(format!("{attempt_id}.receipt.json"));
+    if !receipt_path.exists() {
+        if sent.is_none()
+            || !store.active_attempt_reservation(task_id, attempt_id)?
+            || store.stop_intent(task_id, attempt_id)?.is_some()
+            || attempts
+                .join(format!("{attempt_id}.supervisor-error.json"))
+                .exists()
+            || !matching_child(&child_file)
+            || zombie(child_file.pid)
+            || identity(supervisor.pid).ok().as_ref()
+                != Some(&(
+                    supervisor.boot_identity.clone(),
+                    supervisor.start_identity.clone(),
+                ))
+            || zombie(supervisor.pid)
+            || unsafe { libc::getpgid(supervisor.pid as i32) } != supervisor.pid as i32
         {
+            return Ok(held("live worker identity or reservation unverified"));
+        }
+        return Ok(Reconciliation::Running);
+    }
+    let receipt: ExitReceipt =
+        match private_bytes(&receipt_path).and_then(|bytes| serde_json::from_slice(&bytes).ok()) {
             Some(receipt) => receipt,
             None => return Ok(held("missing or invalid receipt")),
         };
@@ -1443,26 +1483,6 @@ pub fn reconcile_attempt(
         || private_log_size(&stderr) != Some(receipt.stderr_bytes)
     {
         return Ok(held("missing, unsafe or incomplete logs"));
-    }
-    let Some(release) = store.intent_payload(task_id, attempt_id, "gate_release")? else {
-        return Ok(held("missing gate release decision"));
-    };
-    let Some(ready) = store.evidence_payload(task_id, Some(attempt_id), "supervisor_ready")? else {
-        return Ok(held("missing or invalid supervisor identity"));
-    };
-    let Some(supervisor) = recorded_process(&ready) else {
-        return Ok(held("missing or invalid supervisor identity"));
-    };
-    if recorded_process(&release).as_ref() != Some(&supervisor) {
-        return Ok(held("supervisor identity contradiction"));
-    }
-    if let Some(sent) = store.evidence_payload(task_id, Some(attempt_id), "gate_sent")?
-        && recorded_process(&sent).as_ref() != Some(&supervisor)
-    {
-        return Ok(held("supervisor identity contradiction"));
-    }
-    if supervisor.pid == receipt.child_pid {
-        return Ok(held("supervisor and child identity contradiction"));
     }
     let evidence = serde_json::to_string(&receipt)?;
     let outcome = format!(

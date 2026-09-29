@@ -158,6 +158,10 @@ fn mutate(command: &str, mut values: Vec<String>) -> Result<(), Box<dyn std::err
             let result =
                 luthor::coordinator::reconcile_with_pr(&mut store, &task_id, &attempt, &mut prs)?;
             match result {
+                luthor::supervisor::Reconciliation::Running => println!(
+                    "{}",
+                    json!({"task_id":task_id,"attempt_id":attempt,"status":"running"})
+                ),
                 luthor::supervisor::Reconciliation::Completed { exit_code, signal } => println!(
                     "{}",
                     json!({"task_id":task_id,"attempt_id":attempt,"status":"completed","exit_code":exit_code,"signal":signal})
@@ -208,7 +212,15 @@ fn dispatch(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     let mut store = StateStore::open(&config.state_root, config.capacity)?;
     let mut prs = GhPullRequestReader::new(PathBuf::from("gh"));
     let startup = startup_reconcile_all(&mut store, &mut prs)?;
-    if startup.scheduling_blocked() || !store.pending_attempts()?.is_empty() {
+    if startup.scheduling_blocked()
+        || startup.attempts.iter().any(|attempt| {
+            matches!(
+                attempt.review,
+                luthor::coordinator::AttemptReview::Held(_)
+                    | luthor::coordinator::AttemptReview::Error(_)
+            )
+        })
+    {
         return Err(
             "dispatch held: startup reconciliation has unresolved attempts or source intents"
                 .into(),
