@@ -846,11 +846,12 @@ fn exit_proof(config: &Config) -> ExitPrEvidence {
 struct ExitPr {
     reads: usize,
     fail: bool,
+    matching: Option<(String, String)>,
 }
 #[cfg(unix)]
 impl PullRequestReader for ExitPr {
     fn authenticated_identity(&mut self) -> Result<String, LookupError> {
-        Ok("bot".into())
+        Ok("operator".into())
     }
     fn page(&mut self, _: &str, _: u32) -> Result<Vec<serde_json::Value>, LookupError> {
         self.reads += 1;
@@ -860,12 +861,27 @@ impl PullRequestReader for ExitPr {
                 code: "offline",
                 status: None,
             })
+        } else if let Some((issue_url, _)) = &self.matching {
+            Ok(vec![
+                serde_json::json!({"number": 42, "body": format!("Tracker-Issue: {issue_url}")}),
+            ])
         } else {
             Ok(vec![])
         }
     }
     fn detail(&mut self, _: &str, _: u64) -> Result<serde_json::Value, LookupError> {
-        unreachable!()
+        let Some((issue_url, branch)) = &self.matching else {
+            unreachable!()
+        };
+        Ok(serde_json::json!({
+            "id": 4242, "number": 42, "state": "open",
+            "html_url": "https://github.com/org/code/pull/42",
+            "body": format!("Tracker-Issue: {issue_url}"), "draft": true,
+            "created_at": "2026-01-01T00:00:00Z",
+            "base": {"repo": {"id": 10, "full_name": "org/code"}, "ref": "main"},
+            "head": {"repo": {"id": 10, "full_name": "org/code"}, "ref": branch, "sha": "abc123"},
+            "user": {"login": "operator"}
+        }))
     }
     fn repository_identity(&mut self, name: &str) -> Result<u64, LookupError> {
         match name {
@@ -878,6 +894,62 @@ impl PullRequestReader for ExitPr {
             }),
         }
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn natural_exit_matching_pr_is_proved_and_persisted() {
+    let (_dir, config, mut store) = dispatched_fixture(7);
+    let selection = store.selection_evidence("task").unwrap().unwrap();
+    let identity = store
+        .worktree_record("task")
+        .unwrap()
+        .unwrap()
+        .identity
+        .unwrap();
+    let mut prs = ExitPr {
+        matching: Some((selection.candidate.issue_url, identity.branch)),
+        ..ExitPr::default()
+    };
+    let result =
+        luthor::coordinator::reconcile_with_pr(&mut store, "task", "attempt-real", &mut prs)
+            .unwrap();
+    assert!(
+        matches!(
+            result,
+            Reconciliation::Completed {
+                exit_code: Some(7),
+                signal: None
+            }
+        ),
+        "unexpected reconciliation: {result:?}; held reason: {:?}",
+        store.held_reason("task").unwrap()
+    );
+    assert_eq!(
+        store.task_phase("task").unwrap().as_deref(),
+        Some("pr_complete")
+    );
+    assert_eq!(exit_proof(&config).status, PausePrStatus::Open);
+    assert!(
+        store
+            .evidence_kinds("task")
+            .unwrap()
+            .contains(&"attempt_exit".into())
+    );
+    drop(store);
+    let reopened = StateStore::open(&config.state_root, config.capacity).unwrap();
+    assert_eq!(
+        reopened.task_phase("task").unwrap().as_deref(),
+        Some("pr_complete")
+    );
+    assert_eq!(exit_proof(&config).status, PausePrStatus::Open);
+    let output = luthor::cli::execute(&config.state_root, &["show".into(), "task".into()]).unwrap();
+    let shown: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(
+        shown["attempts"][0]["outcome"],
+        "exit_code=Some(7);signal=None"
+    );
+    assert_eq!(prs.reads, 1);
 }
 
 #[cfg(unix)]
