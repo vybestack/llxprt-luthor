@@ -54,6 +54,40 @@ pub enum SupervisorError {
     IdentityUnavailable,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecoveryInspection {
+    Held(&'static str),
+    Quiescent,
+}
+
+/// Read-only preliminary check. Quiescence is withheld until all durable identity proofs are available.
+pub fn inspect_recovery_quiescence(
+    store: &StateStore,
+    task_id: &str,
+    attempt_id: &str,
+) -> Result<RecoveryInspection, SupervisorError> {
+    if !valid_attempt(attempt_id) {
+        return Err(SupervisorError::Conflict);
+    }
+    if !store.active_attempt_reservation(task_id, attempt_id)? {
+        return Ok(RecoveryInspection::Held(
+            "attempt is not the active reserved attempt",
+        ));
+    }
+    if store
+        .evidence_payload(task_id, Some(attempt_id), "attempt_exit")?
+        .is_some()
+    {
+        return Ok(RecoveryInspection::Held("attempt exit receipt exists"));
+    }
+
+    // This subset does not establish the complete filesystem and process identity
+    // chain. Keep recovery held rather than infer absence from incomplete evidence.
+    Ok(RecoveryInspection::Held(
+        "complete recovery identity proof not implemented",
+    ))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionEnvironment {
     pub home: PathBuf,
