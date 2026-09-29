@@ -1,7 +1,10 @@
 use luthor::{
     claim::{AssignmentError, AssignmentWriter},
     config::{CommandTemplate, Config, Mapping, Marker, Source},
-    coordinator::{IdCreator, ScheduleDependencies, SupervisorLauncher, schedule_candidates},
+    coordinator::{
+        IdCreator, ScheduleDependencies, SupervisorLauncher, operator_recover_missing_receipt,
+        schedule_candidates,
+    },
     eligibility::Candidate,
     github::{
         project::{Issue, Page, ProjectItem, ProjectReadError, ProjectReader},
@@ -2140,6 +2143,178 @@ fn reaped_supervisor_with_removed_receipt_proves_recovery_quiescence() {
             .iter()
             .any(|kind| kind == "attempt_exit")
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn operator_recovery_pr_lookup_failure_keeps_slot_reserved() {
+    let (_dir, config, mut store) = dispatched_fixture(7);
+    let payload = store
+        .evidence_payloads("task", "attempt-real", "supervisor_ready")
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    let pid = serde_json::from_str::<serde_json::Value>(&payload).unwrap()["pid"]
+        .as_u64()
+        .unwrap() as libc::pid_t;
+    let mut status = 0;
+    assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+    fs::remove_file(receipt_path(&config)).unwrap();
+    let selection = store.selection_evidence("task").unwrap().unwrap();
+    let mut projects = OtherProject(selection.candidate, 1);
+    let mut prs = ExitPr {
+        fail: true,
+        ..ExitPr::default()
+    };
+    assert!(matches!(
+        operator_recover_missing_receipt(
+            &mut store,
+            "task",
+            "attempt-real",
+            "operator",
+            "receipt lost",
+            &mut projects,
+            &mut prs
+        )
+        .unwrap(),
+        luthor::coordinator::RecoveryResult::Held(_)
+    ));
+    assert_eq!(store.reservation_count().unwrap(), 1);
+    assert_eq!(store.task_phase("task").unwrap().as_deref(), Some("held"));
+    assert_eq!(prs.reads, 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn operator_recovery_absent_pr_records_telemetry_loss_and_releases_slot() {
+    let (_dir, config, mut store) = dispatched_fixture(7);
+    let payload = store
+        .evidence_payloads("task", "attempt-real", "supervisor_ready")
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    let pid = serde_json::from_str::<serde_json::Value>(&payload).unwrap()["pid"]
+        .as_u64()
+        .unwrap() as libc::pid_t;
+    let mut status = 0;
+    assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+    fs::remove_file(receipt_path(&config)).unwrap();
+    let selection = store.selection_evidence("task").unwrap().unwrap();
+    let mut projects = OtherProject(selection.candidate, 1);
+    let mut prs = ExitPr::default();
+    assert_eq!(
+        operator_recover_missing_receipt(
+            &mut store,
+            "task",
+            "attempt-real",
+            "operator",
+            "receipt lost",
+            &mut projects,
+            &mut prs
+        )
+        .unwrap(),
+        luthor::coordinator::RecoveryResult::RecoveredHeld
+    );
+    assert_eq!(store.task_phase("task").unwrap().as_deref(), Some("held"));
+    assert_eq!(store.reservation_count().unwrap(), 0);
+    assert_eq!(prs.reads, 1);
+    assert!(
+        store
+            .evidence_kinds("task")
+            .unwrap()
+            .contains(&"telemetry_lost".into())
+    );
+    assert!(
+        store
+            .evidence_kinds("task")
+            .unwrap()
+            .contains(&"exit_pr_lookup".into())
+    );
+    assert!(
+        !store
+            .evidence_kinds("task")
+            .unwrap()
+            .contains(&"attempt_exit".into())
+    );
+    let db = rusqlite::Connection::open_with_flags(
+        config.state_root.join("state.sqlite3"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let (lifecycle, outcome): (String, Option<String>) = db
+        .query_row(
+            "SELECT lifecycle, outcome FROM attempts WHERE task_id='task' AND id='attempt-real'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(lifecycle, "telemetry_lost");
+    assert_eq!(outcome, None);
+    drop(db);
+    drop(store);
+    let reopened = StateStore::open(&config.state_root, config.capacity).unwrap();
+    assert_eq!(
+        reopened.task_phase("task").unwrap().as_deref(),
+        Some("held")
+    );
+    assert_eq!(reopened.reservation_count().unwrap(), 0);
+    assert!(
+        reopened
+            .evidence_kinds("task")
+            .unwrap()
+            .contains(&"telemetry_lost".into())
+    );
+    assert!(
+        reopened
+            .evidence_kinds("task")
+            .unwrap()
+            .contains(&"exit_pr_lookup".into())
+    );
+    assert!(
+        !reopened
+            .evidence_kinds("task")
+            .unwrap()
+            .contains(&"attempt_exit".into())
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn operator_recovery_stale_claim_keeps_slot_reserved_without_pr_lookup() {
+    let (_dir, config, mut store) = dispatched_fixture(7);
+    let payload = store
+        .evidence_payloads("task", "attempt-real", "supervisor_ready")
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    let pid = serde_json::from_str::<serde_json::Value>(&payload).unwrap()["pid"]
+        .as_u64()
+        .unwrap() as libc::pid_t;
+    let mut status = 0;
+    assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+    fs::remove_file(receipt_path(&config)).unwrap();
+    let selection = store.selection_evidence("task").unwrap().unwrap();
+    let mut projects = OtherProject(selection.candidate, 0);
+    let mut prs = ExitPr::default();
+    assert!(matches!(
+        operator_recover_missing_receipt(
+            &mut store,
+            "task",
+            "attempt-real",
+            "operator",
+            "receipt lost",
+            &mut projects,
+            &mut prs
+        )
+        .unwrap(),
+        luthor::coordinator::RecoveryResult::Held(_)
+    ));
+    assert_eq!(prs.reads, 0);
+    assert_eq!(store.reservation_count().unwrap(), 1);
+    assert_eq!(store.task_phase("task").unwrap().as_deref(), Some("held"));
 }
 
 #[cfg(unix)]

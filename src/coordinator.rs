@@ -40,6 +40,12 @@ pub struct SourceHold {
     pub kind: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecoveryResult {
+    RecoveredHeld,
+    Held(String),
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct StartupReport {
     pub attempts: Vec<AttemptReport>,
@@ -211,6 +217,112 @@ pub(crate) fn verify_completion_claim<P: ProjectReader>(
         return Err(ClaimError::Changed);
     }
     Ok(())
+}
+
+#[derive(Serialize)]
+struct OperatorRecoveryAudit<'a> {
+    actor: &'a str,
+    reason: &'a str,
+    observed_at_unix_secs: u64,
+    os_ids: Vec<serde_json::Value>,
+    supervisor: serde_json::Value,
+    child: serde_json::Value,
+    tracked_os_identities: Vec<serde_json::Value>,
+}
+
+pub fn operator_recover_missing_receipt<P: ProjectReader, Q: PullRequestReader>(
+    store: &mut StateStore,
+    task_id: &str,
+    attempt_id: &str,
+    actor: &str,
+    reason: &str,
+    projects: &mut P,
+    prs: &mut Q,
+) -> Result<RecoveryResult, SupervisorError> {
+    let held = |reason: &str| RecoveryResult::Held(reason.to_owned());
+    if actor.trim().is_empty() {
+        return Ok(held("operator actor is blank"));
+    }
+    if reason.trim().is_empty() {
+        return Ok(held("operator recovery reason is blank"));
+    }
+    if !matches!(
+        supervisor::inspect_recovery_quiescence(store, task_id, attempt_id)?,
+        supervisor::RecoveryInspection::Quiescent
+    ) {
+        return Ok(held("worker is not proven quiescent"));
+    }
+    let Some(selection) = store.selection_evidence(task_id)? else {
+        return Ok(held("selection evidence is missing"));
+    };
+    if let Err(error) = verify_completion_claim(projects, &selection) {
+        return Ok(held(completion_claim_failure_reason(&error)));
+    }
+    let repository = &selection.candidate.mapping.code_repository;
+    match lookup(prs, repository, &selection.candidate.issue_url) {
+        Ok(LookupResult::Absent) => (),
+        Ok(LookupResult::OpenPreexisting(_)) => {
+            return Ok(held("matching open pull request exists"));
+        }
+        Ok(LookupResult::Ambiguous(_)) => return Ok(held("pull request lookup is ambiguous")),
+        Err(_) => return Ok(held("pull request lookup failed")),
+    }
+    let Some(payload) = store.evidence_payload(task_id, None, "worktree_created")? else {
+        return Ok(held("worktree evidence is missing"));
+    };
+    let snapshot: crate::state::WorktreeIdentity = serde_json::from_str(&payload)?;
+    if worktree::verify_snapshot(&snapshot).is_err() {
+        return Ok(held("worktree snapshot changed"));
+    }
+    if !matches!(
+        supervisor::inspect_recovery_quiescence(store, task_id, attempt_id)?,
+        supervisor::RecoveryInspection::Quiescent
+    ) {
+        return Ok(held("worker quiescence changed during recovery"));
+    }
+    let supervisor = store
+        .evidence_payload(task_id, Some(attempt_id), "supervisor_ready")?
+        .and_then(|p| serde_json::from_str::<serde_json::Value>(&p).ok());
+    let child = store
+        .evidence_payload(task_id, Some(attempt_id), "child_registered")?
+        .and_then(|p| serde_json::from_str::<serde_json::Value>(&p).ok());
+    let tracked = store
+        .evidence_payloads(task_id, attempt_id, "tracked_descendant")?
+        .into_iter()
+        .map(|p| serde_json::from_str::<serde_json::Value>(&p))
+        .collect::<Result<Vec<_>, _>>()?;
+    let (Some(supervisor), Some(child)) = (supervisor, child) else {
+        return Ok(held("process identity evidence is missing"));
+    };
+    let observed_at_unix_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| SupervisorError::IdentityUnavailable)?
+        .as_secs();
+    if observed_at_unix_secs == 0 {
+        return Ok(held("invalid recovery timestamp"));
+    }
+    let mut os_ids = vec![supervisor.clone(), child.clone()];
+    os_ids.extend(tracked.iter().cloned());
+    let audit = serde_json::to_string(&OperatorRecoveryAudit {
+        actor,
+        reason,
+        observed_at_unix_secs,
+        os_ids,
+        supervisor,
+        child,
+        tracked_os_identities: tracked,
+    })?;
+    store.commit_telemetry_lost_recovery(
+        task_id,
+        attempt_id,
+        &audit,
+        &ExitPrEvidence {
+            observed_at_unix_secs,
+            repository: repository.clone(),
+            status: PausePrStatus::Absent,
+        },
+    )?;
+    Ok(RecoveryResult::RecoveredHeld)
 }
 
 impl StartupReport {
