@@ -1023,37 +1023,120 @@ fn stop_failed_log_child(
     registered: &ChildIdentity,
 ) -> Result<(), SupervisorError> {
     let pid = i32::try_from(registered.pid).map_err(|_| SupervisorError::StopUnavailable)?;
-    for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGKILL] {
-        if group_absent(pid) {
-            return if child.try_wait()?.is_some() {
-                Ok(())
-            } else {
-                Err(SupervisorError::StopUnavailable)
-            };
+    stop_failed_log_child_with(
+        Duration::from_secs(2),
+        || matching_child(registered),
+        || unsafe { libc::kill(-pid, libc::SIGKILL) } == 0,
+        || Ok(child.try_wait()?.is_some()),
+        || group_absent(pid),
+    )
+}
+
+#[cfg(unix)]
+fn stop_failed_log_child_with(
+    limit: Duration,
+    mut matching: impl FnMut() -> bool,
+    mut kill_group: impl FnMut() -> bool,
+    mut try_wait: impl FnMut() -> Result<bool, SupervisorError>,
+    mut absent: impl FnMut() -> bool,
+) -> Result<(), SupervisorError> {
+    let deadline = Instant::now() + limit;
+    loop {
+        // Send SIGKILL immediately while the recorded leader still proves group
+        // ownership. After it exits, its identity cannot authorize another kill.
+        let owned = matching();
+        if owned {
+            let _ = kill_group();
         }
-        if !matching_child(registered) {
+        let exited = try_wait()?;
+        if absent() && exited {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
             return Err(SupervisorError::StopUnavailable);
         }
-        if unsafe { libc::kill(-pid, signal) } != 0 {
-            if group_absent(pid) && child.try_wait()?.is_some() {
-                return Ok(());
-            }
-            return Err(SupervisorError::StopUnavailable);
-        }
-        let deadline = Instant::now() + Duration::from_millis(400);
-        while Instant::now() < deadline {
-            let exited = child.try_wait()?.is_some();
-            if group_absent(pid) {
-                return if exited {
-                    Ok(())
-                } else {
-                    Err(SupervisorError::StopUnavailable)
-                };
-            }
-            thread::sleep(Duration::from_millis(20));
-        }
+        thread::sleep(
+            Duration::from_millis(20).min(deadline.saturating_duration_since(Instant::now())),
+        );
     }
-    Err(SupervisorError::StopUnavailable)
+}
+
+#[cfg(all(test, unix))]
+mod failed_log_stop_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn leader_exit_before_signal_keeps_group_held_without_signaling_reused_identity() {
+        let signals = Cell::new(0);
+        let result = stop_failed_log_child_with(
+            Duration::ZERO,
+            || false,
+            || {
+                signals.set(signals.get() + 1);
+                true
+            },
+            || Ok(true),
+            || false,
+        );
+        assert!(matches!(result, Err(SupervisorError::StopUnavailable)));
+        assert_eq!(signals.get(), 0);
+    }
+
+    #[test]
+    fn failed_first_signal_retries_only_with_proven_leader_and_requires_group_absence() {
+        let signals = Cell::new(0);
+        let result = stop_failed_log_child_with(
+            Duration::from_millis(100),
+            || true,
+            || {
+                signals.set(signals.get() + 1);
+                signals.get() == 2
+            },
+            || Ok(signals.get() >= 2),
+            || signals.get() >= 2,
+        );
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(signals.get(), 2);
+    }
+
+    #[test]
+    fn transient_identity_failure_does_not_abandon_signalable_child() {
+        let probes = Cell::new(0);
+        let signals = Cell::new(0);
+        let result = stop_failed_log_child_with(
+            Duration::from_millis(100),
+            || {
+                probes.set(probes.get() + 1);
+                probes.get() > 1
+            },
+            || {
+                signals.set(signals.get() + 1);
+                true
+            },
+            || Ok(signals.get() == 1),
+            || signals.get() == 1,
+        );
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(signals.get(), 1);
+    }
+
+    #[test]
+    fn reaped_leader_with_remaining_group_is_never_reported_stopped() {
+        let signals = Cell::new(0);
+        let result = stop_failed_log_child_with(
+            Duration::from_millis(100),
+            || signals.get() == 0,
+            || {
+                signals.set(signals.get() + 1);
+                true
+            },
+            || Ok(true),
+            || false,
+        );
+        assert!(matches!(result, Err(SupervisorError::StopUnavailable)));
+        assert_eq!(signals.get(), 1);
+    }
 }
 
 #[cfg(unix)]
@@ -1202,8 +1285,8 @@ where
             let bytes = match result {
                 Ok(bytes) => bytes,
                 Err(error) => {
-                    let evidence = record_log_failure(plan, store_root, stream, &error.to_string());
                     let stopped = stop_failed_log_child(&mut child, &registered);
+                    let evidence = record_log_failure(plan, store_root, stream, &error.to_string());
                     stopped?;
                     evidence?;
                     return Err(SupervisorError::ExecutionUnavailable);

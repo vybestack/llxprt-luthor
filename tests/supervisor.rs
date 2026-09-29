@@ -480,6 +480,7 @@ fn live_worker_log_write_failure_stops_and_holds_both_streams() {
         let attempts = config.state_root.join("attempts");
         fs::create_dir(&attempts).unwrap();
         fs::set_permissions(&attempts, fs::Permissions::from_mode(0o700)).unwrap();
+        let _guard = FixtureGroupGuard(attempts.join("attempt-1.child.json"));
         let started = Instant::now();
         let result = run_gated_child_with_log_writers(
             &plan,
@@ -564,7 +565,7 @@ fn log_writer_and_evidence_failure_still_stops_registered_child_group() {
     let worker = dir.path().join("worker-that-must-not-run");
     fs::write(
         &worker,
-        "#!/bin/sh\nprintf 'trigger\\n'\nwhile :; do sleep 1; done\n",
+        "#!/bin/sh\nprintf 'trigger\\n'\nwhile :; do :; done\n",
     )
     .unwrap();
     fs::set_permissions(&worker, fs::Permissions::from_mode(0o700)).unwrap();
@@ -579,6 +580,7 @@ fn log_writer_and_evidence_failure_still_stops_registered_child_group() {
     let attempts = config.state_root.join("attempts");
     fs::create_dir(&attempts).unwrap();
     fs::set_permissions(&attempts, fs::Permissions::from_mode(0o700)).unwrap();
+    let _guard = FixtureGroupGuard(attempts.join("attempt-fault.child.json"));
     rusqlite::Connection::open(config.state_root.join("state.sqlite3")).unwrap().execute_batch(
         "CREATE TRIGGER reject_log_failure BEFORE INSERT ON evidence WHEN NEW.kind='log_failure' BEGIN SELECT RAISE(ABORT, 'injected evidence failure'); END;"
     ).unwrap();
@@ -706,44 +708,73 @@ fn detached_same_binary_dispatch_records_gate_and_worker_receipt() {
     );
 }
 #[cfg(target_os = "macos")]
-fn test_process_identity(pid: u32) -> (String, String) {
+fn observed_process_identity(pid: u32) -> Option<(String, String)> {
     let boot = Command::new("/usr/sbin/sysctl")
         .args(["-n", "kern.boottime"])
         .output()
-        .unwrap();
+        .ok()?;
+    if !boot.status.success() {
+        return None;
+    }
     let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
     let size = std::mem::size_of_val(&info) as i32;
-    assert_eq!(
-        unsafe {
-            libc::proc_pidinfo(
-                pid as i32,
-                libc::PROC_PIDTBSDINFO,
-                0,
-                (&raw mut info).cast(),
-                size,
+    (unsafe {
+        libc::proc_pidinfo(
+            i32::try_from(pid).ok()?,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            (&raw mut info).cast(),
+            size,
+        )
+    } == size
+        && info.pbi_pid == pid
+        && info.pbi_start_tvsec != 0)
+        .then(|| {
+            (
+                String::from_utf8_lossy(&boot.stdout).trim().into(),
+                format!("{}:{}", info.pbi_start_tvsec, info.pbi_start_tvusec),
             )
-        },
-        size
-    );
-    (
-        String::from_utf8(boot.stdout).unwrap().trim().into(),
-        format!("{}:{}", info.pbi_start_tvsec, info.pbi_start_tvusec),
-    )
+        })
 }
 
 #[cfg(target_os = "linux")]
+fn observed_process_identity(pid: u32) -> Option<(String, String)> {
+    let boot = fs::read_to_string("/proc/sys/kernel/random/boot_id").ok()?;
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let start = stat.rsplit_once(')')?.1.split_whitespace().nth(19)?;
+    Some((boot.trim().into(), start.into()))
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn test_process_identity(pid: u32) -> (String, String) {
-    let boot = fs::read_to_string("/proc/sys/kernel/random/boot_id").unwrap();
-    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
-    let start = stat
-        .rsplit_once(')')
-        .unwrap()
-        .1
-        .split_whitespace()
-        .nth(19)
-        .unwrap()
-        .to_owned();
-    (boot.trim().into(), start)
+    observed_process_identity(pid).expect("fixture process identity")
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+struct FixtureGroupGuard(std::path::PathBuf);
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+impl Drop for FixtureGroupGuard {
+    fn drop(&mut self) {
+        let Ok(bytes) = fs::read(&self.0) else { return };
+        let Ok(child) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+            return;
+        };
+        let Some(pid) = child["pid"].as_u64().and_then(|id| i32::try_from(id).ok()) else {
+            return;
+        };
+        if pid > 0
+            && child["group_id"].as_i64() == Some(i64::from(pid))
+            && unsafe { libc::getpgid(pid) } == pid
+            && observed_process_identity(pid as u32).as_ref()
+                == Some(&(
+                    child["boot_identity"].as_str().unwrap_or_default().into(),
+                    child["start_identity"].as_str().unwrap_or_default().into(),
+                ))
+        {
+            unsafe { libc::kill(-pid, libc::SIGKILL) };
+        }
+    }
 }
 
 #[cfg(unix)]
