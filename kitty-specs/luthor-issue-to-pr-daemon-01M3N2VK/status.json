@@ -50,7 +50,7 @@
     },
     "WP02": {
       "actor": "llxprt",
-      "agent": null,
+      "agent": "llxprt",
       "agent_profile": "__resolved_profile_absent__",
       "agent_profile_version": "__resolved_profile_version_absent__",
       "force_count": 6,
@@ -59,7 +59,8 @@
       "last_transition_at": "2026-09-29T08:44:34.681421+00:00",
       "model": "__resolved_model_absent__",
       "notes": [
-        "Date GraphQL selection omits date scalar needed by the parser; unrelated Date blocks eligible Status discovery"
+        "Date GraphQL selection omits date scalar needed by the parser; unrelated Date blocks eligible Status discovery",
+        "Integrated a07e8eb; full offline test and strict lint gates passed; addresses review-cycle-6."
       ],
       "provider": "__resolved_provider_absent__",
       "review": null,
