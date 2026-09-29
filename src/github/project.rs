@@ -363,10 +363,6 @@ impl ProjectReader for GhProjectReader {
                             "name",
                             "invalid-project-field",
                         )?;
-                        fields.push((
-                            name.clone(),
-                            required_string(field, "date", "invalid-project-field")?,
-                        ));
                         unsupported_fields.push(name);
                     }
                     Some("ProjectV2ItemFieldIterationValue") => {

@@ -139,7 +139,7 @@ fn discover_rejects_configured_date_marker_but_preserves_unrelated_date_field() 
                 "content": {"__typename":"Issue","id":"ISSUE_NODE","number":7,"repository":{"id":"REPO_NODE","nameWithOwner":"org/tracker"}},
                 "fieldValues": {"nodes":[
                     {"__typename":"ProjectV2ItemFieldSingleSelectValue","name":"Ready","field":{"name":"Status"}},
-                    {"__typename":"ProjectV2ItemFieldDateValue","date":"2026-01-01","field":{"name":"Due"}}
+                    {"__typename":"ProjectV2ItemFieldDateValue","field":{"name":"Due"}}
                 ],"pageInfo":{"hasNextPage":false,"endCursor":null}}
             }],
             "pageInfo":{"hasNextPage":false,"endCursor":null}
@@ -180,7 +180,7 @@ fn discover_rejects_configured_date_marker_but_preserves_unrelated_date_field() 
     assert_eq!(lines.len(), 1);
     assert_eq!(
         lines[0]["candidate"]["observed_project_fields"],
-        serde_json::json!([["Status", "Ready"], ["Due", "2026-01-01"]])
+        serde_json::json!([["Status", "Ready"]])
     );
 }
 

@@ -60,7 +60,7 @@ fn direct_issue_requires_stable_id_for_present_milestone() {
 
 #[test]
 fn fake_gh_paginates_two_pages_and_preserves_requested_fields() {
-    let first = r#"{"data":{"node":{"items":{"nodes":[{"id":"PVTI1","content":{"__typename":"Issue","id":"ISSUE1","number":7,"repository":{"id":"REPO1","nameWithOwner":"org/tracker"}},"fieldValues":{"nodes":[{"__typename":"ProjectV2ItemFieldSingleSelectValue","name":"Ready","field":{"name":"Status"}},{"__typename":"ProjectV2ItemFieldDateValue","date":"2026-01-01","field":{"name":"Due"}}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}],"pageInfo":{"hasNextPage":true,"endCursor":"CURSOR1"}}}}}"#;
+    let first = r#"{"data":{"node":{"items":{"nodes":[{"id":"PVTI1","content":{"__typename":"Issue","id":"ISSUE1","number":7,"repository":{"id":"REPO1","nameWithOwner":"org/tracker"}},"fieldValues":{"nodes":[{"__typename":"ProjectV2ItemFieldSingleSelectValue","name":"Ready","field":{"name":"Status"}},{"__typename":"ProjectV2ItemFieldDateValue","field":{"name":"Due"}}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}],"pageInfo":{"hasNextPage":true,"endCursor":"CURSOR1"}}}}}"#;
     let second = r#"{"data":{"node":{"items":{"nodes":[{"id":"PVTI2","content":{"__typename":"Issue","id":"ISSUE2","number":8,"repository":{"id":"REPO1","nameWithOwner":"org/tracker"}},"fieldValues":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}"#;
     let dir = tempdir().unwrap();
     let path = dir.path().join("gh");
@@ -72,11 +72,9 @@ fn fake_gh_paginates_two_pages_and_preserves_requested_fields() {
     assert_eq!(page1.items.len(), 1);
     assert_eq!(
         page1.items[0].fields,
-        vec![
-            ("Status".into(), "Ready".into()),
-            ("Due".into(), "2026-01-01".into())
-        ]
+        vec![("Status".into(), "Ready".into())]
     );
+    assert_eq!(page1.items[0].unsupported_fields, vec!["Due"]);
     assert!(page1.has_next_page);
     let page2 = reader.page("PROJECT", page1.end_cursor.as_deref()).unwrap();
     assert_eq!(page2.items[0].issue_node_id, "ISSUE2");
@@ -108,7 +106,7 @@ fn response(field_values: &str) -> String {
 }
 #[test]
 fn parses_project_fields_and_direct_issue_identity() {
-    let fv = r#"{"nodes":[{"__typename":"ProjectV2ItemFieldSingleSelectValue","name":"Ready","field":{"name":"Status"}},{"__typename":"ProjectV2ItemFieldTextValue","text":"Ada","field":{"name":"Owner"}},{"__typename":"ProjectV2ItemFieldDateValue","date":"2026-01-01","field":{"name":"Due"}},{"__typename":"ProjectV2ItemFieldDateValue","date":"2026-02-01","field":{"name":"Archive Date"}}],"pageInfo":{"hasNextPage":false,"endCursor":null}}"#;
+    let fv = r#"{"nodes":[{"__typename":"ProjectV2ItemFieldSingleSelectValue","name":"Ready","field":{"name":"Status"}},{"__typename":"ProjectV2ItemFieldTextValue","text":"Ada","field":{"name":"Owner"}},{"__typename":"ProjectV2ItemFieldDateValue","field":{"name":"Due"}},{"__typename":"ProjectV2ItemFieldDateValue","field":{"name":"Archive Date"}}],"pageInfo":{"hasNextPage":false,"endCursor":null}}"#;
     let (_dir, mut r) = reader(&response(fv));
     let page = r.page("P", None).unwrap();
     assert_eq!(page.items[0].issue_node_id, "ISSUE1");
@@ -119,9 +117,7 @@ fn parses_project_fields_and_direct_issue_identity() {
         page.items[0].fields,
         vec![
             ("Status".into(), "Ready".into()),
-            ("Owner".into(), "Ada".into()),
-            ("Due".into(), "2026-01-01".into()),
-            ("Archive Date".into(), "2026-02-01".into())
+            ("Owner".into(), "Ada".into())
         ]
     );
     assert_eq!(
@@ -381,17 +377,12 @@ fn iteration_field_value_is_reported_as_unsupported_by_name() {
 }
 
 #[test]
-fn date_field_value_requires_nonempty_field_name() {
-    for field in ["{}", r#"{"name":""}"#] {
-        let values = format!(
-            r#"{{"nodes":[{{"__typename":"ProjectV2ItemFieldDateValue","field":{field}}}],"pageInfo":{{"hasNextPage":false,"endCursor":null}}}}"#
-        );
-        let (_dir, mut reader) = reader(&response(&values));
-        assert_eq!(
-            reader.page("P", None).unwrap_err().category,
-            luthor::github::project::ReadCategory::Malformed
-        );
-    }
+fn date_field_value_needs_only_the_queried_field_name() {
+    let values = r#"{"nodes":[{"__typename":"ProjectV2ItemFieldDateValue","field":{"name":"Due"}}],"pageInfo":{"hasNextPage":false,"endCursor":null}}"#;
+    let (_dir, mut reader) = reader(&response(values));
+    let page = reader.page("P", None).unwrap();
+    assert!(page.items[0].fields.is_empty());
+    assert_eq!(page.items[0].unsupported_fields, vec!["Due"]);
 }
 
 #[test]
