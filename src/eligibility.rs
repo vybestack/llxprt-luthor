@@ -2,7 +2,7 @@ use crate::{
     config::{Mapping, Marker, Source},
     github::project::{Issue, ProjectError, ProjectItem, ProjectReader, enumerate},
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,15 +35,13 @@ pub fn select<R: ProjectReader>(
     sources: &[Source],
     mappings: &[Mapping],
 ) -> Result<Vec<Candidate>, EligibilityError> {
-    let observed = enumerate(reader)?;
     let mapping_by_repo: HashMap<_, _> = mappings
         .iter()
         .map(|m| (m.tracker_repository.as_str(), m))
         .collect();
-    let mut candidates: HashMap<String, Candidate> = HashMap::new();
-    let mut rules = HashSet::new();
+    let mut candidates: HashMap<String, (Candidate, String, Option<String>)> = HashMap::new();
     for source in sources {
-        for (item, issue) in &observed {
+        for (item, issue) in enumerate(reader, &source.project_id)? {
             if !source
                 .repositories
                 .iter()
@@ -56,7 +54,7 @@ pub fn select<R: ProjectReader>(
             };
             if issue.state != "open"
                 || !issue.assignees.is_empty()
-                || !marker_matches(&source.ready_marker, item, issue)
+                || !marker_matches(&source.ready_marker, &item, &issue)
                 || source
                     .milestone
                     .as_ref()
@@ -65,20 +63,9 @@ pub fn select<R: ProjectReader>(
                 continue;
             }
             let key = format!("{}:{}", issue.repository, issue.node_id);
-            let rule = format!(
-                "{}|{}|{:?}|{:?}|{}",
-                source.project_id,
-                issue.repository,
-                source.ready_marker,
-                source.milestone,
-                mapping.code_repository
-            );
-            if !rules.insert((key.clone(), rule.clone())) && !candidates.contains_key(&key) {
-                continue;
-            }
             let candidate = Candidate {
                 project_id: source.project_id.clone(),
-                item_id: item.item_id.clone(),
+                item_id: item.item_id,
                 repository: issue.repository.clone(),
                 issue_node_id: issue.node_id.clone(),
                 issue_number: issue.number,
@@ -86,19 +73,29 @@ pub fn select<R: ProjectReader>(
                     code_repository: mapping.code_repository.clone(),
                 },
             };
-            if let Some(previous) = candidates.get(&key) {
-                if previous.project_id != candidate.project_id
-                    || previous.mapping != candidate.mapping
-                    || previous.item_id != candidate.item_id
+            if let Some((previous, marker, milestone)) = candidates.get(&key) {
+                if previous.mapping != candidate.mapping
+                    || *marker != format!("{:?}", source.ready_marker)
+                    || *milestone != source.milestone
                 {
                     return Err(EligibilityError::ConflictingSource(key));
                 }
             } else {
-                candidates.insert(key, candidate);
+                candidates.insert(
+                    key,
+                    (
+                        candidate,
+                        format!("{:?}", source.ready_marker),
+                        source.milestone.clone(),
+                    ),
+                );
             }
         }
     }
-    Ok(candidates.into_values().collect())
+    Ok(candidates
+        .into_values()
+        .map(|(candidate, _, _)| candidate)
+        .collect())
 }
 
 fn marker_matches(marker: &Marker, item: &ProjectItem, issue: &Issue) -> bool {

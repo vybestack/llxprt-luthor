@@ -43,19 +43,23 @@ pub enum ProjectError {
 }
 
 pub trait ProjectReader {
-    fn page(&mut self, cursor: Option<&str>) -> Result<Page<ProjectItem>, String>;
+    fn page(&mut self, project_id: &str, cursor: Option<&str>)
+    -> Result<Page<ProjectItem>, String>;
     fn issue(&mut self, item: &ProjectItem) -> Result<Issue, String>;
 }
 
 pub fn enumerate<R: ProjectReader>(
     reader: &mut R,
+    project_id: &str,
 ) -> Result<Vec<(ProjectItem, Issue)>, ProjectError> {
     let mut cursor = None;
     let mut items_seen = HashSet::new();
     let mut issues_seen = HashSet::new();
     let mut result = Vec::new();
     loop {
-        let page = reader.page(cursor.as_deref()).map_err(ProjectError::Read)?;
+        let page = reader
+            .page(project_id, cursor.as_deref())
+            .map_err(ProjectError::Read)?;
         for item in page.items {
             if !items_seen.insert(item.item_id.clone()) {
                 return Err(ProjectError::Duplicate(item.item_id));

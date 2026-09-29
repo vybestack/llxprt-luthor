@@ -11,13 +11,17 @@ struct Fake {
     fail_page: bool,
 }
 impl ProjectReader for Fake {
-    fn page(&mut self, _cursor: Option<&str>) -> Result<Page<ProjectItem>, String> {
+    fn page(
+        &mut self,
+        _project_id: &str,
+        _cursor: Option<&str>,
+    ) -> Result<Page<ProjectItem>, String> {
         if self.fail_page {
             return Err("network unavailable".into());
         }
         let page = self
             .pages
-            .get(self.calls)
+            .get(self.calls % self.pages.len())
             .cloned()
             .ok_or("unexpected page")?;
         self.calls += 1;
@@ -52,8 +56,11 @@ fn issue(state: &str, labels: Vec<&str>, assignees: Vec<&str>, milestone: Option
     }
 }
 fn source(marker: Marker, milestone: Option<&str>) -> Source {
+    source_in("P1", marker, milestone)
+}
+fn source_in(project_id: &str, marker: Marker, milestone: Option<&str>) -> Source {
     Source {
-        project_id: "P1".into(),
+        project_id: project_id.into(),
         repositories: vec!["org/tracker".into()],
         ready_marker: marker,
         milestone: milestone.map(str::to_string),
@@ -138,6 +145,96 @@ fn optional_milestone_and_project_field_marker_are_exact() {
     )
     .unwrap();
     assert_eq!(candidates.len(), 1);
+}
+
+#[test]
+fn issue_from_another_project_is_not_eligible() {
+    let mut fake = Fake {
+        pages: vec![Page {
+            items: vec![],
+            has_next_page: false,
+            end_cursor: None,
+        }],
+        issues: vec![issue("open", vec!["ready"], vec![], None)],
+        calls: 0,
+        fail_page: false,
+    };
+    let selected = select(
+        &mut fake,
+        &[source_in(
+            "P2",
+            Marker::Label {
+                name: "ready".into(),
+            },
+            None,
+        )],
+        &[mapping()],
+    )
+    .unwrap();
+    assert!(selected.is_empty());
+}
+
+#[test]
+fn compatible_overlapping_sources_deduplicate_issue() {
+    let mut fake = Fake {
+        pages: vec![Page {
+            items: vec![item("I1", "N7", vec![])],
+            has_next_page: false,
+            end_cursor: None,
+        }],
+        issues: vec![issue("open", vec!["ready"], vec![], None)],
+        calls: 0,
+        fail_page: false,
+    };
+    let sources = [
+        source_in(
+            "P1",
+            Marker::Label {
+                name: "ready".into(),
+            },
+            None,
+        ),
+        source_in(
+            "P2",
+            Marker::Label {
+                name: "ready".into(),
+            },
+            None,
+        ),
+    ];
+    let selected = select(&mut fake, &sources, &[mapping()]).unwrap();
+    assert_eq!(selected.len(), 1);
+}
+
+#[test]
+fn incompatible_overlapping_source_rules_are_rejected() {
+    let mut fake = Fake {
+        pages: vec![Page {
+            items: vec![item("I1", "N7", vec![])],
+            has_next_page: false,
+            end_cursor: None,
+        }],
+        issues: vec![issue("open", vec!["ready", "other"], vec![], None)],
+        calls: 0,
+        fail_page: false,
+    };
+    let sources = [
+        source_in(
+            "P1",
+            Marker::Label {
+                name: "ready".into(),
+            },
+            None,
+        ),
+        source_in(
+            "P2",
+            Marker::Label {
+                name: "other".into(),
+            },
+            None,
+        ),
+    ];
+    assert!(select(&mut fake, &sources, &[mapping()]).is_err());
 }
 
 #[test]
