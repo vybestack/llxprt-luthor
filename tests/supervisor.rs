@@ -14,7 +14,7 @@ use std::{
     io::BufRead,
     process::{Command, Stdio},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 fn configured(root: &Path) -> (Config, Candidate) {
@@ -987,11 +987,24 @@ fn registered_shim_stays_gated_and_survives_supervisor_crash_after_release() {
         .unwrap();
     assert!(!marker.exists());
     supervisor.stdin.take().unwrap().write_all(b"R").unwrap();
-    for _ in 0..100 {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
         if marker.exists() {
             break;
         }
         thread::sleep(Duration::from_millis(20));
+    }
+    if !marker.exists() {
+        let supervisor_status = supervisor.try_wait();
+        let _ = supervisor.kill();
+        let _ = supervisor.wait();
+        unsafe {
+            libc::kill(-pid, libc::SIGKILL);
+        }
+        assert!(
+            marker.exists(),
+            "fake worker marker was not created before deadline; supervisor.try_wait() = {supervisor_status:?}"
+        );
     }
     assert!(marker.exists());
     supervisor.kill().unwrap();
