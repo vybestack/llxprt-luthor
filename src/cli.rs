@@ -1,7 +1,10 @@
+use crate::github::pull_request::ErrorCategory;
+use crate::state::{PausePrEvidence, PausePrStatus};
 #[cfg(unix)]
 use crate::supervisor::{ChildIdentity, recorded_process, verified_live_process};
 use crate::supervisor::{ExitReceipt, LaunchPlan};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
     fs::{self, File, OpenOptions},
@@ -12,6 +15,276 @@ use std::{
 use thiserror::Error;
 
 const SILENCE_WARNING_THRESHOLD_SECONDS: u64 = 300;
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SourceObservation {
+    task_id: String,
+    status: String,
+    reasons: Vec<String>,
+    #[serde(rename = "issue_state")]
+    _issue_state: Option<String>,
+    #[serde(rename = "assignees")]
+    _assignees: Option<Vec<String>>,
+    #[serde(rename = "marker_present")]
+    _marker_present: Option<bool>,
+    #[serde(rename = "project_membership")]
+    _project_membership: Option<bool>,
+    #[serde(rename = "worktree")]
+    _worktree: Option<SourceWorktree>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum SourceWorktree {
+    UnverifiedPathPresent,
+    UnverifiedPathAbsent,
+    IdentityMatches,
+    IdentityMismatch,
+}
+
+fn safe_code(code: &str) -> Option<&'static str> {
+    Some(match code {
+        "transport-error" => "transport-error",
+        "command-failed" => "command-failed",
+        "invalid-json" => "invalid-json",
+        "invalid-page" => "invalid-page",
+        "page-limit" => "page-limit",
+        "oversized-page" => "oversized-page",
+        "invalid-list-entry" => "invalid-list-entry",
+        "invalid-pr-id" => "invalid-pr-id",
+        "invalid-pr-details" => "invalid-pr-details",
+        "page-overflow" => "page-overflow",
+        _ => return None,
+    })
+}
+
+fn safe_source_reason(reason: &str) -> Option<&'static str> {
+    Some(match reason {
+        "issue_identity_mismatch" => "issue_identity_mismatch",
+        "issue_not_open" => "issue_not_open",
+        "marker_missing" => "marker_missing",
+        "assignees_unexpected" => "assignees_unexpected",
+        "project_membership_mismatch" => "project_membership_mismatch",
+        "source_read_failed" => "source_read_failed",
+        "claim_intent_mismatch" => "claim_intent_mismatch",
+        "assignment_not_observed" => "assignment_not_observed",
+        "claim_intent_unverified" => "claim_intent_unverified",
+        "worktree_intent_mismatch" => "worktree_intent_mismatch",
+        "worktree_unverified" => "worktree_unverified",
+        "worktree_read_failed" => "worktree_read_failed",
+        "selection_missing" => "selection_missing",
+        "prelaunch_not_verified" => "prelaunch_not_verified",
+        _ => return None,
+    })
+}
+
+fn observation_summary(
+    conn: &Connection,
+    task: &str,
+    kind: &str,
+    attempt: Option<&str>,
+    payload: &str,
+    recorded_secs: Option<i64>,
+) -> Value {
+    let stage = match kind {
+        "pause_pr_lookup" => "pause_pr_lookup",
+        "exit_pr_lookup" => "exit_pr_lookup",
+        "source_observation" => "source_observation",
+        _ => unreachable!(),
+    };
+    let id = attempt.filter(|id| valid_attempt(id));
+    let utc = |seconds: i64| -> Option<String> {
+        conn.query_row(
+            "SELECT strftime('%Y-%m-%dT%H:%M:%SZ', ?1, 'unixepoch')",
+            [seconds],
+            |row| row.get(0),
+        )
+        .ok()
+        .flatten()
+    };
+    let malformed = || {
+        json!({"stage":stage,"attempt_id":id,"category":"malformed",
+        "observed_at_utc":recorded_secs.and_then(utc),
+        "observed_at_unix_secs":recorded_secs,"code":null,"http_status":null})
+    };
+    if payload.len() > 64 * 1024 {
+        return malformed();
+    }
+    if stage == "source_observation" {
+        let Ok(value) = serde_json::from_str::<Value>(payload) else {
+            return malformed();
+        };
+        if [
+            "task_id",
+            "status",
+            "reasons",
+            "issue_state",
+            "assignees",
+            "marker_present",
+            "project_membership",
+            "worktree",
+        ]
+        .iter()
+        .any(|key| value.get(*key).is_none())
+        {
+            return malformed();
+        }
+        let Ok(source) = serde_json::from_value::<SourceObservation>(value) else {
+            return malformed();
+        };
+        if source.task_id != task
+            || attempt.is_some()
+            || source.status != "held"
+            || source.reasons.is_empty()
+            || source
+                .reasons
+                .iter()
+                .any(|reason| safe_source_reason(reason).is_none())
+        {
+            return malformed();
+        }
+        let Some(seconds) = recorded_secs else {
+            return malformed();
+        };
+        let Some(observed_at_utc) = utc(seconds) else {
+            return malformed();
+        };
+        let code = if source
+            .reasons
+            .iter()
+            .any(|reason| reason == "source_read_failed")
+        {
+            "source_read_failed"
+        } else {
+            safe_source_reason(&source.reasons[0]).expect("validated reason")
+        };
+        return json!({"stage":stage,"attempt_id":null,"category":"source_read",
+            "observed_at_utc":observed_at_utc,"observed_at_unix_secs":seconds,
+            "code":code,"http_status":null});
+    }
+    let Ok(proof) = serde_json::from_str::<PausePrEvidence>(payload) else {
+        return malformed();
+    };
+    let Some(id) = id else { return malformed() };
+    let Ok(seconds) = i64::try_from(proof.observed_at_unix_secs) else {
+        return malformed();
+    };
+    let Some(observed_at_utc) = (seconds > 0).then(|| utc(seconds)).flatten() else {
+        return malformed();
+    };
+    let category = match proof.status {
+        PausePrStatus::Absent => "absent",
+        PausePrStatus::Open => "open",
+        PausePrStatus::Ambiguous => "ambiguous",
+        PausePrStatus::Error {
+            category,
+            code,
+            http_status,
+        } => {
+            let Some(code) = safe_code(&code) else {
+                return malformed();
+            };
+            if http_status.is_some_and(|status| !(100..=599).contains(&status)) {
+                return malformed();
+            }
+            let error_category = match category {
+                ErrorCategory::Permission => "permission",
+                ErrorCategory::RateLimit => "rate_limit",
+                ErrorCategory::NotFound => "not_found",
+                ErrorCategory::Malformed => "malformed",
+                ErrorCategory::Transport => "transport",
+                ErrorCategory::Unknown => "unknown",
+            };
+            return json!({"stage":stage,"attempt_id":id,"category":"error",
+                "error_category":error_category,"observed_at_utc":observed_at_utc,
+                "observed_at_unix_secs":seconds,"code":code,"http_status":http_status});
+        }
+    };
+    json!({"stage":stage,"attempt_id":id,"category":category,
+        "observed_at_utc":observed_at_utc,"observed_at_unix_secs":seconds,
+        "code":null,"http_status":null})
+}
+
+#[derive(Default)]
+struct ObservationSummaries {
+    pr: Option<Value>,
+    source: Option<Value>,
+    latest: Option<Value>,
+    sequence: i64,
+}
+
+fn observations(conn: &Connection, task: &str) -> Result<ObservationSummaries, CliError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT sequence,kind,attempt_id,payload,
+        CAST(strftime('%s',created_at) AS INTEGER) FROM evidence
+        WHERE task_id=?1 AND kind IN ('pause_pr_lookup','exit_pr_lookup','source_observation')
+        ORDER BY sequence",
+        )
+        .map_err(|_| CliError::Database)?;
+    let rows = stmt
+        .query_map([task], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<i64>>(4)?,
+            ))
+        })
+        .map_err(|_| CliError::Database)?;
+    let mut result = ObservationSummaries::default();
+    for row in rows {
+        let (seq, kind, attempt, payload, recorded_secs) = row.map_err(|_| CliError::Database)?;
+        let summary = observation_summary(
+            conn,
+            task,
+            &kind,
+            attempt.as_deref(),
+            &payload,
+            recorded_secs,
+        );
+        if kind == "source_observation" {
+            result.source = Some(summary.clone());
+        } else {
+            result.pr = Some(summary.clone());
+        }
+        result.sequence = seq;
+        result.latest = Some(summary);
+    }
+    Ok(result)
+}
+
+fn displayed_reason(
+    phase: &str,
+    reason: Option<&str>,
+    reason_sequence: i64,
+    latest: Option<&Value>,
+    observation_sequence: i64,
+) -> Option<String> {
+    if phase != "held" && phase != "stop_requested" {
+        return None;
+    }
+    if observation_sequence > reason_sequence {
+        let summary = latest?;
+        if summary["category"] == "malformed" {
+            return Some("observation malformed".into());
+        }
+        if summary["stage"] == "source_observation" {
+            return Some("source reconciliation held".into());
+        }
+        let stage = if summary["stage"] == "pause_pr_lookup" {
+            "pause"
+        } else {
+            "exit"
+        };
+        return Some(format!(
+            "{stage} PR {}",
+            summary["category"].as_str().unwrap_or("malformed")
+        ));
+    }
+    reason.map(str::to_owned)
+}
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum CliError {
@@ -180,7 +453,7 @@ fn status(conn: &Connection, root: &Path) -> Result<Value, CliError> {
         (SELECT a.id FROM attempts a WHERE a.task_id=t.id ORDER BY a.rowid DESC LIMIT 1),
         (SELECT a.outcome FROM attempts a WHERE a.task_id=t.id ORDER BY a.rowid DESC LIMIT 1),
         (SELECT a.lifecycle FROM attempts a WHERE a.task_id=t.id ORDER BY a.rowid DESC LIMIT 1),
-        (SELECT e.payload FROM evidence e WHERE e.task_id=t.id AND e.kind='pause_pr_lookup' ORDER BY e.sequence DESC LIMIT 1),
+        (SELECT e.sequence FROM evidence e WHERE e.task_id=t.id AND e.kind='held_reason' ORDER BY e.sequence DESC LIMIT 1),
         (SELECT CAST(strftime('%s', a.created_at) AS INTEGER) FROM attempts a
          JOIN reservations r ON r.attempt_id=a.id
          WHERE a.task_id=t.id AND r.status='reserved' ORDER BY a.rowid DESC LIMIT 1)
@@ -218,7 +491,8 @@ fn status(conn: &Connection, root: &Path) -> Result<Value, CliError> {
                 "latest_attempt_lifecycle":r.get::<_,Option<String>>(9)?,
                 "pr_state":"unavailable",
                 "pr_unavailable_reason":"status does not perform a fresh exhaustive PR read",
-                "last_observed_pr":r.get::<_,Option<String>>(10)?
+                "reason_sequence":r.get::<_,Option<i64>>(10)?.unwrap_or(0),
+                "last_observed_pr":null
             }))
         })
         .map_err(|_| CliError::Database)?
@@ -226,12 +500,15 @@ fn status(conn: &Connection, root: &Path) -> Result<Value, CliError> {
         .map_err(|_| CliError::Database)?;
     let mut tasks: Vec<Value> = tasks;
     for task in &mut tasks {
-        let task_id = task["task_id"].as_str().ok_or(CliError::Database)?;
+        let task_id = task["task_id"]
+            .as_str()
+            .ok_or(CliError::Database)?
+            .to_owned();
         let reserved_attempt: Option<String> = conn
             .query_row(
                 "SELECT a.id FROM attempts a JOIN reservations r ON r.attempt_id=a.id
              WHERE a.task_id=?1 AND r.status='reserved' ORDER BY a.rowid DESC LIMIT 1",
-                [task_id],
+                [&task_id],
                 |r| r.get(0),
             )
             .optional()
@@ -239,7 +516,7 @@ fn status(conn: &Connection, root: &Path) -> Result<Value, CliError> {
         let (phase, process) = operator_state(
             conn,
             root,
-            task_id,
+            &task_id,
             reserved_attempt.as_deref(),
             task["phase"].as_str().ok_or(CliError::Database)?,
         )?;
@@ -250,6 +527,31 @@ fn status(conn: &Connection, root: &Path) -> Result<Value, CliError> {
             }
         }
         task["process"] = json!(process);
+        let ObservationSummaries {
+            pr,
+            source,
+            latest,
+            sequence,
+        } = observations(conn, &task_id)?;
+        let reason = displayed_reason(
+            &phase,
+            task["reason"].as_str(),
+            task["reason_sequence"].as_i64().unwrap_or(0),
+            latest.as_ref(),
+            sequence,
+        );
+        task["reason"] = json!(reason);
+        task.as_object_mut()
+            .ok_or(CliError::Database)?
+            .remove("reason_sequence");
+        task["last_observed_pr"] = json!(pr);
+        task["last_observed_source"] = json!(source);
+        task["last_observation"] = json!(latest);
+        task["last_observed_pr_unavailable_reason"] = json!(if pr.is_none() {
+            Some("no stored PR observation")
+        } else {
+            None
+        });
     }
     Ok(
         json!({"tasks":tasks,"capacity":{"reserved":reserved,"limit":capacity},
@@ -286,6 +588,16 @@ fn events(conn: &Connection, table: &str, task: &str) -> Result<Vec<Value>, CliE
         // Launch and dispatch details contain executable arguments and prompts.
         let detail = match (table, kind.as_str()) {
             ("evidence", "held_reason" | "claim_verified") => Some(json!(payload)),
+            ("evidence", "pause_pr_lookup" | "exit_pr_lookup" | "source_observation") => {
+                Some(observation_summary(
+                    conn,
+                    task,
+                    &kind,
+                    attempt_id.as_deref(),
+                    &payload,
+                    created_at_unix_secs,
+                ))
+            }
             ("evidence", "attempt_exit") => serde_json::from_str::<ExitReceipt>(&payload)
                 .ok()
                 .map(|receipt| receipt_summary(&receipt)),
@@ -394,16 +706,27 @@ fn show(conn: &Connection, root: &Path, task: &str) -> Result<Value, CliError> {
         .map(str::to_owned);
     let output_silence_warning =
         last_output_age_seconds.is_some_and(|age| age >= SILENCE_WARNING_THRESHOLD_SECONDS);
-    let last_observed_pr = evidence
-        .iter()
-        .rev()
-        .find(|e| e["kind"] == "pause_pr_lookup")
-        .map(|event| json!({"proof":event["detail"],"observed_at":event["created_at"]}));
+    let ObservationSummaries {
+        pr: last_observed_pr,
+        source: last_observed_source,
+        latest: last_observation,
+        sequence: observation_sequence,
+    } = observations(conn, task)?;
+    let reason_sequence: i64 = conn.query_row(
+        "SELECT sequence FROM evidence WHERE task_id=?1 AND kind='held_reason' ORDER BY sequence DESC LIMIT 1",
+        [task], |row| row.get(0)).optional().map_err(|_| CliError::Database)?.unwrap_or(0);
     let active_attempt_id = active_attempt
         .and_then(|a| a["id"].as_str())
         .map(str::to_owned);
     let (display_phase, process) =
         operator_state(conn, root, task, active_attempt_id.as_deref(), &phase)?;
+    let reason = displayed_reason(
+        &display_phase,
+        reason,
+        reason_sequence,
+        last_observation.as_ref(),
+        observation_sequence,
+    );
     if (display_phase == "running" || display_phase == "stop_requested")
         && let Some(attempt) = attempts
             .iter_mut()
@@ -431,7 +754,9 @@ fn show(conn: &Connection, root: &Path, task: &str) -> Result<Value, CliError> {
         "pr_state":"unavailable",
         "pr_unavailable_reason":"show does not perform a fresh exhaustive PR read",
         "last_observed_pr":last_observed_pr,
-        "last_observed_pr_unavailable_reason":if last_observed_pr.is_none(){Some("no verified stored PR proof")}else{None}}),
+        "last_observed_source":last_observed_source,
+        "last_observation":last_observation,
+        "last_observed_pr_unavailable_reason":if last_observed_pr.is_none(){Some("no stored PR observation")}else{None}}),
     )
 }
 
