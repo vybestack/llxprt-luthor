@@ -40,6 +40,7 @@ create_intent:
 - tests/cli.rs
 execution_mode: code_change
 owned_files:
+- src/main.rs
 - src/claim.rs
 - src/state.rs
 - src/github/pull_request.rs

@@ -1,10 +1,12 @@
 //! Launch planning and the Unix gated child runner.
 use crate::{
     config::{ConfigError, RenderedCommand, TaskValues},
-    state::{StateError, StateStore},
+    state::{StateError, StateStore, WorktreeIdentity},
 };
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::{
+    env,
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
@@ -17,6 +19,8 @@ use thiserror::Error;
 pub enum SupervisorError {
     #[error(transparent)]
     State(#[from] StateError),
+    #[error(transparent)]
+    Sql(#[from] rusqlite::Error),
     #[error(transparent)]
     Config(#[from] ConfigError),
     #[error(transparent)]
@@ -282,7 +286,199 @@ pub fn run_gated_child<R: Read>(
     Err(SupervisorError::ExecutionUnavailable)
 }
 
-/// Detached supervisor wiring is not yet safe; callers must not bypass this gate.
-pub fn execute(_plan: &LaunchPlan) -> Result<(), SupervisorError> {
+fn private_attempts(root: &Path) -> Result<PathBuf, SupervisorError> {
+    let path = root.join("attempts");
+    if !path.exists() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            fs::DirBuilder::new().mode(0o700).create(&path)?;
+        }
+        #[cfg(not(unix))]
+        fs::create_dir(&path)?;
+        File::open(root)?.sync_all()?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if fs::metadata(&path)?.permissions().mode() & 0o777 != 0o700 {
+            return Err(SupervisorError::Conflict);
+        }
+    }
+    Ok(path)
+}
+
+fn valid_attempt(attempt: &str) -> bool {
+    !attempt.is_empty()
+        && attempt.len() <= 128
+        && attempt
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+fn write_private_json<T: Serialize>(path: &Path, value: &T) -> Result<(), SupervisorError> {
+    let mut file = private_file(path)?;
+    serde_json::to_writer(&mut file, value)?;
+    file.write_all(b"\n")?;
+    file.sync_all()?;
+    File::open(path.parent().ok_or(SupervisorError::Conflict)?)?.sync_all()?;
+    Ok(())
+}
+
+/// The child opens SQLite read-only, without taking the coordinator's process lock.
+/// It verifies the exact launch plan, reservation and verified claim/worktree before READY.
+pub fn supervise(root: &Path, attempt: &str) -> Result<(), SupervisorError> {
+    if !valid_attempt(attempt) {
+        return Err(SupervisorError::Conflict);
+    }
+    let attempts = root.join("attempts");
+    let result = (|| {
+        let plan: LaunchPlan =
+            serde_json::from_slice(&fs::read(attempts.join(format!("{attempt}.plan.json")))?)?;
+        if plan.attempt_id != attempt
+            || plan.session_id != plan.task_id
+            || plan.config_revision.is_empty()
+        {
+            return Err(SupervisorError::Conflict);
+        }
+        let connection = Connection::open_with_flags(
+            root.join("state.sqlite3"),
+            OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?;
+        let row: Option<(String, String)> = connection.query_row(
+            "SELECT i.detail, (SELECT payload FROM evidence WHERE task_id=?2 AND kind='worktree_created')
+             FROM intents i JOIN attempts a ON a.id=i.attempt_id
+             JOIN reservations r ON r.attempt_id=a.id JOIN tasks t ON t.id=a.task_id
+             WHERE i.kind='launch' AND i.attempt_id=?1 AND i.task_id=?2
+               AND r.task_id=?2 AND r.status='reserved' AND t.state='held'
+               AND (SELECT COUNT(*) FROM intents WHERE attempt_id=?1 AND kind='supervisor_dispatch')=1
+               AND (SELECT COUNT(*) FROM evidence WHERE task_id=?2 AND kind='claim_verified')=1
+               AND (SELECT COUNT(*) FROM evidence WHERE task_id=?2 AND kind='worktree_created')=1",
+            params![attempt, plan.task_id], |row| Ok((row.get(0)?, row.get(1)?))
+        ).optional()?;
+        let (persisted, worktree) = row.ok_or(SupervisorError::Conflict)?;
+        if serde_json::from_str::<LaunchPlan>(&persisted)? != plan {
+            return Err(SupervisorError::Conflict);
+        }
+        let identity: WorktreeIdentity = serde_json::from_str(&worktree)?;
+        if identity.path != plan.worktree || fs::canonicalize(&plan.worktree)? != plan.worktree {
+            return Err(SupervisorError::Conflict);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let metadata = fs::metadata(&plan.worktree)?;
+            if metadata.dev() != identity.device || metadata.ino() != identity.inode {
+                return Err(SupervisorError::Conflict);
+            }
+        }
+        let mut stdout = std::io::stdout().lock();
+        stdout.write_all(b"READY\n")?;
+        stdout.flush()?;
+        drop(stdout);
+        let mut gate = [0u8; 1];
+        if std::io::stdin().read(&mut gate)? != 1 || gate[0] != b'R' {
+            return Err(SupervisorError::GateClosed);
+        }
+        let release: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM intents WHERE attempt_id=?1 AND task_id=?2 AND kind='gate_release'",
+            params![attempt, plan.task_id], |row| row.get(0)
+        )?;
+        if release != 1 {
+            return Err(SupervisorError::Conflict);
+        }
+        run_gated_child(&plan, std::io::Cursor::new(gate), &attempts)?;
+        Ok(())
+    })();
+    if let Err(error) = &result {
+        // The coordinator retains the reservation whether the gate closed or the worker failed.
+        let _ = write_private_json(
+            &attempts.join(format!("{attempt}.supervisor-error.json")),
+            &serde_json::json!({"attempt_id":attempt,"error":error.to_string()}),
+        );
+    }
+    result
+}
+
+/// Production always starts this binary. The explicit binary variant permits an
+/// integration test process to dispatch the built CLI instead of its test harness.
+#[cfg(unix)]
+pub fn execute(store: &mut StateStore, plan: &LaunchPlan) -> Result<(), SupervisorError> {
+    execute_with_binary(store, plan, &env::current_exe()?)
+}
+
+#[cfg(unix)]
+pub fn execute_with_binary(
+    store: &mut StateStore,
+    plan: &LaunchPlan,
+    binary: &Path,
+) -> Result<(), SupervisorError> {
+    if !valid_attempt(&plan.attempt_id) {
+        return Err(SupervisorError::Conflict);
+    }
+    let root = store.root().to_path_buf();
+    let attempts = private_attempts(&root)?;
+    let serialized = serde_json::to_string(plan)?;
+    // A second dispatch cannot overwrite the plan or launch the worker.
+    write_private_json(
+        &attempts.join(format!("{}.plan.json", plan.attempt_id)),
+        plan,
+    )?;
+    store.begin_supervision(&plan.task_id, &plan.attempt_id, &serialized)?;
+    let stderr = private_file(&attempts.join(format!("{}.supervisor.log", plan.attempt_id)))?;
+    let mut command = Command::new(binary);
+    command
+        .arg("__supervise")
+        .arg(&root)
+        .arg(&plan.attempt_id)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(stderr);
+    use std::os::unix::process::CommandExt;
+    // This process must outlive the coordinator without inheriting its terminal/session.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = command.spawn()?;
+    let mut ready = String::new();
+    use std::io::BufRead;
+    let mut reader = std::io::BufReader::new(child.stdout.take().expect("piped stdout"));
+    if reader.read_line(&mut ready)? != 6 || ready != "READY\n" {
+        return Err(SupervisorError::ExecutionUnavailable);
+    }
+    let (boot, start) = identity(child.id())?;
+    let process = serde_json::json!({"pid":child.id(),"boot_identity":boot,"start_identity":start});
+    store.record_evidence(
+        &plan.task_id,
+        Some(&plan.attempt_id),
+        "supervisor_ready",
+        &process.to_string(),
+    )?;
+    store.record_intent(
+        &format!("gate-{}", plan.attempt_id),
+        &plan.task_id,
+        Some(&plan.attempt_id),
+        "gate_release",
+        &process.to_string(),
+    )?;
+    let mut gate = child.stdin.take().expect("piped stdin");
+    gate.write_all(b"R")?;
+    gate.flush()?;
+    store.record_evidence(
+        &plan.task_id,
+        Some(&plan.attempt_id),
+        "gate_sent",
+        &process.to_string(),
+    )?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub fn execute(_store: &mut StateStore, _plan: &LaunchPlan) -> Result<(), SupervisorError> {
     Err(SupervisorError::ExecutionUnavailable)
 }

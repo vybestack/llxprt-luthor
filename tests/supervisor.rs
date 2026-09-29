@@ -2,9 +2,16 @@ use luthor::{
     config::{CommandTemplate, Config, Mapping, Marker, Source},
     eligibility::Candidate,
     state::{StateError, StateStore, WorktreeIdentity, WorktreeIntent},
-    supervisor::{SupervisorError, execute, prepare_initial, run_gated_child},
+    supervisor::{SupervisorError, execute_with_binary, prepare_initial, run_gated_child},
 };
 use std::{fs, io::Cursor, path::Path};
+#[cfg(unix)]
+use std::{
+    io::BufRead,
+    process::{Command, Stdio},
+    thread,
+    time::Duration,
+};
 
 fn configured(root: &Path) -> (Config, Candidate) {
     let mapping = Mapping {
@@ -104,7 +111,7 @@ fn claimed(store: &mut StateStore, config: &Config, candidate: &Candidate, root:
 }
 
 #[test]
-fn intent_and_slot_survive_restart_but_execute_stays_fail_closed() {
+fn intent_and_slot_survive_restart_and_failed_dispatch_stays_held() {
     let dir = tempfile::tempdir().unwrap();
     let (config, candidate) = configured(dir.path());
     let mut store = StateStore::open(&config.state_root, 1).unwrap();
@@ -113,10 +120,8 @@ fn intent_and_slot_survive_restart_but_execute_stays_fail_closed() {
     assert_eq!(plan.session_id, "task");
     assert!(plan.args.iter().any(|arg| arg.contains("attempt-1")));
     assert_eq!(store.reservation_count().unwrap(), 1);
-    assert!(matches!(
-        execute(&plan),
-        Err(SupervisorError::ExecutionUnavailable)
-    ));
+    assert!(execute_with_binary(&mut store, &plan, &dir.path().join("absent-luthor")).is_err());
+    assert!(execute_with_binary(&mut store, &plan, &dir.path().join("absent-luthor")).is_err());
     assert!(!plan.executable.exists());
     drop(store);
 
@@ -284,4 +289,101 @@ fn released_gate_captures_durable_logs_and_receipts_real_exit() {
             dir.path().join(format!("{attempt}.stdout.log"))
         );
     }
+}
+
+#[cfg(unix)]
+fn prepared_fake_worker(
+    dir: &tempfile::TempDir,
+) -> (
+    Config,
+    StateStore,
+    luthor::supervisor::LaunchPlan,
+    std::path::PathBuf,
+) {
+    use std::os::unix::fs::PermissionsExt;
+    let (mut config, candidate) = configured(dir.path());
+    let marker = dir.path().join("worker-started");
+    let worker = dir.path().join("worker");
+    fs::write(&worker, format!("#!/bin/sh\necho started > '{}'\nprintf 'worker stdout\\n'\nprintf 'worker stderr\\n' >&2\n", marker.display())).unwrap();
+    fs::set_permissions(&worker, fs::Permissions::from_mode(0o700)).unwrap();
+    config.initial.executable = worker;
+    let mut store = StateStore::open(&config.state_root, 1).unwrap();
+    claimed(&mut store, &config, &candidate, dir.path());
+    let plan = prepare_initial(&mut store, "task", "attempt-real").unwrap();
+    (config, store, plan, marker)
+}
+
+#[cfg(unix)]
+#[test]
+fn detached_same_binary_dispatch_records_gate_and_worker_receipt() {
+    let dir = tempfile::tempdir().unwrap();
+    let (config, mut store, plan, marker) = prepared_fake_worker(&dir);
+    execute_with_binary(&mut store, &plan, Path::new(env!("CARGO_BIN_EXE_luthor"))).unwrap();
+    let receipt = config.state_root.join("attempts/attempt-real.receipt.json");
+    for _ in 0..100 {
+        if receipt.exists() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(30));
+    }
+    assert!(marker.exists());
+    let receipt: luthor::supervisor::ExitReceipt =
+        serde_json::from_slice(&fs::read(receipt).unwrap()).unwrap();
+    assert_eq!(receipt.exit_code, Some(0));
+    assert_eq!(fs::read(receipt.stdout_path).unwrap(), b"worker stdout\n");
+    assert_eq!(fs::read(receipt.stderr_path).unwrap(), b"worker stderr\n");
+    assert_eq!(store.reservation_count().unwrap(), 1);
+    let kinds = store.evidence_kinds("task").unwrap();
+    assert!(kinds.contains(&"supervisor_ready".into()));
+    assert!(kinds.contains(&"gate_sent".into()));
+    assert!(
+        execute_with_binary(&mut store, &plan, Path::new(env!("CARGO_BIN_EXE_luthor"))).is_err()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn same_binary_ready_without_release_does_not_launch_worker() {
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    let dir = tempfile::tempdir().unwrap();
+    let (config, mut store, plan, marker) = prepared_fake_worker(&dir);
+    let attempts = config.state_root.join("attempts");
+    fs::DirBuilder::new().mode(0o700).create(&attempts).unwrap();
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(attempts.join("attempt-real.plan.json"))
+        .unwrap();
+    serde_json::to_writer(&mut file, &plan).unwrap();
+    file.sync_all().unwrap();
+    fs::File::open(&attempts).unwrap().sync_all().unwrap();
+    store
+        .begin_supervision(
+            "task",
+            "attempt-real",
+            &serde_json::to_string(&plan).unwrap(),
+        )
+        .unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_luthor"))
+        .args([
+            "__supervise",
+            config.state_root.to_str().unwrap(),
+            "attempt-real",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut ready = String::new();
+    std::io::BufReader::new(child.stdout.take().unwrap())
+        .read_line(&mut ready)
+        .unwrap();
+    assert_eq!(ready, "READY\n");
+    drop(child.stdin.take());
+    assert!(!child.wait().unwrap().success());
+    assert!(!marker.exists());
+    assert!(attempts.join("attempt-real.supervisor-error.json").exists());
+    assert_eq!(store.reservation_count().unwrap(), 1);
 }

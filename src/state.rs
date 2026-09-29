@@ -576,6 +576,45 @@ impl StateStore {
             .map_err(StateError::from)
     }
 
+    /// A dispatch marker is written once, before spawning. An uncertain spawn
+    /// cannot be retried automatically, even if the supervisor never became ready.
+    pub fn begin_supervision(
+        &mut self,
+        task_id: &str,
+        attempt_id: &str,
+        plan: &str,
+    ) -> Result<(), StateError> {
+        let tx = self.connection.transaction()?;
+        let persisted: Option<String> = tx
+            .query_row(
+                "SELECT i.detail FROM intents i JOIN attempts a ON a.id=i.attempt_id
+             JOIN reservations r ON r.attempt_id=a.id
+             JOIN tasks t ON t.id=a.task_id
+             WHERE i.kind='launch' AND i.attempt_id=?1 AND i.task_id=?2
+               AND r.task_id=?2 AND r.status='reserved' AND t.state='held'
+               AND (SELECT COUNT(*) FROM evidence WHERE task_id=?2 AND kind='claim_verified')=1
+               AND (SELECT COUNT(*) FROM evidence WHERE task_id=?2 AND kind='worktree_created')=1",
+                params![attempt_id, task_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if persisted.as_deref() != Some(plan) {
+            return Err(StateError::LaunchBlocked);
+        }
+        let previous: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM intents WHERE attempt_id=?1 AND kind='supervisor_dispatch'",
+            [attempt_id],
+            |row| row.get(0),
+        )?;
+        if previous != 0 {
+            return Err(StateError::LaunchBlocked);
+        }
+        tx.execute("INSERT INTO intents(id,task_id,attempt_id,kind,detail) VALUES(?1,?2,?3,'supervisor_dispatch',?4)",
+            params![format!("supervisor-{attempt_id}"), task_id, attempt_id, plan])?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn release_reservation(&mut self, attempt_id: &str) -> Result<usize, StateError> {
         let launch: i64 = self.connection.query_row(
             "SELECT COUNT(*) FROM intents WHERE attempt_id=?1 AND kind='launch'",

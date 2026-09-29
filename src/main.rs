@@ -1,4 +1,4 @@
-use luthor::{config::Config, eligibility, github::project::GhProjectReader};
+use luthor::{config::Config, eligibility, github::project::GhProjectReader, supervisor};
 use serde_json::json;
 use std::{env, fs, path::PathBuf, process::ExitCode};
 
@@ -15,6 +15,15 @@ fn main() -> ExitCode {
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = env::args().skip(1);
     match args.next().as_deref() {
+        Some("__supervise") => {
+            let root = args.next().ok_or("missing state root")?;
+            let attempt = args.next().ok_or("missing attempt id")?;
+            if args.next().is_some() {
+                return Err("unexpected argument".into());
+            }
+            supervisor::supervise(std::path::Path::new(&root), &attempt)?;
+            return Ok(());
+        }
         Some("discover") => {}
         Some("--help" | "-h") => {
             println!("Usage: luthor discover --config <path>");
