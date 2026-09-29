@@ -35,6 +35,27 @@ fn rejects_embedded_credential_fields() {
 }
 
 #[test]
+fn rejects_secret_flags_bad_braces_and_accepts_benign_prompt() {
+    for bad in [
+        "--api-key=abc",
+        "--token",
+        "--auth-key=abc",
+        "credential=abc",
+        "{task.issue_number}}",
+        "{{task.issue_number}",
+        "{task.issue_number",
+    ] {
+        assert!(
+            Config::from_json(&valid().replace("{task.issue_number}", bad)).is_err(),
+            "accepted {bad}"
+        );
+    }
+    assert!(
+        Config::from_json(&valid().replace("{task.issue_number}", "Please fix this issue")).is_ok()
+    );
+}
+
+#[test]
 fn milestone_can_be_omitted() {
     let json = valid().replace(",\"milestone\":\"0.12.0\"", "");
     assert!(

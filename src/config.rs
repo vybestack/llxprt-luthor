@@ -119,6 +119,25 @@ impl Config {
     }
 }
 
+fn contains_credential(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    let compact: String = lower
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect();
+    let sensitive = [
+        "apikey",
+        "token",
+        "authkey",
+        "credential",
+        "password",
+        "secret",
+    ]
+    .iter()
+    .any(|needle| compact.contains(needle));
+    sensitive && (value.starts_with('-') || value.contains('=') || lower.starts_with("bearer "))
+}
+
 fn validate_repository(value: &str) -> Result<(), ConfigError> {
     let parts: Vec<_> = value.split('/').collect();
     if parts.len() != 2
@@ -143,6 +162,11 @@ fn validate_command(command: &CommandTemplate) -> Result<(), ConfigError> {
         ));
     }
     for arg in &command.args {
+        if contains_credential(arg) {
+            return Err(ConfigError::Invalid(
+                "credential-bearing command argument is forbidden".into(),
+            ));
+        }
         if arg.contains("${")
             || arg.contains("$(")
             || arg.contains('`')
@@ -156,11 +180,17 @@ fn validate_command(command: &CommandTemplate) -> Result<(), ConfigError> {
             ));
         }
         let mut rest = arg.as_str();
-        while let Some(start) = rest.find('{') {
+        while let Some(start) = rest.find(['{', '}']) {
+            if rest.as_bytes()[start] == b'}' {
+                return Err(ConfigError::Invalid("unmatched template delimiter".into()));
+            }
             let tail = &rest[start + 1..];
-            let Some(end) = tail.find('}') else {
+            let Some(end) = tail.find(['{', '}']) else {
                 return Err(ConfigError::Invalid("unclosed template variable".into()));
             };
+            if tail.as_bytes()[end] != b'}' {
+                return Err(ConfigError::Invalid("nested template delimiter".into()));
+            }
             if !matches!(
                 &tail[..end],
                 "task.issue_number"
