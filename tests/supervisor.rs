@@ -1079,12 +1079,13 @@ fn stopped_receipt(config: &Config) -> luthor::supervisor::ExitReceipt {
 #[cfg(unix)]
 #[test]
 fn stop_term_has_durable_intent_and_keeps_slot_until_reconcile() {
-    let (_dir, config, mut store) =
-        running_worker("#!/bin/sh\necho started\ntrap 'exit 0' TERM\nwhile :; do :; done\n");
+    let (_dir, config, mut store) = running_worker(
+        "#!/bin/sh\necho started\ntrap 'exit 0' INT\ntrap 'exit 0' TERM\nwhile :; do :; done\n",
+    );
     request_stop(&mut store, "task", "attempt-real").unwrap();
     assert!(store.stop_intent("task", "attempt-real").unwrap().is_some());
     let receipt = stopped_receipt(&config);
-    assert_eq!(receipt.stop_signals, vec![libc::SIGTERM]);
+    assert_eq!(receipt.stop_signals, vec![libc::SIGINT]);
     assert_eq!(store.reservation_count().unwrap(), 1);
     assert!(matches!(
         reconcile_attempt(&mut store, "task", "attempt-real").unwrap(),
@@ -1109,10 +1110,13 @@ fn stop_term_has_durable_intent_and_keeps_slot_until_reconcile() {
 #[test]
 fn stop_escalates_only_on_live_matching_child() {
     let (_dir, config, mut store) =
-        running_worker("#!/bin/sh\necho started\ntrap '' TERM\nwhile :; do :; done\n");
+        running_worker("#!/bin/sh\necho started\ntrap '' INT TERM\nwhile :; do :; done\n");
     request_stop(&mut store, "task", "attempt-real").unwrap();
     let receipt = stopped_receipt(&config);
-    assert_eq!(receipt.stop_signals, vec![libc::SIGTERM, libc::SIGKILL]);
+    assert_eq!(
+        receipt.stop_signals,
+        vec![libc::SIGINT, libc::SIGTERM, libc::SIGKILL]
+    );
     assert_eq!(receipt.signal, Some(libc::SIGKILL));
     assert_eq!(store.reservation_count().unwrap(), 1);
     assert!(matches!(

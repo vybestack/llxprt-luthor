@@ -659,12 +659,11 @@ fn stop_without_supervisor(
     let pid = i32::try_from(child.pid).map_err(|_| SupervisorError::StopUnavailable)?;
     let target = serde_json::json!({"pid":child.pid,"group_id":child.group_id,
         "boot_identity":child.boot_identity,"start_identity":child.start_identity});
-    for signal in [libc::SIGTERM, libc::SIGKILL] {
-        if signal == libc::SIGKILL {
-            // A fresh identity and group check is required before escalation.
-            if !matching_child(&child) {
-                return Err(SupervisorError::StopUnavailable);
-            }
+    for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGKILL] {
+        // Revalidate the recorded boot, start, and dedicated process group before
+        // every escalation. A PID alone is never a safe signal target.
+        if !matching_child(&child) {
+            return Err(SupervisorError::StopUnavailable);
         }
         let decision = serde_json::json!({"target":target,"signal":signal});
         store.record_evidence(
@@ -809,31 +808,37 @@ fn handle_stop(
         stream.write_all(b"N")?;
         return Ok(());
     }
-    // The unreaped Child owns this PID. Signal its verified dedicated group only.
-    if unsafe { libc::kill(-pid, libc::SIGTERM) } != 0 {
-        stream.write_all(b"N")?;
-        return Ok(());
-    }
-    signals.push(libc::SIGTERM);
-    let deadline = Instant::now() + Duration::from_millis(400);
-    while Instant::now() < deadline {
+    // Each escalation targets only the still-matching dedicated process group.
+    for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGKILL] {
         if child.try_wait()?.is_some() {
             stream.write_all(b"Y")?;
             return Ok(());
         }
-        thread::sleep(Duration::from_millis(20));
-    }
-    if child.try_wait()?.is_none()
-        && identity(child.id()).ok().as_ref() == Some(&(boot.to_owned(), start.to_owned()))
-        && unsafe { libc::getpgid(pid) } == pid
-    {
-        if unsafe { libc::kill(-pid, libc::SIGKILL) } != 0 {
+        if identity(child.id()).ok().as_ref() != Some(&(boot.to_owned(), start.to_owned()))
+            || unsafe { libc::getpgid(pid) } != pid
+        {
             stream.write_all(b"N")?;
             return Ok(());
         }
-        signals.push(libc::SIGKILL);
+        if unsafe { libc::kill(-pid, signal) } != 0 {
+            stream.write_all(b"N")?;
+            return Ok(());
+        }
+        signals.push(signal);
+        let deadline = Instant::now() + Duration::from_millis(400);
+        while Instant::now() < deadline {
+            if child.try_wait()?.is_some() {
+                stream.write_all(b"Y")?;
+                return Ok(());
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
     }
-    stream.write_all(b"Y")?;
+    if child.try_wait()?.is_some() {
+        stream.write_all(b"Y")?;
+    } else {
+        stream.write_all(b"N")?;
+    }
     Ok(())
 }
 
