@@ -786,7 +786,7 @@ mod resume_cli {
             fs::write(
                 &worker,
                 format!(
-                    "#!/bin/sh\nprintf 'started\\n' >> '{}'\nexec /bin/sleep 120\n",
+                    "#!/bin/sh\nprintf 'stdout-check\\n'\nprintf 'stderr-check\\n' >&2\nprintf 'started\\n' >> '{}'\nexec /bin/sleep 120\n",
                     self._dir.path().join("a-starts.log").display()
                 ),
             )
@@ -1055,6 +1055,74 @@ esac
             assert_eq!(task["process"], serde_json::Value::Null);
             assert_eq!(task["reserved_slot"], true);
         }
+    }
+
+    #[test]
+    fn live_worker_reports_stream_bytes_before_exit() {
+        let h = Harness::new();
+        h.seed_running_task();
+        let attempts = h.state.join("attempts");
+        let stdout_log = attempts.join("running-attempt.stdout.log");
+        let stderr_log = attempts.join("running-attempt.stderr.log");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            let stdout_bytes = fs::metadata(&stdout_log)
+                .map(|meta| meta.len())
+                .unwrap_or(0);
+            let stderr_bytes = fs::metadata(&stderr_log)
+                .map(|meta| meta.len())
+                .unwrap_or(0);
+            if stdout_bytes > 0 && stderr_bytes > 0 {
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            fs::metadata(&stdout_log).unwrap().len() > 0,
+            "worker stdout was not captured"
+        );
+        assert!(
+            fs::metadata(&stderr_log).unwrap().len() > 0,
+            "worker stderr was not captured"
+        );
+
+        let status = h.run(&["status", "--config", h.config.to_str().unwrap()]);
+        assert!(status.status.success(), "{}", stderr(&status));
+        let status: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
+        let status_task = &status["tasks"][0];
+        assert_eq!(status_task["phase"], "running");
+        assert!(status_task["observed_stdout_bytes"].as_u64().unwrap() > 0);
+        assert!(status_task["observed_stderr_bytes"].as_u64().unwrap() > 0);
+        assert_eq!(status_task["byte_counts_are_observational"], true);
+        assert!(status_task["last_output_age_seconds"].as_u64().unwrap() < 5);
+
+        let shown = h.run(&["show", "task", "--config", h.config.to_str().unwrap()]);
+        assert!(shown.status.success(), "{}", stderr(&shown));
+        let shown: serde_json::Value = serde_json::from_slice(&shown.stdout).unwrap();
+        let shown_task = &shown;
+        assert_eq!(shown_task["phase"], "running");
+        assert!(shown_task["observed_stdout_bytes"].as_u64().unwrap() > 0);
+        assert!(shown_task["observed_stderr_bytes"].as_u64().unwrap() > 0);
+        assert_eq!(shown_task["byte_counts_are_observational"], true);
+        assert!(shown_task["last_output_age_seconds"].as_u64().unwrap() < 5);
+        for output in [&status.to_string(), &shown.to_string()] {
+            assert!(!output.contains("stdout-check"));
+            assert!(!output.contains("stderr-check"));
+        }
+
+        h.stop_running_task();
+        let receipt: serde_json::Value = serde_json::from_slice(
+            &fs::read(attempts.join("running-attempt.receipt.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            receipt["stdout_bytes"],
+            fs::metadata(stdout_log).unwrap().len()
+        );
+        assert_eq!(
+            receipt["stderr_bytes"],
+            fs::metadata(stderr_log).unwrap().len()
+        );
     }
 
     #[test]
