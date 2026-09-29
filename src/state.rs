@@ -1116,7 +1116,6 @@ impl StateStore {
                AND t.state='held' AND a.lifecycle='completed' AND a.outcome IS NOT NULL AND r.status='released'
                AND a.id=(SELECT id FROM attempts WHERE task_id=?1 ORDER BY rowid DESC LIMIT 1)
                AND (SELECT COUNT(*) FROM evidence WHERE attempt_id=?2 AND kind='attempt_exit')=1
-               AND (SELECT COUNT(*) FROM intents WHERE task_id=?1 AND attempt_id=?2 AND kind='stop')=0
                AND (SELECT COUNT(*) FROM intents WHERE task_id=?1 AND attempt_id=?2 AND kind='launch')=1
                AND (SELECT COUNT(*) FROM evidence WHERE task_id=?1 AND kind='claim_verified')=1
                AND (SELECT COUNT(*) FROM evidence WHERE task_id=?1 AND kind='worktree_created')=1

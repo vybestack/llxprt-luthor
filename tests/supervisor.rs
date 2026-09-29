@@ -1027,6 +1027,48 @@ fn natural_exit_seven_attends_and_scheduler_dispatches_only_other_issue() {
 
 #[cfg(unix)]
 #[test]
+fn pause_after_natural_exit_preserves_natural_attention_path() {
+    let (_dir, config, mut store) = dispatched_fixture(7);
+    let before: luthor::supervisor::ExitReceipt =
+        serde_json::from_slice(&fs::read(receipt_path(&config)).unwrap()).unwrap();
+    assert!(before.stop_signals.is_empty());
+
+    // Model exit after durable pause intent and before any stop signal is sent.
+    store.record_stop_intent("task", "attempt-real").unwrap();
+    assert!(store.stop_intent("task", "attempt-real").unwrap().is_some());
+    let after: luthor::supervisor::ExitReceipt =
+        serde_json::from_slice(&fs::read(receipt_path(&config)).unwrap()).unwrap();
+    assert!(after.stop_signals.is_empty());
+
+    let mut prs = ExitPr::default();
+    assert!(matches!(
+        luthor::coordinator::reconcile_with_pr(&mut store, "task", "attempt-real", &mut prs)
+            .unwrap(),
+        Reconciliation::Completed {
+            exit_code: Some(7),
+            signal: None
+        }
+    ));
+    assert_eq!(prs.reads, 1);
+    assert_eq!(
+        store.task_phase("task").unwrap().as_deref(),
+        Some("attention")
+    );
+    assert_eq!(store.reservation_count().unwrap(), 0);
+    assert_eq!(
+        store.latest_attempt("task").unwrap().as_deref(),
+        Some("attempt-real")
+    );
+    assert!(
+        store
+            .evidence_kinds("task")
+            .unwrap()
+            .contains(&"exit_pr_lookup".into())
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn natural_exit_pr_error_keeps_held_slot_and_evidence() {
     let (_dir, config, mut store) = dispatched_fixture(7);
     let mut prs = ExitPr {
