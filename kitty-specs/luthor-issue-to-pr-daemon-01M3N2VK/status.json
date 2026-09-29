@@ -105,13 +105,13 @@
         "reviewer": "deepthinker",
         "verdict": "changes_requested"
       },
-      "role": "reviewer",
-      "shell_pid": 86143,
-      "shell_pid_created_at": "1790702402.245152",
+      "role": "implementer",
+      "shell_pid": null,
+      "shell_pid_created_at": null,
       "subtasks": {
-        "T006": "done",
-        "T007": "done",
-        "T008": "done"
+        "T006": "planned",
+        "T007": "planned",
+        "T008": "planned"
       }
     },
     "WP04": {
