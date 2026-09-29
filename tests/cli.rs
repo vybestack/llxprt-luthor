@@ -277,3 +277,188 @@ fn pause_and_reconcile_reject_bad_arguments_and_unknown_tasks() {
         assert!(String::from_utf8_lossy(&output.stderr).contains("task not found"));
     }
 }
+
+#[cfg(unix)]
+mod resume_cli {
+    use luthor::{
+        config::{CommandTemplate, Config, Mapping, Marker, Source},
+        eligibility::Candidate,
+        state::StateStore,
+    };
+    use std::{fs, os::unix::fs::PermissionsExt, path::Path, process::Command};
+    use tempfile::{TempDir, tempdir_in};
+
+    struct Harness {
+        _dir: TempDir,
+        config: std::path::PathBuf,
+        state: std::path::PathBuf,
+        log: std::path::PathBuf,
+        path: String,
+    }
+
+    impl Harness {
+        fn new() -> Self {
+            let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tmp");
+            fs::create_dir_all(&root).unwrap();
+            let dir = tempdir_in(root).unwrap();
+            let gh = dir.path().join("gh");
+            let log = dir.path().join("invocations.log");
+            fs::write(
+                &gh,
+                format!(
+                    "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nexit 1\n",
+                    log.display()
+                ),
+            )
+            .unwrap();
+            fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).unwrap();
+            let state = dir.path().join("state");
+            let config = dir.path().join("config.json");
+            let value = Config {
+                state_root: state.clone(),
+                worktree_root: dir.path().to_path_buf(),
+                capacity: 2,
+                assignment_login: "agent".into(),
+                sources: vec![Source {
+                    project_id: "PROJECT".into(),
+                    repositories: vec!["org/tracker".into()],
+                    ready_marker: Marker::Label {
+                        name: "ready".into(),
+                    },
+                    milestone: None,
+                }],
+                mappings: vec![Mapping {
+                    tracker_repository: "org/tracker".into(),
+                    code_repository: "org/code".into(),
+                    checkout: dir.path().join("checkout"),
+                    base_branch: "main".into(),
+                    push_remote: "origin".into(),
+                    allowed_pr_head_repository: "org/head".into(),
+                    allowed_pr_author: "agent".into(),
+                }],
+                initial: CommandTemplate {
+                    executable: gh.clone(),
+                    args: vec!["initial-worker".into()],
+                },
+                resume: CommandTemplate {
+                    executable: gh,
+                    args: vec!["resume-worker".into()],
+                },
+            };
+            value.validate().unwrap();
+            fs::write(&config, serde_json::to_vec(&value).unwrap()).unwrap();
+            let path = format!("{}:/usr/bin:/bin", dir.path().display());
+            Self {
+                _dir: dir,
+                config,
+                state,
+                log,
+                path,
+            }
+        }
+        fn run(&self, args: &[&str]) -> std::process::Output {
+            Command::new(env!("CARGO_BIN_EXE_luthor"))
+                .args(args)
+                .env("PATH", &self.path)
+                .output()
+                .unwrap()
+        }
+        fn seed_held_task(&self) {
+            let config = Config::from_json(&fs::read_to_string(&self.config).unwrap()).unwrap();
+            let source = config.sources[0].clone();
+            let mapping = config.mappings[0].clone();
+            let candidate = Candidate {
+                project_id: "PROJECT".into(),
+                item_id: "ITEM".into(),
+                repository: "org/tracker".into(),
+                issue_node_id: "ISSUE".into(),
+                issue_number: 7,
+                issue_url: "https://github.com/org/tracker/issues/7".into(),
+                tracker_repo_id: "REPO".into(),
+                milestone_id: None,
+                milestone_title: None,
+                observed_at_unix_secs: 1,
+                observed_state: "open".into(),
+                observed_assignees: vec!["agent".into()],
+                observed_labels: vec!["ready".into()],
+                observed_project_fields: vec![],
+                marker: source.ready_marker.clone(),
+                source,
+                mapping,
+            };
+            let mut store = StateStore::open(&self.state, config.capacity).unwrap();
+            store
+                .create_task("task", &candidate, "rev", &config)
+                .unwrap();
+            store.hold_task("task", "fixture paused").unwrap();
+        }
+    }
+    fn stderr(output: &std::process::Output) -> String {
+        String::from_utf8_lossy(&output.stderr).into_owned()
+    }
+
+    #[test]
+    fn resume_without_execute_is_held_without_github_or_worker_invocations() {
+        let h = Harness::new();
+        let output = h.run(&["resume", "task", "--config", h.config.to_str().unwrap()]);
+        assert!(!output.status.success());
+        assert!(stderr(&output).contains("pass --execute"));
+        assert!(!h.log.exists());
+    }
+    #[test]
+    fn resume_rejects_malformed_and_duplicate_execute_arguments_without_invocation() {
+        let h = Harness::new();
+        let config = h.config.to_str().unwrap();
+        for args in [
+            vec![
+                "resume",
+                "task",
+                "--config",
+                config,
+                "--execute",
+                "--execute",
+            ],
+            vec!["resume", "task", "--execute", "--config", config],
+            vec!["resume", "task", "--config", config, "--unknown"],
+        ] {
+            let output = h.run(&args);
+            assert!(!output.status.success(), "{args:?}");
+        }
+        assert!(!h.log.exists());
+    }
+    #[test]
+    fn resume_unknown_task_fails_before_github_invocation() {
+        let h = Harness::new();
+        let output = h.run(&[
+            "resume",
+            "unknown",
+            "--config",
+            h.config.to_str().unwrap(),
+            "--execute",
+        ]);
+        assert!(!output.status.success());
+        assert!(stderr(&output).contains("task not found"));
+        assert!(!h.log.exists());
+    }
+    #[test]
+    fn resume_rejects_non_resumable_held_task_without_github_or_worker_invocation() {
+        let h = Harness::new();
+        h.seed_held_task();
+        let output = h.run(&[
+            "resume",
+            "task",
+            "--config",
+            h.config.to_str().unwrap(),
+            "--execute",
+        ]);
+        assert!(!output.status.success());
+        assert!(stderr(&output).contains("resume held"));
+        let store = StateStore::open(&h.state, 2).unwrap();
+        assert_eq!(store.task_phase("task").unwrap().as_deref(), Some("held"));
+        assert_eq!(
+            store.held_reason("task").unwrap().as_deref(),
+            Some("fixture paused")
+        );
+        assert!(!h.log.exists());
+    }
+}
