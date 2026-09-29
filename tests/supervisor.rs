@@ -1183,6 +1183,51 @@ fn paused_fixture() -> (
 
 #[cfg(unix)]
 #[test]
+#[ignore]
+fn resume_environment_mismatch_child() {
+    let Ok(root) = std::env::var("LUTHOR_RESUME_STATE_ROOT") else {
+        return;
+    };
+    let root = std::path::PathBuf::from(root);
+    let task = std::env::var("LUTHOR_RESUME_TASK").unwrap();
+    let attempt = std::env::var("LUTHOR_RESUME_ATTEMPT").unwrap();
+    let mut store = StateStore::open(&root, 1).unwrap();
+    assert!(matches!(
+        prepare_resume(&mut store, &task, &attempt),
+        Err(SupervisorError::Conflict)
+    ));
+    assert_eq!(store.reservation_count().unwrap(), 0);
+    assert_eq!(store.latest_attempt(&task).unwrap().as_deref(), Some("attempt-real"));
+    assert!(store.launch_intent(&attempt).unwrap().is_none());
+}
+
+#[cfg(unix)]
+#[test]
+fn resume_rejects_different_root_environment_before_reservation_in_child_process() {
+    let (_dir, config, store, initial) = paused_fixture();
+    let root = config.state_root.clone();
+    let home_b = tempfile::tempdir().unwrap();
+    assert_ne!(initial.session_environment.home, fs::canonicalize(home_b.path()).unwrap());
+    assert_eq!(store.reservation_count().unwrap(), 0);
+    drop(store);
+
+    let status = Command::new(std::env::current_exe().unwrap())
+        .arg("--exact")
+        .arg("resume_environment_mismatch_child")
+        .arg("--ignored")
+        .env_clear()
+        .env("HOME", home_b.path())
+        .env("XDG_CONFIG_HOME", home_b.path().join("config"))
+        .env("LUTHOR_RESUME_STATE_ROOT", &root)
+        .env("LUTHOR_RESUME_TASK", "task")
+        .env("LUTHOR_RESUME_ATTEMPT", "attempt-next")
+        .status()
+        .unwrap();
+    assert!(status.success());
+}
+
+#[cfg(unix)]
+#[test]
 fn paused_attempt_prepares_distinct_continuation_after_reopen() {
     let (_dir, config, store, initial) = paused_fixture();
     drop(store);
