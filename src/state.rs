@@ -24,9 +24,17 @@ pub enum StateError {
     UnsupportedDatabaseVersion(i32),
 }
 
+struct StateLock(File);
+
+impl Drop for StateLock {
+    fn drop(&mut self) {
+        self.0.unlock().expect("failed to release state lock");
+    }
+}
+
 pub struct StateStore {
     connection: Connection,
-    _lock: File,
+    _lock: StateLock,
     root: PathBuf,
 }
 
@@ -86,7 +94,7 @@ impl StateStore {
         tx.commit()?;
         Ok(Self {
             connection,
-            _lock: lock,
+            _lock: StateLock(lock),
             root: root.to_path_buf(),
         })
     }

@@ -8,10 +8,14 @@ fn persisted_capacity_is_authoritative_and_schema_version_is_checked() {
         Err(StateError::InvalidCapacity)
     ));
     drop(StateStore::open(dir.path(), 1).unwrap());
-    assert!(matches!(
-        StateStore::open(dir.path(), 2),
-        Err(StateError::CapacityMismatch { .. })
-    ));
+    let mismatch = match StateStore::open(dir.path(), 2) {
+        Ok(_) => panic!("capacity mismatch was accepted"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(mismatch, StateError::CapacityMismatch { .. }),
+        "unexpected reopen error: {mismatch:?}"
+    );
     Connection::open(dir.path().join("state.sqlite3"))
         .unwrap()
         .pragma_update(None, "user_version", 99)
