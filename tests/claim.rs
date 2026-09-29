@@ -4,7 +4,10 @@ use luthor::{
     eligibility::Candidate,
     github::{
         project::{ProjectItem, ProjectReadError, ReadCategory, ReadOperation},
-        pull_request::{ErrorCategory, LookupError, LookupResult, PullRequestReader, lookup},
+        pull_request::{
+            ErrorCategory, GhPullRequestReader, LookupError, LookupResult, PullRequestReader,
+            lookup,
+        },
     },
     state::StateStore,
 };
@@ -14,6 +17,69 @@ use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 const REPO: &str = "code/project";
 const ISSUE: &str = "https://github.com/tracker/issues/7";
+
+#[test]
+fn repository_identity_reads_immutable_id_and_rejects_malformed_responses() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let gh = dir.path().join("gh");
+    let reader = GhPullRequestReader::new(gh.clone());
+    for (body, expected) in [
+        (r#"{"id":1234,"full_name":"code/project"}"#, Ok(1234)),
+        (
+            r#"{"id":1234,"full_name":"code/renamed"}"#,
+            Err("invalid-repository"),
+        ),
+        (
+            r#"{"id":"1234","full_name":"code/project"}"#,
+            Err("invalid-repository"),
+        ),
+        (
+            r#"{"id":0,"full_name":"code/project"}"#,
+            Err("invalid-repository"),
+        ),
+        (r#"{"full_name":"code/project"}"#, Err("invalid-repository")),
+    ] {
+        std::fs::write(&gh, format!("#!/bin/sh\nprintf '%s' '{}'\n", body)).unwrap();
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        match (reader.repository_identity(REPO), expected) {
+            (Ok(id), Ok(want)) => assert_eq!(id, want),
+            (Err(error), Err(code)) => {
+                assert_eq!(error.category, ErrorCategory::Malformed);
+                assert_eq!(error.code, code);
+                assert!(!error.to_string().contains("renamed"));
+            }
+            (actual, expected) => panic!("unexpected result {actual:?}, expected {expected:?}"),
+        }
+    }
+
+    std::fs::write(&gh, "#!/bin/sh\nprintf '%s' '{\"status\":403}'\nexit 1\n").unwrap();
+    std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(
+        reader.repository_identity(REPO).unwrap_err(),
+        LookupError {
+            category: ErrorCategory::Permission,
+            code: "command-failed",
+            status: Some(403),
+        }
+    );
+
+    assert_eq!(
+        reader
+            .repository_identity("org/repo?per_page=1")
+            .unwrap_err()
+            .category,
+        ErrorCategory::Malformed
+    );
+    assert_eq!(
+        reader
+            .repository_identity("org/repo/extra")
+            .unwrap_err()
+            .category,
+        ErrorCategory::Malformed
+    );
+}
 
 #[derive(Default)]
 struct Fake {

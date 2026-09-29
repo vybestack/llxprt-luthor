@@ -63,6 +63,34 @@ impl GhPullRequestReader {
         Self { executable }
     }
 
+    pub fn repository_identity(&self, name: &str) -> Result<u64, LookupError> {
+        let malformed = || error(ErrorCategory::Malformed, "invalid-repository", None);
+        let mut segments = name.split('/');
+        let Some(owner) = segments.next() else {
+            return Err(malformed());
+        };
+        let Some(repository) = segments.next() else {
+            return Err(malformed());
+        };
+        if segments.next().is_some()
+            || !valid_repository_segment(owner)
+            || !valid_repository_segment(repository)
+        {
+            return Err(malformed());
+        }
+
+        let value = self.api(&["api", &format!("repos/{name}")])?;
+        let id = value
+            .get("id")
+            .and_then(Value::as_u64)
+            .filter(|id| *id > 0)
+            .ok_or_else(malformed)?;
+        if value.get("full_name").and_then(Value::as_str) != Some(name) {
+            return Err(malformed());
+        }
+        Ok(id)
+    }
+
     fn api(&self, args: &[&str]) -> Result<Value, LookupError> {
         let output = Command::new(&self.executable)
             .args(args)
@@ -101,6 +129,13 @@ impl GhPullRequestReader {
         }
         parsed.map_err(|_| error(ErrorCategory::Malformed, "invalid-json", None))
     }
+}
+
+fn valid_repository_segment(segment: &str) -> bool {
+    !segment.is_empty()
+        && segment
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
 }
 
 impl PullRequestReader for GhPullRequestReader {
