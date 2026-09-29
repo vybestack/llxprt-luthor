@@ -299,6 +299,9 @@ impl ProjectReader for GhProjectReader {
                 .ok_or_else(|| {
                     item_error(project_id, &item_id, "missing-project-item-content-type")
                 })?;
+            if typename == "PullRequest" {
+                continue;
+            }
             if typename != "Issue" {
                 return Err(item_error(
                     project_id,

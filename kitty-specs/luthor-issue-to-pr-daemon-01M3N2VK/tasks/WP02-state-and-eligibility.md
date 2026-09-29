@@ -78,7 +78,7 @@ Implement the validated configuration, durable task model and read-only eligible
 - Add JSON configuration for Project sources, repository scope, ready marker/value, optional milestone, mappings, roots, capacity and executable/argv templates.
 - Validate templates and allowed task-value expansion without shell interpolation; keep credentials out of config and persisted diagnostics.
 - Add SQLite migrations and transaction-backed task, attempt, intent, reservation and ordered evidence records with stable tracker issue identity.
-- Enumerate Project items, validate directly read issue state/marker/assignees/milestone and deduplicate overlapping sources.
+- Enumerate Project items, validate directly read issue state/marker/assignees/milestone and deduplicate overlapping sources. Exclude well-formed `PullRequest` content by typename after validating its Project item ID; the read-only WP01 Project #8 traversal found 1,160 Issues and two PullRequests (item IDs `PVTI_lADODYHhhs4BOTgmzgld6sg` and `PVTI_lADODYHhhs4BOTgmzgzpKr8`). Continue through all Project pages. DraftIssue, null/missing/unknown content, malformed Issue identity/repository, incomplete pagination, and API/read failures remain errors.
 - Represent read failures, stale/inconsistent data and conflicting source/mapping as explicit errors or held candidates, never absence.
 - Add interprocess coordinator lock and capacity reservation invariants for one state directory.
 

@@ -65,6 +65,32 @@ fn discover_prints_complete_eligible_candidate_as_json_line() {
 }
 
 #[test]
+fn discover_skips_pull_request_before_selecting_later_issue() {
+    let response = serde_json::json!({
+        "data": { "node": { "items": {
+            "nodes": [
+                {"id":"PR_ITEM","content":{"__typename":"PullRequest","id":"PR_NODE"},"fieldValues":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}},
+                {"id":"ISSUE_ITEM","content":{"__typename":"Issue","id":"ISSUE_NODE","number":7,"repository":{"id":"REPO_NODE","nameWithOwner":"org/tracker"}},"fieldValues":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}
+            ],
+            "pageInfo": {"hasNextPage": false, "endCursor": null}
+        }}}
+    }).to_string();
+    let output = run(&response);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let lines: Vec<_> = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0]["candidate"]["issue_number"], 7);
+}
+
+#[test]
 fn discover_fails_closed_for_malformed_or_non_issue_project() {
     let malformed = run(r#"{"data":{"node":{"items":null}}}"#);
     assert!(!malformed.status.success());

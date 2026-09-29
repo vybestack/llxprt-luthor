@@ -1,4 +1,30 @@
 #[test]
+fn skips_pull_requests_and_continues_pagination() {
+    let mixed = r#"{"data":{"node":{"items":{"nodes":[{"id":"PVTI_PR","content":{"__typename":"PullRequest","id":"PR1"},"fieldValues":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}},{"id":"PVTI_ISSUE","content":{"__typename":"Issue","id":"ISSUE1","number":7,"repository":{"id":"REPO1","nameWithOwner":"org/tracker"}},"fieldValues":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}],"pageInfo":{"hasNextPage":true,"endCursor":"NEXT"}}}}}"#;
+    let final_page = r#"{"data":{"node":{"items":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}"#;
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("gh");
+    std::fs::write(
+        &path,
+        format!(
+            "#!/bin/sh\ncase \"$*\" in *NEXT*) printf '%s' '{}' ;; *) printf '%s' '{}' ;; esac\n",
+            final_page.replace('\'', "'\\''"),
+            mixed.replace('\'', "'\\''")
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut reader = GhProjectReader::new(path);
+    let first = reader.page("PROJECT", None).unwrap();
+    assert_eq!(first.items.len(), 1);
+    assert_eq!(first.items[0].item_id, "PVTI_ISSUE");
+    assert!(first.has_next_page);
+    let last = reader.page("PROJECT", first.end_cursor.as_deref()).unwrap();
+    assert!(last.items.is_empty());
+    assert!(!last.has_next_page);
+}
+
+#[test]
 fn direct_issue_requires_stable_id_for_present_milestone() {
     use luthor::github::project::{ProjectItem, ReadCategory};
     for milestone in [
@@ -128,7 +154,7 @@ fn graphql_errors_and_incomplete_field_values_fail() {
 fn rejects_non_issue_project_items_with_item_identity() {
     for content in [
         r#"{"__typename":"DraftIssue","title":"draft"}"#,
-        r#"{"__typename":"PullRequest","number":4}"#,
+        r#"{"__typename":"UnknownContent"}"#,
         "null",
         "{}",
     ] {
