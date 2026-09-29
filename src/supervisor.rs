@@ -153,7 +153,63 @@ pub fn inspect_recovery_quiescence(
         return held("claim identity mismatch");
     }
 
-    // Process identity remains incomplete, so recovery stays held.
+    let Some(child_file) = private_bytes(&attempts.join(format!("{attempt_id}.child.json")))
+        .and_then(|bytes| serde_json::from_slice::<ChildIdentity>(&bytes).ok())
+    else {
+        return held("missing or invalid child identity");
+    };
+    let Some(child_evidence) =
+        store.evidence_payload(task_id, Some(attempt_id), "child_registered")?
+    else {
+        return held("missing child registration");
+    };
+    if serde_json::from_str::<ChildIdentity>(&child_evidence)
+        .ok()
+        .as_ref()
+        != Some(&child_file)
+        || child_file.pid == 0
+        || i32::try_from(child_file.pid).is_err()
+        || child_file.group_id != child_file.pid
+        || child_file.boot_identity.trim().is_empty()
+        || child_file.start_identity.trim().is_empty()
+    {
+        return held("child registration mismatch");
+    }
+    if store
+        .evidence_payload(task_id, Some(attempt_id), "log_failure")?
+        .is_some()
+    {
+        return held("log drain failed");
+    }
+    if attempts
+        .join(format!("{attempt_id}.supervisor-error.json"))
+        .exists()
+    {
+        return held("supervisor error receipt exists");
+    }
+    let Some(release) = store.intent_payload(task_id, attempt_id, "gate_release")? else {
+        return held("missing gate release decision");
+    };
+    let Some(ready) = store.evidence_payload(task_id, Some(attempt_id), "supervisor_ready")? else {
+        return held("missing or invalid supervisor identity");
+    };
+    let Some(supervisor) = recorded_process(&ready) else {
+        return held("missing or invalid supervisor identity");
+    };
+    if recorded_process(&release).as_ref() != Some(&supervisor) {
+        return held("supervisor identity contradiction");
+    }
+    let Some(sent) = store.evidence_payload(task_id, Some(attempt_id), "gate_sent")? else {
+        return held("missing gate sent evidence");
+    };
+    if recorded_process(&sent).as_ref() != Some(&supervisor) {
+        return held("supervisor identity contradiction");
+    }
+    if supervisor.pid == child_file.pid {
+        return held("supervisor and child identity contradiction");
+    }
+
+    // Recovery inspection proves durable identities only; it never releases capacity.
     Ok(RecoveryInspection::Held(
         "complete recovery identity proof not implemented",
     ))
