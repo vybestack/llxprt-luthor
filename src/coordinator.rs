@@ -43,6 +43,7 @@ pub struct SourceHold {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecoveryResult {
     RecoveredHeld,
+    RecoveredPrComplete { pr_id: u64 },
     Held(String),
 }
 
@@ -259,20 +260,49 @@ pub fn operator_recover_missing_receipt<P: ProjectReader, Q: PullRequestReader>(
         return Ok(held(completion_claim_failure_reason(&error)));
     }
     let repository = &selection.candidate.mapping.code_repository;
-    match lookup(prs, repository, &selection.candidate.issue_url) {
-        Ok(LookupResult::Absent) => (),
-        Ok(LookupResult::OpenPreexisting(_)) => {
-            return Ok(held("matching open pull request exists"));
+    let (status, verified_pr) = match lookup(prs, repository, &selection.candidate.issue_url) {
+        Ok(LookupResult::Absent) => (PausePrStatus::Absent, None),
+        Ok(LookupResult::OpenPreexisting(pr)) => {
+            let observed_at_unix_secs = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|_| SupervisorError::IdentityUnavailable)?
+                .as_secs();
+            if observed_at_unix_secs == 0 {
+                return Ok(held("invalid recovery timestamp"));
+            }
+            let verified = (|| {
+                let login = prs
+                    .authenticated_identity()
+                    .map_err(|_| "PR identity unavailable")?;
+                let expected = expected_for_task(store, task_id, prs, &login)
+                    .map_err(|_| "PR evidence unavailable")?;
+                VerifiedOpenPr::from_matching(
+                    *pr,
+                    &expected,
+                    &login,
+                    attempt_id,
+                    observed_at_unix_secs,
+                )
+                .map_err(|_| "PR verification failed")
+            })();
+            let verified = match verified {
+                Ok(proof) => proof,
+                Err(reason) => return Ok(held(reason)),
+            };
+            (PausePrStatus::Open, Some(verified))
         }
         Ok(LookupResult::Ambiguous(_)) => return Ok(held("pull request lookup is ambiguous")),
         Err(_) => return Ok(held("pull request lookup failed")),
-    }
+    };
     let Some(payload) = store.evidence_payload(task_id, None, "worktree_created")? else {
         return Ok(held("worktree evidence is missing"));
     };
     let snapshot: crate::state::WorktreeIdentity = serde_json::from_str(&payload)?;
     if worktree::verify_snapshot(&snapshot).is_err() {
         return Ok(held("worktree snapshot changed"));
+    }
+    if let Err(error) = verify_completion_claim(projects, &selection) {
+        return Ok(held(completion_claim_failure_reason(&error)));
     }
     if !matches!(
         supervisor::inspect_recovery_quiescence(store, task_id, attempt_id)?,
@@ -312,17 +342,19 @@ pub fn operator_recover_missing_receipt<P: ProjectReader, Q: PullRequestReader>(
         child,
         tracked_os_identities: tracked,
     })?;
-    store.commit_telemetry_lost_recovery(
-        task_id,
-        attempt_id,
-        &audit,
-        &ExitPrEvidence {
-            observed_at_unix_secs,
-            repository: repository.clone(),
-            status: PausePrStatus::Absent,
-        },
-    )?;
-    Ok(RecoveryResult::RecoveredHeld)
+    let lookup = ExitPrEvidence {
+        observed_at_unix_secs,
+        repository: repository.clone(),
+        status,
+    };
+    if let Some(proof) = verified_pr {
+        let pr_id = proof.id;
+        store.commit_telemetry_lost_pr_completion(task_id, attempt_id, &audit, &lookup, &proof)?;
+        Ok(RecoveryResult::RecoveredPrComplete { pr_id })
+    } else {
+        store.commit_telemetry_lost_recovery(task_id, attempt_id, &audit, &lookup)?;
+        Ok(RecoveryResult::RecoveredHeld)
+    }
 }
 
 impl StartupReport {

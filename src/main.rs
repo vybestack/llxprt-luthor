@@ -230,6 +230,10 @@ fn recover(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
             "{}",
             json!({"task_id": task_id, "attempt_id": attempt_id, "status": "recovered_held", "reason": "receipt loss audited; task remains held"})
         ),
+        luthor::coordinator::RecoveryResult::RecoveredPrComplete { pr_id } => println!(
+            "{}",
+            json!({"task_id": task_id, "attempt_id": attempt_id, "status": "pr_complete", "pr_id": pr_id})
+        ),
         luthor::coordinator::RecoveryResult::Held(reason) => println!(
             "{}",
             json!({"task_id": task_id, "attempt_id": attempt_id, "status": "held", "reason": reason})

@@ -1224,6 +1224,123 @@ impl StateStore {
         Ok(())
     }
 
+    pub(crate) fn commit_telemetry_lost_pr_completion(
+        &mut self,
+        task_id: &str,
+        attempt_id: &str,
+        audit: &str,
+        lookup: &ExitPrEvidence,
+        proof: &VerifiedOpenPr,
+    ) -> Result<(), StateError> {
+        let audit_value: serde_json::Value = serde_json::from_str(audit)?;
+        if lookup.status != PausePrStatus::Open
+            || lookup.observed_at_unix_secs == 0
+            || audit_value
+                .get("actor")
+                .and_then(serde_json::Value::as_str)
+                .is_none_or(|value| value.trim().is_empty())
+            || audit_value
+                .get("reason")
+                .and_then(serde_json::Value::as_str)
+                .is_none_or(|value| value.trim().is_empty())
+            || audit_value
+                .get("observed_at_unix_secs")
+                .and_then(serde_json::Value::as_u64)
+                .is_none_or(|value| value == 0)
+            || audit_value
+                .get("os_ids")
+                .and_then(serde_json::Value::as_array)
+                .is_none_or(|values| values.is_empty())
+            || audit_value.get("exit_code").is_some()
+            || audit_value.get("signal").is_some()
+            || proof.id == 0
+            || proof.attempt_id != attempt_id
+            || proof.observed_at == 0
+        {
+            return Err(StateError::LaunchBlocked);
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let latest: Option<String> = tx
+            .query_row(
+                "SELECT id FROM attempts WHERE task_id=?1 ORDER BY rowid DESC LIMIT 1",
+                [task_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let reserved: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM reservations WHERE task_id=?1 AND attempt_id=?2 AND status='reserved'",
+            params![task_id, attempt_id], |row| row.get(0),
+        )?;
+        let valid: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM attempts a JOIN tasks t ON t.id=a.task_id
+             WHERE a.task_id=?1 AND a.id=?2 AND a.lifecycle='launch_intended' AND a.outcome IS NULL
+             AND t.state='held'
+             AND (SELECT COUNT(*) FROM intents WHERE task_id=?1 AND attempt_id=?2 AND kind='launch')=1
+             AND (SELECT COUNT(*) FROM intents WHERE task_id=?1 AND attempt_id=?2 AND kind='supervisor_dispatch')=1
+             AND (SELECT COUNT(*) FROM intents WHERE task_id=?1 AND attempt_id=?2 AND kind='gate_release')=1
+             AND (SELECT COUNT(*) FROM evidence WHERE task_id=?1 AND attempt_id=?2 AND kind='supervisor_ready')=1
+             AND (SELECT COUNT(*) FROM evidence WHERE task_id=?1 AND attempt_id=?2 AND kind='gate_sent')=1
+             AND (SELECT COUNT(*) FROM evidence WHERE task_id=?1 AND attempt_id=?2 AND kind='child_registered')=1
+             AND (SELECT COUNT(*) FROM evidence WHERE task_id=?1 AND attempt_id=?2 AND kind IN ('attempt_exit','log_failure','telemetry_lost','exit_pr_lookup'))=0
+             AND (SELECT COUNT(*) FROM evidence WHERE task_id=?1 AND attempt_id IS NULL AND kind='selection')=1
+             AND (SELECT COUNT(*) FROM evidence WHERE task_id=?1 AND attempt_id IS NULL AND kind='worktree_created')=1
+             AND (SELECT COUNT(*) FROM evidence WHERE task_id=?1 AND attempt_id IS NULL AND kind='claim_verified')=1
+             AND (SELECT COUNT(*) FROM evidence WHERE task_id=?1 AND kind='verified_open_pr')=0
+             AND NOT EXISTS (SELECT 1 FROM evidence WHERE task_id=?1 AND kind IN ('pause_pr_lookup','exit_pr_lookup')
+               AND json_extract(payload,'$.status.status') IN ('open','ambiguous'))",
+            params![task_id, attempt_id], |row| row.get(0),
+        )?;
+        if latest.as_deref() != Some(attempt_id) || reserved != 1 || valid != 1 {
+            return Err(StateError::LaunchBlocked);
+        }
+        let selection: String = tx.query_row(
+            "SELECT payload FROM evidence WHERE task_id=?1 AND attempt_id IS NULL AND kind='selection'",
+            [task_id], |row| row.get(0),
+        )?;
+        let selection: SelectionEvidence = serde_json::from_str(&selection)?;
+        if lookup.repository != selection.candidate.mapping.code_repository {
+            return Err(StateError::LaunchBlocked);
+        }
+        validate_verified_open_pr(&tx, task_id, attempt_id, proof)?;
+        tx.execute(
+            "INSERT INTO evidence(task_id,attempt_id,kind,payload) VALUES(?1,?2,'telemetry_lost',?3)",
+            params![task_id, attempt_id, audit],
+        )?;
+        tx.execute(
+            "INSERT INTO evidence(task_id,attempt_id,kind,payload) VALUES(?1,?2,'exit_pr_lookup',?3)",
+            params![task_id, attempt_id, serde_json::to_string(lookup)?],
+        )?;
+        tx.execute(
+            "INSERT INTO evidence(task_id,attempt_id,kind,payload) VALUES(?1,?2,'verified_open_pr',?3)",
+            params![task_id, attempt_id, serde_json::to_string(proof)?],
+        )?;
+        tx.execute(
+            "UPDATE attempts SET lifecycle='telemetry_lost',outcome=NULL WHERE task_id=?1 AND id=?2 AND lifecycle='launch_intended' AND outcome IS NULL",
+            params![task_id, attempt_id],
+        )?;
+        if tx.changes() != 1 {
+            return Err(StateError::LaunchBlocked);
+        }
+        tx.execute(
+            "UPDATE reservations SET status='released' WHERE task_id=?1 AND attempt_id=?2 AND status='reserved'",
+            params![task_id, attempt_id],
+        )?;
+        if tx.changes() != 1 {
+            return Err(StateError::LaunchBlocked);
+        }
+        tx.execute(
+            "UPDATE tasks SET state='pr_complete' WHERE id=?1 AND state='held'",
+            [task_id],
+        )?;
+        if tx.changes() != 1 {
+            return Err(StateError::LaunchBlocked);
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub(crate) fn reconcile_verified_exit(
         &mut self,
         task_id: &str,
