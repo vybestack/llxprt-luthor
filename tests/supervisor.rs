@@ -12,9 +12,9 @@ use luthor::{
         ExitPrEvidence, PausePrEvidence, PausePrStatus, StateError, StateStore, WorktreeIdentity,
     },
     supervisor::{
-        Reconciliation, SupervisorError, execute_with_binary, prepare_initial, prepare_resume,
-        reconcile_attempt, request_stop, run_gated_child_with_binary,
-        run_gated_child_with_log_writers,
+        Reconciliation, RecoveryInspection, SupervisorError, execute_with_binary,
+        inspect_recovery_quiescence, prepare_initial, prepare_resume, reconcile_attempt,
+        request_stop, run_gated_child_with_binary, run_gated_child_with_log_writers,
     },
     worktree::ensure_worktree,
 };
@@ -2028,6 +2028,18 @@ fn malformed_tracked_descendant_evidence_holds_missing_receipt_attempt() {
         .unwrap();
 
     assert!(matches!(
+        inspect_recovery_quiescence(&store, "task", "attempt-real").unwrap(),
+        RecoveryInspection::Held("invalid tracked descendant identity")
+    ));
+    assert_eq!(store.reservation_count().unwrap(), 1);
+    assert!(
+        !store
+            .evidence_kinds("task")
+            .unwrap()
+            .iter()
+            .any(|kind| kind == "attempt_exit")
+    );
+    assert!(matches!(
         reconcile_attempt(&mut store, "task", "attempt-real").unwrap(),
         Reconciliation::Held { reason } if reason == "invalid tracked descendant identity"
     ));
@@ -2062,6 +2074,18 @@ fn live_tracked_descendant_prevents_missing_receipt_absence_reconciliation() {
         )
         .unwrap();
 
+    assert!(matches!(
+        inspect_recovery_quiescence(&store, "task", "attempt-real").unwrap(),
+        RecoveryInspection::Held("registered processes may still be live")
+    ));
+    assert_eq!(store.reservation_count().unwrap(), 1);
+    assert!(
+        !store
+            .evidence_kinds("task")
+            .unwrap()
+            .iter()
+            .any(|kind| kind == "attempt_exit")
+    );
     assert!(matches!(
         reconcile_attempt(&mut store, "task", "attempt-real").unwrap(),
         Reconciliation::Held { reason } if reason != "receipt missing; registered processes absent; operator recovery required"

@@ -69,6 +69,24 @@ pub fn inspect_recovery_quiescence(
     if !valid_attempt(attempt_id) {
         return Err(SupervisorError::Conflict);
     }
+    if store.latest_attempt(task_id)?.as_deref() != Some(attempt_id) {
+        return Ok(RecoveryInspection::Held(
+            "attempt is not the latest attempt",
+        ));
+    }
+    let receipt_path = store
+        .root()
+        .join("attempts")
+        .join(format!("{attempt_id}.receipt.json"));
+    match fs::symlink_metadata(&receipt_path) {
+        Ok(_) => return Ok(RecoveryInspection::Held("attempt receipt path exists")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => {
+            return Ok(RecoveryInspection::Held(
+                "attempt receipt path is unreadable",
+            ));
+        }
+    }
     if !store.active_attempt_reservation(task_id, attempt_id)? {
         return Ok(RecoveryInspection::Held(
             "attempt is not the active reserved attempt",
@@ -209,10 +227,61 @@ pub fn inspect_recovery_quiescence(
         return held("supervisor and child identity contradiction");
     }
 
-    // Recovery inspection proves durable identities only; it never releases capacity.
-    Ok(RecoveryInspection::Held(
-        "complete recovery identity proof not implemented",
-    ))
+    let tracked = store
+        .evidence_payloads(task_id, attempt_id, "tracked_descendant")?
+        .into_iter()
+        .map(|payload| recorded_process(&payload))
+        .collect::<Option<Vec<_>>>();
+    let Some(tracked) = tracked else {
+        return held("invalid tracked descendant identity");
+    };
+    if !registered_processes_absent(&child_file, &supervisor, &tracked) {
+        return held("registered processes may still be live");
+    }
+
+    let Some(current_plan) = private_bytes(&attempts.join(format!("{attempt_id}.plan.json")))
+        .and_then(|bytes| serde_json::from_slice::<LaunchPlan>(&bytes).ok())
+    else {
+        return held("plan changed during recovery inspection");
+    };
+    let Some(current_child) = private_bytes(&attempts.join(format!("{attempt_id}.child.json")))
+        .and_then(|bytes| serde_json::from_slice::<ChildIdentity>(&bytes).ok())
+    else {
+        return held("child identity changed during recovery inspection");
+    };
+    if current_plan != plan
+        || current_child != child_file
+        || store
+            .evidence_payload(task_id, Some(attempt_id), "gate_sent")?
+            .as_deref()
+            != Some(&sent)
+        || store
+            .evidence_payload(task_id, Some(attempt_id), "supervisor_ready")?
+            .as_deref()
+            != Some(&ready)
+        || !matches!(
+            fs::symlink_metadata(&receipt_path),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound
+        )
+        || store.latest_attempt(task_id)?.as_deref() != Some(attempt_id)
+        || !store.active_attempt_reservation(task_id, attempt_id)?
+    {
+        return held("recovery evidence changed during inspection");
+    }
+    let current_tracked = store
+        .evidence_payloads(task_id, attempt_id, "tracked_descendant")?
+        .into_iter()
+        .map(|payload| recorded_process(&payload))
+        .collect::<Option<Vec<_>>>();
+    let Some(current_tracked) = current_tracked else {
+        return held("tracked descendant evidence changed during inspection");
+    };
+    if current_tracked != tracked
+        || !registered_processes_absent(&current_child, &supervisor, &current_tracked)
+    {
+        return held("registered process absence proof changed during inspection");
+    }
+    Ok(RecoveryInspection::Quiescent)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
