@@ -2,8 +2,9 @@ use luthor::{
     claim::{AssignmentError, AssignmentWriter},
     config::{CommandTemplate, Config, Mapping, Marker, Source},
     coordinator::{
-        DispatchDependencies, DispatchError, ResumeDependencies, SupervisorLauncher, dispatch_one,
-        resume_one,
+        AttemptReview, DispatchDependencies, DispatchError, IdCreator, ResumeDependencies,
+        ScheduleDependencies, SupervisorLauncher, dispatch_one, resume_one, schedule_candidates,
+        startup_reconcile_all,
     },
     eligibility::Candidate,
     github::{
@@ -661,4 +662,61 @@ fn failed_resume_dispatch_retains_reservation_and_never_retries() {
         Err(DispatchError::State(StateError::LaunchBlocked))
     ));
     assert_eq!(launcher.plans.len(), 1);
+}
+
+#[derive(Default)]
+struct FixedIds(usize);
+impl IdCreator for FixedIds {
+    fn create(&mut self) -> Result<String, std::io::Error> {
+        self.0 += 1;
+        Ok(self.0.to_string())
+    }
+}
+
+#[test]
+fn startup_reconcile_holds_missing_receipt_without_relaunching() {
+    let mut f = Fixture::new(1);
+    let c = f.candidate.clone();
+    let mut github = FakeGithub::new(&c);
+    let mut writer = FakeWriter::default();
+    let mut launcher = FakeLauncher::default();
+    f.run("task-a", &c, &mut github, &mut writer, &mut launcher)
+        .unwrap();
+    let launches = launcher.plans.len();
+    let report = startup_reconcile_all(&mut f.store).unwrap();
+    assert_eq!(report.attempts.len(), 1);
+    assert!(matches!(report.attempts[0].review, AttemptReview::Held(_)));
+    assert_eq!(f.store.reservation_count().unwrap(), 1);
+    assert_eq!(launcher.plans.len(), launches);
+}
+
+#[test]
+fn scheduler_does_not_replace_a_held_task_after_reservation_release() {
+    let mut f = Fixture::new(1);
+    f.pause();
+    let mut other = f.candidate.clone();
+    other.issue_node_id = "issue-2".into();
+    other.item_id = "item-2".into();
+    other.issue_number = 2;
+    other.issue_url = "https://github.com/org/tracker/issues/2".into();
+    let mut github = FakeGithub::new(&other);
+    let mut prs = FakePr::default();
+    let mut writer = FakeWriter::default();
+    let mut launcher = FakeLauncher::default();
+    let report = schedule_candidates(
+        &mut f.store,
+        vec![other],
+        ScheduleDependencies {
+            config: &f.config,
+            config_revision: "revision",
+            projects: &mut github,
+            prs: &mut prs,
+            assignments: &mut writer,
+            launcher: &mut launcher,
+            ids: &mut FixedIds::default(),
+        },
+    )
+    .unwrap();
+    assert!(report.capacity_full);
+    assert!(report.launched.is_empty());
 }

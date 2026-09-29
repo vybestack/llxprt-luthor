@@ -459,28 +459,68 @@ impl StateStore {
         Ok(())
     }
 
+    /// Nonterminal attempts must each be inspected on startup, including attempts
+    /// without a launch intent (an inconsistent durable state is not safe to skip).
+    pub fn pending_attempts(&self) -> Result<Vec<(String, String)>, StateError> {
+        let mut statement = self.connection.prepare(
+            "SELECT a.task_id,a.id FROM attempts a WHERE a.lifecycle!='completed' OR a.outcome IS NULL OR EXISTS
+             (SELECT 1 FROM reservations r WHERE r.attempt_id=a.id AND r.status='reserved') ORDER BY a.rowid",
+        )?;
+        Ok(statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<Result<_, _>>()?)
+    }
+
+    /// Persisted source operations without their proof block new selections.
+    /// Also include preparing tasks where the process died before the first intent.
+    pub fn unresolved_sources(&self) -> Result<Vec<(String, String)>, StateError> {
+        let mut statement = self.connection.prepare(
+            "SELECT t.id, 'selection' FROM tasks t WHERE t.state='preparing'
+             UNION ALL
+             SELECT i.task_id, i.kind FROM intents i JOIN tasks t ON t.id=i.task_id
+             WHERE t.state!='completed' AND (
+               (i.kind='claim_assignment' AND NOT EXISTS
+                 (SELECT 1 FROM evidence e WHERE e.task_id=i.task_id AND e.kind='claim_verified'))
+               OR (i.kind='worktree_create' AND NOT EXISTS
+                 (SELECT 1 FROM evidence e WHERE e.task_id=i.task_id AND e.kind='worktree_created'))
+               OR (i.kind='stop' AND NOT EXISTS
+                 (SELECT 1 FROM evidence e WHERE e.task_id=i.task_id AND e.attempt_id=i.attempt_id AND e.kind='attempt_exit'))
+             ) ORDER BY 1,2",
+        )?;
+        Ok(statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<Result<_, _>>()?)
+    }
+
+    pub fn existing_issue(&self, repo_id: &str, issue_id: &str) -> Result<bool, StateError> {
+        Ok(self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM tasks WHERE tracker_repo_id=?1 AND issue_node_id=?2)",
+            params![repo_id, issue_id],
+            |row| row.get(0),
+        )?)
+    }
+
     /// A selected task occupies a scheduling slot even if it is held before launch.
-    /// An unresolved reservation occupies a slot regardless of its task phase.
+    /// A verified exit releases its reservation but leaves the task held for PR proof.
     pub fn ensure_dispatch_capacity(&self) -> Result<(), StateError> {
         let capacity: usize = self.connection.query_row(
             "SELECT value FROM state_meta WHERE key='capacity'",
             [],
             |row| row.get(0),
         )?;
-        let reserved: usize = self.connection.query_row(
+        let active_reservations: usize = self.connection.query_row(
             "SELECT COUNT(DISTINCT task_id) FROM reservations WHERE status='reserved'",
             [],
             |row| row.get(0),
         )?;
-        let held_without_reservation: usize = self.connection.query_row(
-            "SELECT COUNT(*) FROM tasks t WHERE t.state IN ('preparing','claimed','held')
-             AND NOT EXISTS (SELECT 1 FROM reservations r WHERE r.task_id=t.id AND r.status='reserved')",
-            [], |row| row.get(0),
+        let unresolved_tasks: usize = self.connection.query_row(
+            "SELECT COUNT(DISTINCT id) FROM tasks WHERE state!='completed'",
+            [],
+            |row| row.get(0),
         )?;
-        let occupied = reserved + held_without_reservation;
-        if occupied >= capacity {
+        if active_reservations >= capacity || unresolved_tasks >= capacity {
             return Err(StateError::Capacity {
-                reserved: occupied,
+                reserved: unresolved_tasks.max(active_reservations),
                 capacity,
             });
         }
