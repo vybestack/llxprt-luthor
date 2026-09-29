@@ -4,6 +4,7 @@ pub mod config;
 pub mod coordinator;
 pub mod daemon;
 pub mod eligibility;
+pub mod pr_evidence;
 pub mod github {
     pub mod identity;
     pub mod project;
