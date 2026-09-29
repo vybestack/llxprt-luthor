@@ -691,7 +691,7 @@ fn startup_reconcile_holds_missing_receipt_without_relaunching() {
 }
 
 #[test]
-fn scheduler_does_not_replace_a_held_task_after_reservation_release() {
+fn scheduler_dispatches_other_task_after_verified_pause_without_resuming_paused_task() {
     let mut f = Fixture::new(1);
     f.pause();
     let mut other = f.candidate.clone();
@@ -717,6 +717,15 @@ fn scheduler_does_not_replace_a_held_task_after_reservation_release() {
         },
     )
     .unwrap();
-    assert!(report.capacity_full);
-    assert!(report.launched.is_empty());
+    assert!(!report.capacity_full);
+    assert_eq!(report.launched.len(), 1);
+    assert_eq!(
+        f.store.task_phase("task-a").unwrap().as_deref(),
+        Some("paused")
+    );
+    assert_eq!(f.store.reservation_count().unwrap(), 1);
+    assert!(matches!(
+        f.store.ensure_dispatch_capacity(),
+        Err(luthor::state::StateError::Capacity { .. })
+    ));
 }
