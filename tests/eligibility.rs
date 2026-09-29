@@ -53,6 +53,7 @@ fn item(id: &str, issue: &str, fields: Vec<(String, String)>) -> ProjectItem {
         tracker_repo_id: "R1".into(),
         issue_number: 7,
         fields,
+        unsupported_fields: Vec::new(),
     }
 }
 fn issue(state: &str, labels: Vec<&str>, assignees: Vec<&str>, milestone: Option<&str>) -> Issue {
@@ -125,6 +126,10 @@ fn requires_membership_direct_open_unassigned_exact_label_and_milestone() {
     assert_eq!(candidates[0].milestone_title.as_deref(), Some("0.12.0"));
     assert_eq!(candidates[0].tracker_repo_id, "R1");
     assert_eq!(candidates[0].observed_at_unix_secs, 1_700_000_000);
+    assert_eq!(candidates[0].observed_state, "open");
+    assert_eq!(candidates[0].observed_assignees, Vec::<String>::new());
+    assert_eq!(candidates[0].observed_labels, vec!["luthor-ready"]);
+    assert!(candidates[0].observed_project_fields.is_empty());
     assert_eq!(
         candidates[0].marker,
         Marker::Label {
@@ -261,6 +266,10 @@ fn optional_milestone_and_project_field_marker_are_exact() {
     )
     .unwrap();
     assert_eq!(candidates.len(), 1);
+    assert_eq!(
+        candidates[0].observed_project_fields,
+        vec![("Status".into(), "Ready".into())]
+    );
 }
 
 #[test]
@@ -428,4 +437,57 @@ fn non_issue_item_aborts_discovery_even_when_an_issue_is_eligible() {
         result,
         Err(luthor::eligibility::EligibilityError::Project(_))
     ));
+}
+
+#[test]
+fn unsupported_configured_marker_field_errors_but_unrelated_field_does_not() {
+    let mut unsupported = item("I1", "N7", vec![]);
+    unsupported.unsupported_fields.push("Sprint".into());
+    let mut fake = Fake {
+        pages: vec![Page {
+            items: vec![unsupported],
+            has_next_page: false,
+            end_cursor: None,
+        }],
+        issues: vec![issue("open", vec![], vec![], None)],
+        calls: 0,
+        fail_page: false,
+    };
+    let error = select(
+        &mut fake,
+        &[source(
+            Marker::ProjectField {
+                name: "Sprint".into(),
+                value: "Ready".into(),
+            },
+            None,
+        )],
+        &[mapping()],
+    )
+    .unwrap_err();
+    assert_eq!(
+        error,
+        luthor::eligibility::EligibilityError::UnsupportedMarkerField {
+            project_id: "P1".into(),
+            item_id: "I1".into(),
+            name: "Sprint".into(),
+        }
+    );
+
+    let mut unrelated = item("I1", "N7", vec![("Status".into(), "Ready".into())]);
+    unrelated.unsupported_fields.push("Sprint".into());
+    fake.pages[0].items = vec![unrelated];
+    let selected = select(
+        &mut fake,
+        &[source(
+            Marker::ProjectField {
+                name: "Status".into(),
+                value: "Ready".into(),
+            },
+            None,
+        )],
+        &[mapping()],
+    )
+    .unwrap();
+    assert_eq!(selected.len(), 1);
 }

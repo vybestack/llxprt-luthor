@@ -64,9 +64,30 @@ fn discover_prints_complete_eligible_candidate_as_json_line() {
         .collect();
     assert_eq!(lines.len(), 1);
     assert_eq!(lines[0]["candidate"]["issue_number"], 7);
-    assert_eq!(lines[0]["candidate"]["code_repository"], "org/code");
-    assert_eq!(lines[0]["source"]["project_id"], "PROJECT");
+    assert_eq!(
+        lines[0]["candidate"]["mapping"]["code_repository"],
+        "org/code"
+    );
+    assert_eq!(lines[0]["candidate"]["project_id"], "PROJECT");
     assert_eq!(lines[0]["evidence"]["state"], "open");
+    assert_eq!(lines[0]["candidate"]["tracker_repo_id"], "REPO_NODE");
+    assert_eq!(
+        lines[0]["candidate"]["issue_url"],
+        "https://github.com/org/tracker/issues/7"
+    );
+    assert_eq!(lines[0]["candidate"]["item_id"], "ITEM");
+    assert!(
+        lines[0]["candidate"]["observed_at_unix_secs"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+    assert_eq!(lines[0]["candidate"]["observed_labels"][0], "ready");
+    assert_eq!(lines[0]["candidate"]["observed_state"], "open");
+    assert_eq!(
+        lines[0]["candidate"]["observed_assignees"],
+        serde_json::json!([])
+    );
 }
 
 #[test]

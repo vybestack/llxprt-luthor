@@ -20,13 +20,32 @@ fn documented_json_example_loads_and_round_trips() {
 }
 
 fn valid() -> &'static str {
-    r#"{"state_root":"/private/state","worktree_root":"/private/worktrees","capacity":2,"sources":[{"project_id":"PVT_1","repositories":["org/tracker"],"ready_marker":{"kind":"label","name":"luthor-ready"},"milestone":"0.12.0"}],"mappings":[{"tracker_repository":"org/tracker","code_repository":"org/code","checkout":"/src/code","base_branch":"main","push_remote":"origin","allowed_pr_head_repository":"org/fork","allowed_pr_author":"alice"}],"initial":{"executable":"/bin/agent","args":["--issue","{task.issue_number}"]},"resume":{"executable":"/bin/agent","args":["--issue","{task.issue_number}","--attempt","{attempt.id}"]}}"#
+    r#"{"state_root":"/private/state","worktree_root":"/private/worktrees","capacity":2,"sources":[{"project_id":"PVT_1","repositories":["org/tracker"],"ready_marker":{"kind":"label","name":"luthor-ready"},"milestone":"0.12.0"}],"mappings":[{"tracker_repository":"org/tracker","code_repository":"org/code","checkout":"/src/code","base_branch":"main","push_remote":"origin","allowed_pr_head_repository":"org/fork","allowed_pr_author":"alice"}],"initial":{"executable":"/bin/llxprt-code-rs","args":["--prompt","Work on {task.issue_url}","--cwd","{worktree}"]},"resume":{"executable":"/bin/llxprt-code-rs","args":["--session","{attempt.id}","--cwd","{worktree}","-p","Continue {task.issue_url}"]}}"#
 }
 
 #[test]
 fn accepts_valid_configuration_and_exact_optional_milestone() {
     let config = Config::from_json(valid()).unwrap();
     assert_eq!(config.sources[0].milestone.as_deref(), Some("0.12.0"));
+}
+
+#[test]
+fn accepts_in_repo_and_fork_pr_head_repositories() {
+    let both_same = valid()
+        .replace("org/code", "org/tracker")
+        .replace("org/fork", "org/tracker");
+    assert!(Config::from_json(&both_same).is_ok());
+
+    let head_is_code = valid().replace("org/fork", "org/code");
+    assert!(Config::from_json(&head_is_code).is_ok());
+
+    assert!(Config::from_json(valid()).is_ok());
+}
+
+#[test]
+fn rejects_invalid_pr_head_repository_syntax() {
+    let invalid = valid().replace("org/fork", "invalid/repository/name");
+    assert!(Config::from_json(&invalid).is_err());
 }
 
 #[test]
@@ -59,7 +78,7 @@ fn rejects_duplicate_code_repository_mappings() {
 
 #[test]
 fn rejects_unknown_template_and_shell_expansion() {
-    let json = valid().replace("{task.issue_number}", "$(curl bad)");
+    let json = valid().replace("{task.issue_url}", "$(curl bad)");
     assert!(
         Config::from_json(&json)
             .unwrap_err()
@@ -67,7 +86,7 @@ fn rejects_unknown_template_and_shell_expansion() {
             .contains("shell")
     );
     let sentinel = "PRIVATE_SENTINEL_SECRET_BYTES";
-    let json = valid().replace("{task.issue_number}", &format!("{{{sentinel}}}"));
+    let json = valid().replace("{task.issue_url}", &format!("{{{sentinel}}}"));
     let error = Config::from_json(&json).unwrap_err().to_string();
     assert!(error.contains("unsupported"));
     assert!(!error.contains(sentinel));
@@ -81,58 +100,35 @@ fn rejects_embedded_credential_fields() {
 
 #[test]
 fn rejects_credential_headers_and_executable_secrets_without_echoing_values() {
-    let safe = valid().replace(r#""--issue""#, r#""--session""#).replace(
-        r#""--session","{task.issue_number}""#,
-        r#""--session","session-1","--profile","default","Fix this task""#,
-    );
-    assert!(Config::from_json(&safe).is_ok());
-
-    for (json, marker) in [
-        (
-            valid()
-                .replace("\"--issue\"", "\"--header\"")
-                .replace("{task.issue_number}", "Authorization: Bearer SECRET_MARKER"),
-            "SECRET_MARKER",
-        ),
-        (
-            valid().replace("{task.issue_number}", "Authorization=Bearer SECRET_MARKER"),
-            "SECRET_MARKER",
-        ),
-        (
-            valid().replace("{task.issue_number}", "--api-key=SECRET_MARKER"),
-            "SECRET_MARKER",
-        ),
-        (
-            valid().replace("/bin/agent", "/bin/agent-SECRET_MARKER"),
-            "SECRET_MARKER",
-        ),
-    ] {
-        let error = Config::from_json(&json).unwrap_err().to_string();
-        assert!(
-            !error.contains(marker),
-            "error leaked credential marker: {error}"
-        );
-    }
+    let mut value: serde_json::Value = serde_json::from_str(valid()).unwrap();
+    value["initial"]["args"] =
+        serde_json::json!(["--prompt", "Authorization: Bearer SECRET_MARKER"]);
+    let error = Config::from_json(&value.to_string())
+        .unwrap_err()
+        .to_string();
+    assert!(!error.contains("SECRET_MARKER"));
+    let secret_executable = valid().replace("/bin/llxprt-code-rs", "/bin/agent-SECRET_MARKER");
+    let error = Config::from_json(&secret_executable)
+        .unwrap_err()
+        .to_string();
+    assert!(!error.contains("SECRET_MARKER"));
 }
 
 #[test]
 fn rejects_secret_flags_bad_braces_and_accepts_benign_prompt() {
     for bad in [
-        "--api-key=abc",
-        "--token",
-        "--auth-key=abc",
         "credential=abc",
-        "{task.issue_number}}",
-        "{{task.issue_number}",
-        "{task.issue_number",
+        "{task.issue_url}}",
+        "{{task.issue_url}",
+        "{task.issue_url",
     ] {
         assert!(
-            Config::from_json(&valid().replace("{task.issue_number}", bad)).is_err(),
+            Config::from_json(&valid().replace("{task.issue_url}", bad)).is_err(),
             "accepted {bad}"
         );
     }
     assert!(
-        Config::from_json(&valid().replace("{task.issue_number}", "Please fix this issue")).is_ok()
+        Config::from_json(&valid().replace("{task.issue_url}", "Please fix this issue")).is_ok()
     );
 }
 
@@ -192,5 +188,40 @@ fn milestone_can_be_omitted() {
         Config::from_json(&json).unwrap().sources[0]
             .milestone
             .is_none()
+    );
+}
+
+#[test]
+fn rejects_header_env_and_unknown_flags_without_echoing_values() {
+    for args in [
+        vec!["--header", "PRIVATE-TOKEN: DEMO_VALUE"],
+        vec!["-H", "PRIVATE-TOKEN: DEMO_VALUE"],
+        vec!["--header=PRIVATE-TOKEN: DEMO_VALUE"],
+        vec!["--env", "PRIVATE_TOKEN=DEMO_VALUE"],
+        vec!["-e", "TOKEN=DEMO_VALUE"],
+        vec!["--env=TOKEN=DEMO_VALUE"],
+        vec!["--unrecognized", "DEMO_VALUE"],
+    ] {
+        let mut value: serde_json::Value = serde_json::from_str(valid()).unwrap();
+        value["initial"]["args"] = serde_json::json!(args);
+        let error = Config::from_json(&value.to_string())
+            .unwrap_err()
+            .to_string();
+        assert!(!error.contains("DEMO_VALUE"), "{error}");
+    }
+}
+
+#[test]
+fn accepts_verified_rs_arguments_and_renders_task_placeholders() {
+    let config = Config::from_json(valid()).unwrap();
+    let rendered = config.initial.render(&task_values()).unwrap();
+    assert_eq!(
+        rendered.args,
+        [
+            "--prompt",
+            "Work on https://example.test/issues/42",
+            "--cwd",
+            "/tmp/worktree"
+        ]
     );
 }

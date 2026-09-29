@@ -49,6 +49,7 @@ fn direct_issue_requires_stable_id_for_present_milestone() {
             tracker_repo_id: "REPO1".into(),
             issue_number: 7,
             fields: vec![],
+            unsupported_fields: Vec::new(),
         };
         assert_eq!(
             reader.issue(&item).unwrap_err().category,
@@ -151,6 +152,75 @@ fn graphql_errors_and_incomplete_field_values_fail() {
     );
 }
 #[test]
+fn classifies_plain_stderr_and_graphql_errors_without_exposing_messages() {
+    use luthor::github::project::{ReadCategory, ReadOperation};
+
+    for (stderr, expected, status) in [
+        (
+            "HTTP 403 forbidden secret=response-secret",
+            ReadCategory::Permission,
+            Some(403),
+        ),
+        (
+            "HTTP 429 rate limit secret=response-secret",
+            ReadCategory::RateLimit,
+            Some(429),
+        ),
+        (
+            "HTTP 403 rate limit secret=response-secret",
+            ReadCategory::RateLimit,
+            Some(403),
+        ),
+    ] {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("gh");
+        fs::write(
+            &path,
+            format!(
+                "#!/bin/sh\nprintf '%s' 'not json'\necho '{}' >&2\nexit 1\n",
+                stderr
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        let mut reader = GhProjectReader::new(path);
+        let error = reader.page("PROJECT-ERR", None).unwrap_err();
+        assert_eq!(error.category, expected);
+        assert_eq!(error.status, status);
+        assert_eq!(error.project_id.as_deref(), Some("PROJECT-ERR"));
+        assert_eq!(error.operation, ReadOperation::ProjectPage);
+        assert!(!error.to_string().contains("response-secret"));
+    }
+
+    for (body, expected) in [
+        (
+            r#"{"errors":[{"type":"RATE_LIMITED","message":"response-secret"}]}"#,
+            ReadCategory::RateLimit,
+        ),
+        (
+            r#"{"errors":[{"extensions":{"code":"FORBIDDEN"},"message":"response-secret"}]}"#,
+            ReadCategory::Permission,
+        ),
+        (
+            r#"{"errors":[{"extensions":{"code":"NOT_FOUND"}}]}"#,
+            ReadCategory::NotFound,
+        ),
+        (
+            r#"{"errors":[{"message":"rate limit response-secret"}]}"#,
+            ReadCategory::RateLimit,
+        ),
+    ] {
+        let (_dir, mut reader) = reader(body);
+        let error = reader.page("PROJECT-GQL", None).unwrap_err();
+        assert_eq!(error.category, expected);
+        assert_eq!(error.project_id.as_deref(), Some("PROJECT-GQL"));
+        assert_eq!(error.operation, ReadOperation::ProjectPage);
+        assert_eq!(error.code, "graphql-error");
+        assert!(!error.to_string().contains("response-secret"));
+    }
+}
+
+#[test]
 fn rejects_non_issue_project_items_with_item_identity() {
     for content in [
         r#"{"__typename":"DraftIssue","title":"draft"}"#,
@@ -236,6 +306,7 @@ fn direct_issue_caches_repository_and_validates_identity_and_urls() {
         tracker_repo_id: "REPO1".into(),
         issue_number: 7,
         fields: vec![],
+        unsupported_fields: Vec::new(),
     };
 
     let first = reader.issue(&item).unwrap();
@@ -286,7 +357,82 @@ fn direct_issue_rejects_repository_id_and_renamed_repository_urls() {
             tracker_repo_id: "REPO1".into(),
             issue_number: 7,
             fields: vec![],
+            unsupported_fields: Vec::new(),
         };
         assert_eq!(reader.issue(&item).unwrap_err().category, expected_category);
+    }
+}
+
+#[test]
+fn iteration_field_value_is_reported_as_unsupported_by_name() {
+    let fields = r#"{"nodes":[{"__typename":"ProjectV2ItemFieldIterationValue","field":{"name":"Sprint"}}],"pageInfo":{"hasNextPage":false,"endCursor":null}}"#;
+    let (_dir, mut reader) = reader(&response(fields));
+    let page = reader.page("P", None).unwrap();
+    assert_eq!(page.items[0].unsupported_fields, vec!["Sprint"]);
+}
+
+#[test]
+fn unknown_field_value_type_fails_with_malformed_error() {
+    let fields = r#"{"nodes":[{"__typename":"FutureProjectFieldValue"}],"pageInfo":{"hasNextPage":false,"endCursor":null}}"#;
+    let (_dir, mut reader) = reader(&response(fields));
+    let error = reader.page("P", None).unwrap_err();
+    assert_eq!(
+        error.category,
+        luthor::github::project::ReadCategory::Malformed
+    );
+    assert_eq!(error.code, "unsupported-project-field-value-type");
+}
+
+#[test]
+fn direct_issue_errors_keep_context_for_repository_and_issue_responses() {
+    use luthor::github::project::{ProjectItem, ReadCategory, ReadOperation};
+
+    let item = ProjectItem {
+        item_id: "PVTI_CONTEXT".into(),
+        issue_node_id: "ISSUE_CONTEXT".into(),
+        repository: "org/tracker".into(),
+        tracker_repo_id: "REPO1".into(),
+        issue_number: 7,
+        fields: vec![],
+        unsupported_fields: vec![],
+    };
+    for (metadata, issue, expected_category, expected_status) in [
+        (
+            r#"{"status":"403","message":"permission denied token=secret","documentation_url":"https://secret.invalid"}"#,
+            "",
+            ReadCategory::Permission,
+            Some(403),
+        ),
+        (r#"{"node_id":null}"#, "", ReadCategory::Malformed, None),
+        (
+            r#"{"node_id":"REPO1"}"#,
+            r#"{"node_id":null,"token":"secret"}"#,
+            ReadCategory::Malformed,
+            None,
+        ),
+    ] {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("gh");
+        let repo_exit = if expected_status.is_some() {
+            "exit 1"
+        } else {
+            ":"
+        };
+        let script = format!(
+            "#!/bin/sh\ncase \"$*\" in *issues/7*) printf '%s' '{}' ;; *) printf '%s' '{}'; {} ;; esac\n",
+            issue.replace('\'', "'\\''"),
+            metadata.replace('\'', "'\\''"),
+            repo_exit
+        );
+        fs::write(&path, script).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        let mut reader = GhProjectReader::new(path);
+        let error = reader.issue(&item).unwrap_err();
+        assert_eq!(error.operation, ReadOperation::DirectIssue);
+        assert_eq!(error.item_id.as_deref(), Some("PVTI_CONTEXT"));
+        assert_eq!(error.issue_id.as_deref(), Some("ISSUE_CONTEXT"));
+        assert_eq!(error.category, expected_category);
+        assert_eq!(error.status, expected_status);
+        assert!(!error.to_string().contains("secret"));
     }
 }

@@ -139,6 +139,10 @@ fn candidate(issue_id: &str, number: u64) -> Candidate {
         milestone_id: None,
         milestone_title: None,
         observed_at_unix_secs: 123,
+        observed_state: "open".into(),
+        observed_assignees: vec![],
+        observed_labels: vec!["ready".into()],
+        observed_project_fields: vec![],
         marker: Marker::Label {
             name: "ready".into(),
         },
@@ -226,7 +230,7 @@ fn invalid_config_does_not_create_task_or_selection_evidence() {
     let dir = tempfile::tempdir().unwrap();
     let mut store = StateStore::open(dir.path(), 1).unwrap();
     let mut invalid = config();
-    invalid.capacity = 0;
+    invalid.initial.args = vec!["--header".into(), "PRIVATE-TOKEN: DEMO_VALUE".into()];
     let error = store
         .create_task("t1", &candidate("i1", 1), "rev", &invalid)
         .unwrap_err();
@@ -285,6 +289,9 @@ fn persists_identity_evidence_and_reservations_transactionally() {
     assert_eq!(selection.candidate.milestone_title, None);
     assert_eq!(selection.candidate.mapping.code_repository, "org/code");
     assert_eq!(selection.candidate.observed_at_unix_secs, 123);
+    assert_eq!(selection.candidate.observed_state, "open");
+    assert_eq!(selection.candidate.observed_labels, vec!["ready"]);
+    assert!(selection.candidate.observed_assignees.is_empty());
     assert_eq!(selection.config_revision, "rev");
     assert_eq!(selection.effective_config.capacity, 1);
     assert_eq!(
@@ -397,6 +404,9 @@ fn reservation_history_allows_a_new_attempt_after_reopen() {
     assert_eq!(selection.candidate.milestone_title, None);
     assert_eq!(selection.candidate.mapping.code_repository, "org/code");
     assert_eq!(selection.candidate.observed_at_unix_secs, 123);
+    assert_eq!(selection.candidate.observed_state, "open");
+    assert_eq!(selection.candidate.observed_labels, vec!["ready"]);
+    assert!(selection.candidate.observed_assignees.is_empty());
     assert_eq!(selection.config_revision, "rev");
     assert_eq!(selection.effective_config.capacity, 1);
     assert_eq!(

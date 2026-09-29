@@ -209,11 +209,6 @@ impl Config {
             {
                 return Err(ConfigError::Invalid("invalid allowed_pr_author".into()));
             }
-            if mapping.allowed_pr_head_repository == mapping.tracker_repository
-                || mapping.allowed_pr_head_repository == mapping.code_repository
-            {
-                return Err(ConfigError::Invalid("allowed PR head repository must be distinct from tracker and code repositories".into()));
-            }
         }
         validate_command(&self.initial)?;
         validate_command(&self.resume)?;
@@ -306,6 +301,70 @@ fn validate_push_remote(value: &str) -> Result<(), ConfigError> {
     Ok(())
 }
 
+fn credential_option(value: &str) -> bool {
+    let option = value
+        .split_once(['=', ':'])
+        .map_or(value, |(name, _)| name)
+        .to_ascii_lowercase();
+    matches!(
+        option.as_str(),
+        "--auth"
+            | "--authorization"
+            | "--token"
+            | "--api-key"
+            | "--password"
+            | "--secret"
+            | "--credential"
+    )
+}
+
+fn sensitive_env_assignment(value: &str) -> bool {
+    let Some((name, _)) = value.split_once('=') else {
+        return false;
+    };
+    has_sensitive_marker(name)
+}
+
+fn sensitive_argument(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    credential_option(value)
+        || is_sensitive_header(value)
+        || lower.trim_start().starts_with("bearer ")
+        || sensitive_env_assignment(value)
+        || contains_credential(value)
+}
+
+// Flags verified against the llxprt-code-rs headless CLI help. Value-taking flags
+// consume exactly one following argv item; flag values remain ordinary task-template text.
+const WORKER_FLAGS_WITH_VALUE: &[&str] = &[
+    "--session",
+    "--turn",
+    "--branch",
+    "--profile",
+    "--profile-load",
+    "--cwd",
+    "-p",
+    "--prompt",
+    "--mem-profile",
+    "--max-tool-calls",
+    "--turn-time",
+    "--max-shell-output",
+    "--max-tool-output",
+    "--max-turn-output",
+    "--digest-size-floor",
+    "--model-params-mode",
+    "--request-timeout",
+];
+const WORKER_FLAGS_WITHOUT_VALUE: &[&str] = &[
+    "--allow-insecure-http",
+    "--allow-shell",
+    "--print-config",
+    "-h",
+    "--help",
+    "-V",
+    "--version",
+];
+
 fn validate_command(command: &CommandTemplate) -> Result<(), ConfigError> {
     if command.executable.as_os_str().is_empty() {
         return Err(ConfigError::Invalid(
@@ -317,21 +376,47 @@ fn validate_command(command: &CommandTemplate) -> Result<(), ConfigError> {
             "credential-bearing command executable is forbidden".into(),
         ));
     }
-    let mut previous_option = "";
+    let mut expects_value = false;
     for arg in &command.args {
-        if contains_credential(arg)
-            || (matches!(previous_option, "--header" | "-H")
-                && (is_sensitive_header(arg) || arg.to_ascii_lowercase().starts_with("bearer ")))
+        if matches!(arg.as_str(), "--header" | "-H" | "--env" | "-e")
+            || arg.starts_with("--header=")
+            || arg.starts_with("--env=")
         {
+            return Err(ConfigError::Invalid(
+                "forbidden worker argument option".into(),
+            ));
+        }
+        if arg.starts_with('-') {
+            let flag = arg.split_once('=').map_or(arg.as_str(), |(flag, _)| flag);
+            let inline_value = arg.contains('=');
+            let takes_value = WORKER_FLAGS_WITH_VALUE.contains(&flag);
+            if !takes_value && !WORKER_FLAGS_WITHOUT_VALUE.contains(&flag) {
+                return Err(ConfigError::Invalid(
+                    "unrecognized worker argument option".into(),
+                ));
+            }
+            if expects_value {
+                return Err(ConfigError::Invalid(
+                    "worker option value is missing".into(),
+                ));
+            }
+            if takes_value && !inline_value {
+                expects_value = true;
+            } else if !takes_value && inline_value {
+                return Err(ConfigError::Invalid(
+                    "worker option does not accept a value".into(),
+                ));
+            }
+        } else if expects_value {
+            expects_value = false;
+        } else if arg.is_empty() {
+            return Err(ConfigError::Invalid("invalid worker argument".into()));
+        }
+        if sensitive_argument(arg) {
             return Err(ConfigError::Invalid(
                 "credential-bearing command argument is forbidden".into(),
             ));
         }
-        previous_option = if arg.starts_with('-') {
-            arg.as_str()
-        } else {
-            ""
-        };
         if arg.contains("${")
             || arg.contains("$(")
             || arg.contains('`')
@@ -372,6 +457,11 @@ fn validate_command(command: &CommandTemplate) -> Result<(), ConfigError> {
         if rest.contains('}') {
             return Err(ConfigError::Invalid("unmatched template delimiter".into()));
         }
+    }
+    if expects_value {
+        return Err(ConfigError::Invalid(
+            "worker option value is missing".into(),
+        ));
     }
     Ok(())
 }

@@ -38,31 +38,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::from_json(&fs::read_to_string(path)?)?;
     let mut reader = GhProjectReader::new(PathBuf::from("gh"));
     let candidates = eligibility::select(&mut reader, &config.sources, &config.mappings)?;
-    let sources: std::collections::HashMap<_, _> = config
-        .sources
-        .iter()
-        .map(|source| (source.project_id.as_str(), source))
-        .collect();
     let mut output_lines = Vec::with_capacity(candidates.len());
     for candidate in candidates {
-        let source = sources[candidate.project_id.as_str()];
         let output = json!({
-            "candidate": {
-                "project_id": candidate.project_id,
-                "item_id": candidate.item_id,
-                "repository": candidate.repository,
-                "issue_node_id": candidate.issue_node_id,
-                "issue_number": candidate.issue_number,
-                "code_repository": candidate.mapping.code_repository,
-            },
-            "source": {
-                "project_id": source.project_id,
-                "ready_marker": format!("{:?}", source.ready_marker),
-                "milestone": source.milestone,
-            },
+            "candidate": candidate,
             "evidence": {
-                "state": "open",
-                "assignees": [],
+                "state": candidate.observed_state,
+                "assignees": candidate.observed_assignees,
+                "labels": candidate.observed_labels,
+                "project_fields": candidate.observed_project_fields,
                 "eligibility": "selected",
             }
         });

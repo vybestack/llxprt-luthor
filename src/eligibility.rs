@@ -18,6 +18,10 @@ pub struct Candidate {
     pub milestone_id: Option<String>,
     pub milestone_title: Option<String>,
     pub observed_at_unix_secs: u64,
+    pub observed_state: String,
+    pub observed_assignees: Vec<String>,
+    pub observed_labels: Vec<String>,
+    pub observed_project_fields: Vec<(String, String)>,
     pub marker: Marker,
     pub mapping: Mapping,
     pub source: Source,
@@ -31,6 +35,12 @@ pub enum EligibilityError {
     MissingMapping(String),
     #[error("conflicting source rules for issue {0}")]
     ConflictingSource(String),
+    #[error("project {project_id} item {item_id} has unsupported configured marker field {name}")]
+    UnsupportedMarkerField {
+        project_id: String,
+        item_id: String,
+        name: String,
+    },
 }
 
 pub fn select<R: ProjectReader>(
@@ -55,6 +65,15 @@ pub fn select<R: ProjectReader>(
             let Some(mapping) = mapping_by_repo.get(issue.repository.as_str()) else {
                 return Err(EligibilityError::MissingMapping(issue.repository.clone()));
             };
+            if let Marker::ProjectField { name, .. } = &source.ready_marker
+                && item.unsupported_fields.iter().any(|field| field == name)
+            {
+                return Err(EligibilityError::UnsupportedMarkerField {
+                    project_id: source.project_id.clone(),
+                    item_id: item.item_id,
+                    name: name.clone(),
+                });
+            }
             if issue.state != "open"
                 || !issue.assignees.is_empty()
                 || !marker_matches(&source.ready_marker, &item, &issue)
@@ -77,6 +96,10 @@ pub fn select<R: ProjectReader>(
                 milestone_id: issue.milestone_id.clone(),
                 milestone_title: issue.milestone.clone(),
                 observed_at_unix_secs: issue.observed_at_unix_secs,
+                observed_state: issue.state.clone(),
+                observed_assignees: issue.assignees.clone(),
+                observed_labels: issue.labels.clone(),
+                observed_project_fields: item.fields.clone(),
                 marker: source.ready_marker.clone(),
                 mapping: (*mapping).clone(),
                 source: source.clone(),

@@ -16,6 +16,7 @@ pub struct ProjectItem {
     pub tracker_repo_id: String,
     pub issue_number: u64,
     pub fields: Vec<(String, String)>,
+    pub unsupported_fields: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -168,29 +169,18 @@ impl GhProjectReader {
             })?;
         let parsed = serde_json::from_slice::<Value>(&output.stdout);
         if !output.status.success() {
-            let status = parsed
-                .as_ref()
-                .ok()
-                .and_then(|v| v.get("status").and_then(Value::as_str))
-                .and_then(|s| s.parse().ok());
-            let message = parsed
-                .as_ref()
-                .ok()
-                .and_then(|v| v.get("message").and_then(Value::as_str))
-                .unwrap_or("")
-                .to_ascii_lowercase();
-            let category = match status {
-                Some(401 | 403) => {
-                    if message.contains("rate limit") {
-                        ReadCategory::RateLimit
-                    } else {
-                        ReadCategory::Permission
-                    }
-                }
-                Some(429) => ReadCategory::RateLimit,
-                Some(404) => ReadCategory::NotFound,
-                _ => ReadCategory::Unknown,
-            };
+            let json_error = parsed.as_ref().ok();
+            let status = json_error
+                .and_then(|value| value.get("status"))
+                .and_then(status_value);
+            let stderr = &output.stderr[..output.stderr.len().min(4096)];
+            let stderr_text = String::from_utf8_lossy(stderr);
+            let status = status.or_else(|| stderr_status(&stderr_text));
+            let message = json_error
+                .and_then(|value| value.get("message"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let category = classify_status(status, message, &stderr_text);
             return Err(ProjectReadError {
                 operation: ReadOperation::ProjectPage,
                 project_id: None,
@@ -223,7 +213,7 @@ impl ProjectReader for GhProjectReader {
         project_id: &str,
         cursor: Option<&str>,
     ) -> Result<Page<ProjectItem>, ProjectReadError> {
-        const QUERY: &str = "query($projectId: ID!, $cursor: String) { node(id: $projectId) { ... on ProjectV2 { items(first: 100, after: $cursor) { nodes { id content { __typename ... on Issue { id number repository { id nameWithOwner } } } fieldValues(first: 100) { nodes { __typename ... on ProjectV2ItemFieldSingleSelectValue { name field { ... on ProjectV2SingleSelectField { name } ... on ProjectV2Field { name } } } ... on ProjectV2ItemFieldTextValue { text field { ... on ProjectV2SingleSelectField { name } ... on ProjectV2Field { name } } } } pageInfo { hasNextPage endCursor } } } pageInfo { hasNextPage endCursor } } } } }";
+        const QUERY: &str = "query($projectId: ID!, $cursor: String) { node(id: $projectId) { ... on ProjectV2 { items(first: 100, after: $cursor) { nodes { id content { __typename ... on Issue { id number repository { id nameWithOwner } } } fieldValues(first: 100) { nodes { __typename ... on ProjectV2ItemFieldSingleSelectValue { name field { ... on ProjectV2SingleSelectField { name } ... on ProjectV2Field { name } } } ... on ProjectV2ItemFieldTextValue { text field { ... on ProjectV2SingleSelectField { name } ... on ProjectV2Field { name } } } ... on ProjectV2ItemFieldIterationValue { field { ... on ProjectV2IterationField { name } } } } pageInfo { hasNextPage endCursor } } } pageInfo { hasNextPage endCursor } } } } }";
         let query_arg = format!("query={QUERY}");
         let project_id_arg = format!("projectId={project_id}");
         let cursor_arg = cursor.map(|cursor| format!("cursor={cursor}"));
@@ -236,13 +226,14 @@ impl ProjectReader for GhProjectReader {
             error.project_id = Some(project_id.to_owned());
             error
         })?;
-        if value.get("errors").is_some() {
+        if let Some(errors) = value.get("errors").and_then(Value::as_array) {
+            let category = classify_graphql_errors(errors);
             return Err(ProjectReadError {
                 operation: ReadOperation::ProjectPage,
                 project_id: Some(project_id.to_owned()),
                 item_id: None,
                 issue_id: None,
-                category: ReadCategory::Unknown,
+                category,
                 status: None,
                 code: "graphql-error".to_owned(),
             });
@@ -341,6 +332,7 @@ impl ProjectReader for GhProjectReader {
                 .and_then(Value::as_array)
                 .ok_or_else(|| "invalid-project-field-values".to_owned())?;
             let mut fields = Vec::new();
+            let mut unsupported_fields = Vec::new();
             for field in field_nodes {
                 match field.get("__typename").and_then(Value::as_str) {
                     Some("ProjectV2ItemFieldSingleSelectValue") => fields.push((
@@ -363,7 +355,27 @@ impl ProjectReader for GhProjectReader {
                         )?,
                         required_string(field, "text", "invalid-project-field")?,
                     )),
-                    Some(_) | None => {}
+                    Some("ProjectV2ItemFieldIterationValue") => {
+                        unsupported_fields.push(required_string(
+                            field
+                                .get("field")
+                                .ok_or_else(|| "invalid-project-field".to_owned())?,
+                            "name",
+                            "invalid-project-field",
+                        )?)
+                    }
+                    Some(
+                        "ProjectV2ItemFieldDateValue"
+                        | "ProjectV2ItemFieldNumberValue"
+                        | "ProjectV2ItemFieldUserValue"
+                        | "ProjectV2ItemFieldRepositoryValue"
+                        | "ProjectV2ItemFieldLabelValue"
+                        | "ProjectV2ItemFieldMilestoneValue"
+                        | "ProjectV2ItemFieldPullRequestValue",
+                    ) => {}
+                    Some(_) | None => {
+                        return Err("unsupported-project-field-value-type".to_owned().into());
+                    }
                 }
             }
             items.push(ProjectItem {
@@ -373,6 +385,7 @@ impl ProjectReader for GhProjectReader {
                 tracker_repo_id,
                 issue_number: number,
                 fields,
+                unsupported_fields,
             });
         }
         Ok(Page {
@@ -383,124 +396,196 @@ impl ProjectReader for GhProjectReader {
     }
 
     fn issue(&mut self, item: &ProjectItem) -> Result<Issue, ProjectReadError> {
-        let repository_id = if let Some(id) = self.repository_ids.get(&item.repository) {
-            id.clone()
-        } else {
-            let path = format!("repos/{}", item.repository);
-            let repository = self.api(&["api", &path])?;
-            let id = required_string(&repository, "node_id", "invalid-repository")?;
-            self.repository_ids
-                .insert(item.repository.clone(), id.clone());
-            id
-        };
-        if repository_id != item.tracker_repo_id {
-            return Err("identity-mismatch".to_owned().into());
-        }
-        let path = format!(
-            "repos/{}/issues/{}?per_page=100",
-            item.repository, item.issue_number
-        );
-        let value = self.api(&["api", &path]).map_err(|mut error| {
-            error.operation = ReadOperation::DirectIssue;
-            error.item_id = Some(item.item_id.clone());
-            error.issue_id = Some(item.issue_node_id.clone());
-            error
-        })?;
-        if value.get("message").is_some() && value.get("documentation_url").is_some() {
-            return Err(ProjectReadError {
-                operation: ReadOperation::DirectIssue,
-                project_id: None,
-                item_id: Some(item.item_id.clone()),
-                issue_id: Some(item.issue_node_id.clone()),
-                category: ReadCategory::Unknown,
-                status: None,
-                code: "api-error".to_owned(),
-            });
-        }
-        let node_id = required_string(&value, "node_id", "invalid-issue")?;
-        let repository_url = value
-            .pointer("/repository_url")
-            .and_then(Value::as_str)
-            .ok_or_else(|| "identity-mismatch".to_owned())?;
-        let expected_repository_url = format!("https://api.github.com/repos/{}", item.repository);
-        if repository_url != expected_repository_url {
-            return Err("identity-mismatch".to_owned().into());
-        }
-        let repository = value
-            .pointer("/repository_url")
-            .and_then(Value::as_str)
-            .and_then(|url| url.strip_prefix("https://api.github.com/repos/"))
-            .filter(|name| *name == item.repository)
-            .ok_or_else(|| "issue-repository-mismatch".to_owned())?;
-        let number = value
-            .get("number")
-            .and_then(Value::as_u64)
-            .ok_or_else(|| "invalid-issue".to_owned())?;
-        if number != item.issue_number {
-            return Err("issue-number-mismatch".to_owned().into());
-        }
-        let url = required_string(&value, "html_url", "invalid-issue")?;
-        let expected_url = format!(
-            "https://github.com/{}/issues/{}",
-            item.repository, item.issue_number
-        );
-        if url != expected_url {
-            return Err("issue-url-mismatch".to_owned().into());
-        }
-        let state = required_string(&value, "state", "invalid-issue")?;
-        let assignees = value
-            .get("assignees")
-            .and_then(Value::as_array)
-            .ok_or_else(|| "invalid-issue-assignees".to_owned())?;
-        let labels = value
-            .get("labels")
-            .and_then(Value::as_array)
-            .ok_or_else(|| "invalid-issue-labels".to_owned())?;
-        if assignees.len() >= 100 || labels.len() >= 100 {
-            return Err("issue-subcollection-at-cap".to_owned().into());
-        }
-        let assignees = assignees
-            .iter()
-            .map(|assignee| required_string(assignee, "login", "invalid-issue-assignees"))
-            .collect::<Result<Vec<_>, _>>()?;
-        let labels = labels
-            .iter()
-            .map(|label| required_string(label, "name", "invalid-issue-labels"))
-            .collect::<Result<Vec<_>, _>>()?;
-        let observed_at_unix_secs = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|error| format!("system clock precedes Unix epoch: {error}"))?
-            .as_secs();
-        let (milestone, milestone_id) = match value.get("milestone") {
-            Some(Value::Null) => (None, None),
-            Some(milestone) => (
-                Some(required_string(
-                    milestone,
-                    "title",
-                    "invalid-issue-milestone",
-                )?),
-                Some(required_string(
-                    milestone,
-                    "node_id",
-                    "invalid-issue-milestone",
-                )?),
-            ),
-            None => return Err("invalid-issue-milestone".to_owned().into()),
-        };
-        Ok(Issue {
-            node_id,
-            repository: repository.to_owned(),
-            tracker_repo_id: repository_id,
-            number,
-            url,
-            state,
-            assignees,
-            labels,
-            milestone,
-            milestone_id,
-            observed_at_unix_secs,
-        })
+        let result = (|| {
+            let repository_id = if let Some(id) = self.repository_ids.get(&item.repository) {
+                id.clone()
+            } else {
+                let path = format!("repos/{}", item.repository);
+                let repository = self.api(&["api", &path])?;
+                let id = required_string(&repository, "node_id", "invalid-repository")?;
+                self.repository_ids
+                    .insert(item.repository.clone(), id.clone());
+                id
+            };
+            if repository_id != item.tracker_repo_id {
+                return Err("identity-mismatch".to_owned().into());
+            }
+            let path = format!(
+                "repos/{}/issues/{}?per_page=100",
+                item.repository, item.issue_number
+            );
+            let value = self.api(&["api", &path])?;
+            if value.get("message").is_some() && value.get("documentation_url").is_some() {
+                return Err(ProjectReadError {
+                    operation: ReadOperation::DirectIssue,
+                    project_id: None,
+                    item_id: Some(item.item_id.clone()),
+                    issue_id: Some(item.issue_node_id.clone()),
+                    category: ReadCategory::Unknown,
+                    status: None,
+                    code: "api-error".to_owned(),
+                });
+            }
+            let node_id = required_string(&value, "node_id", "invalid-issue")?;
+            let repository_url = value
+                .pointer("/repository_url")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "identity-mismatch".to_owned())?;
+            let expected_repository_url =
+                format!("https://api.github.com/repos/{}", item.repository);
+            if repository_url != expected_repository_url {
+                return Err("identity-mismatch".to_owned().into());
+            }
+            let repository = value
+                .pointer("/repository_url")
+                .and_then(Value::as_str)
+                .and_then(|url| url.strip_prefix("https://api.github.com/repos/"))
+                .filter(|name| *name == item.repository)
+                .ok_or_else(|| "issue-repository-mismatch".to_owned())?;
+            let number = value
+                .get("number")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| "invalid-issue".to_owned())?;
+            if number != item.issue_number {
+                return Err("issue-number-mismatch".to_owned().into());
+            }
+            let url = required_string(&value, "html_url", "invalid-issue")?;
+            let expected_url = format!(
+                "https://github.com/{}/issues/{}",
+                item.repository, item.issue_number
+            );
+            if url != expected_url {
+                return Err("issue-url-mismatch".to_owned().into());
+            }
+            let state = required_string(&value, "state", "invalid-issue")?;
+            let assignees = value
+                .get("assignees")
+                .and_then(Value::as_array)
+                .ok_or_else(|| "invalid-issue-assignees".to_owned())?;
+            let labels = value
+                .get("labels")
+                .and_then(Value::as_array)
+                .ok_or_else(|| "invalid-issue-labels".to_owned())?;
+            if assignees.len() >= 100 || labels.len() >= 100 {
+                return Err("issue-subcollection-at-cap".to_owned().into());
+            }
+            let assignees = assignees
+                .iter()
+                .map(|assignee| required_string(assignee, "login", "invalid-issue-assignees"))
+                .collect::<Result<Vec<_>, _>>()?;
+            let labels = labels
+                .iter()
+                .map(|label| required_string(label, "name", "invalid-issue-labels"))
+                .collect::<Result<Vec<_>, _>>()?;
+            let observed_at_unix_secs = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|error| format!("system clock precedes Unix epoch: {error}"))?
+                .as_secs();
+            let (milestone, milestone_id) = match value.get("milestone") {
+                Some(Value::Null) => (None, None),
+                Some(milestone) => (
+                    Some(required_string(
+                        milestone,
+                        "title",
+                        "invalid-issue-milestone",
+                    )?),
+                    Some(required_string(
+                        milestone,
+                        "node_id",
+                        "invalid-issue-milestone",
+                    )?),
+                ),
+                None => return Err("invalid-issue-milestone".to_owned().into()),
+            };
+            Ok(Issue {
+                node_id,
+                repository: repository.to_owned(),
+                tracker_repo_id: repository_id,
+                number,
+                url,
+                state,
+                assignees,
+                labels,
+                milestone,
+                milestone_id,
+                observed_at_unix_secs,
+            })
+        })();
+        result.map_err(|error| with_issue_context(error, item))
     }
+}
+
+fn status_value(value: &Value) -> Option<u16> {
+    value
+        .as_str()
+        .and_then(|status| status.parse().ok())
+        .or_else(|| value.as_u64().and_then(|status| u16::try_from(status).ok()))
+}
+
+fn stderr_status(stderr: &str) -> Option<u16> {
+    let words = stderr.split_whitespace().collect::<Vec<_>>();
+    words.windows(2).find_map(|pair| {
+        if pair[0] == "HTTP" {
+            pair[1]
+                .trim_matches(|ch: char| !ch.is_ascii_digit())
+                .parse()
+                .ok()
+        } else {
+            None
+        }
+    })
+}
+
+fn classify_status(status: Option<u16>, json_message: &str, stderr: &str) -> ReadCategory {
+    let rate_limited = json_message.to_ascii_lowercase().contains("rate limit")
+        || stderr.to_ascii_lowercase().contains("rate limit");
+    match status {
+        Some(401) => ReadCategory::Permission,
+        Some(403) if rate_limited => ReadCategory::RateLimit,
+        Some(403) => ReadCategory::Permission,
+        Some(404) => ReadCategory::NotFound,
+        Some(429) => ReadCategory::RateLimit,
+        _ => ReadCategory::Unknown,
+    }
+}
+
+fn classify_graphql_errors(errors: &[Value]) -> ReadCategory {
+    let mut category = ReadCategory::Unknown;
+    for error in errors {
+        let code = error
+            .get("type")
+            .and_then(Value::as_str)
+            .or_else(|| error.pointer("/extensions/code").and_then(Value::as_str))
+            .unwrap_or("")
+            .to_ascii_uppercase();
+        let candidate = match code.as_str() {
+            "RATE_LIMITED" | "RATE_LIMIT" => ReadCategory::RateLimit,
+            "FORBIDDEN" | "UNAUTHORIZED" => ReadCategory::Permission,
+            "NOT_FOUND" => ReadCategory::NotFound,
+            _ => {
+                let message = error.get("message").and_then(Value::as_str).unwrap_or("");
+                if message.len() <= 256 && message.to_ascii_lowercase().contains("rate limit") {
+                    ReadCategory::RateLimit
+                } else {
+                    ReadCategory::Unknown
+                }
+            }
+        };
+        match candidate {
+            ReadCategory::RateLimit => return candidate,
+            ReadCategory::Permission => category = candidate,
+            ReadCategory::NotFound if category == ReadCategory::Unknown => category = candidate,
+            _ => {}
+        }
+    }
+    category
+}
+
+fn with_issue_context(mut error: ProjectReadError, item: &ProjectItem) -> ProjectReadError {
+    error.operation = ReadOperation::DirectIssue;
+    error.item_id = Some(item.item_id.clone());
+    error.issue_id = Some(item.issue_node_id.clone());
+    error
 }
 
 fn item_error(project_id: &str, item_id: &str, code: &str) -> ProjectReadError {
