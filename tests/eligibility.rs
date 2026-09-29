@@ -1,6 +1,6 @@
 use luthor::{
     config::{Mapping, Marker, Source},
-    eligibility::select,
+    eligibility::{select, select_target},
     github::project::{
         Issue, Page, ProjectItem, ProjectReadError, ProjectReader, ReadCategory, ReadOperation,
     },
@@ -490,4 +490,116 @@ fn unsupported_configured_marker_field_errors_but_unrelated_field_does_not() {
     )
     .unwrap();
     assert_eq!(selected.len(), 1);
+}
+
+#[test]
+fn targeted_selection_reads_only_matching_issue_and_applies_source_rules() {
+    let mut unrelated = item("OTHER", "N8", vec![]);
+    unrelated.issue_number = 8;
+    let mut fake = Fake {
+        pages: vec![Page {
+            items: vec![unrelated, item("TARGET", "N7", vec![])],
+            has_next_page: false,
+            end_cursor: None,
+        }],
+        issues: vec![issue("open", vec!["ready"], vec![], None)],
+        calls: 0,
+        fail_page: false,
+    };
+    let selected = select_target(
+        &mut fake,
+        &[source(
+            Marker::Label {
+                name: "ready".into(),
+            },
+            None,
+        )],
+        &[mapping()],
+        "org/tracker",
+        7,
+    )
+    .unwrap();
+    assert_eq!(selected.len(), 1);
+    assert_eq!(selected[0].item_id, "TARGET");
+
+    assert!(
+        select_target(
+            &mut fake,
+            &[source(
+                Marker::Label {
+                    name: "ready".into()
+                },
+                None
+            )],
+            &[mapping()],
+            "org/tracker",
+            99,
+        )
+        .unwrap()
+        .is_empty()
+    );
+}
+
+#[test]
+fn targeted_selection_rejects_source_and_mapping_mismatches() {
+    let mut fake = Fake {
+        pages: vec![Page {
+            items: vec![item("TARGET", "N7", vec![])],
+            has_next_page: false,
+            end_cursor: None,
+        }],
+        issues: vec![issue("open", vec!["ready"], vec![], None)],
+        calls: 0,
+        fail_page: false,
+    };
+    assert!(
+        select_target(
+            &mut fake,
+            &[source_in(
+                "P1",
+                Marker::Label {
+                    name: "ready".into()
+                },
+                None
+            )],
+            &[mapping()],
+            "org/tracker",
+            7,
+        )
+        .unwrap()
+        .len()
+            == 1
+    );
+
+    let mut wrong_source = source(
+        Marker::Label {
+            name: "ready".into(),
+        },
+        None,
+    );
+    wrong_source.repositories = vec!["org/other".into()];
+    assert!(
+        select_target(&mut fake, &[wrong_source], &[mapping()], "org/tracker", 7)
+            .unwrap()
+            .is_empty()
+    );
+
+    let mut wrong_mapping = mapping();
+    wrong_mapping.tracker_repository = "org/other".into();
+    assert_eq!(
+        select_target(
+            &mut fake,
+            &[source(
+                Marker::Label {
+                    name: "ready".into()
+                },
+                None
+            )],
+            &[wrong_mapping],
+            "org/tracker",
+            7
+        )
+        .unwrap_err(),
+        luthor::eligibility::EligibilityError::MissingMapping("org/tracker".into())
+    );
 }

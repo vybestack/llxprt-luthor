@@ -1,6 +1,8 @@
 use crate::{
     config::{Mapping, Marker, Source},
-    github::project::{Issue, ProjectError, ProjectItem, ProjectReader, enumerate},
+    github::project::{
+        Issue, ProjectError, ProjectItem, ProjectReader, enumerate, enumerate_target,
+    },
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -48,13 +50,40 @@ pub fn select<R: ProjectReader>(
     sources: &[Source],
     mappings: &[Mapping],
 ) -> Result<Vec<Candidate>, EligibilityError> {
+    select_with(reader, sources, mappings, |reader, source| {
+        enumerate(reader, &source.project_id)
+    })
+}
+
+pub fn select_target<R: ProjectReader>(
+    reader: &mut R,
+    sources: &[Source],
+    mappings: &[Mapping],
+    repository: &str,
+    issue_number: u64,
+) -> Result<Vec<Candidate>, EligibilityError> {
+    select_with(reader, sources, mappings, |reader, source| {
+        enumerate_target(reader, &source.project_id, repository, issue_number)
+    })
+}
+
+fn select_with<R, F>(
+    reader: &mut R,
+    sources: &[Source],
+    mappings: &[Mapping],
+    mut enumerate_source: F,
+) -> Result<Vec<Candidate>, EligibilityError>
+where
+    R: ProjectReader,
+    F: FnMut(&mut R, &Source) -> Result<Vec<(ProjectItem, Issue)>, ProjectError>,
+{
     let mapping_by_repo: HashMap<_, _> = mappings
         .iter()
         .map(|m| (m.tracker_repository.as_str(), m))
         .collect();
     let mut candidates: HashMap<String, (Candidate, Marker, Option<String>)> = HashMap::new();
     for source in sources {
-        for (item, issue) in enumerate(reader, &source.project_id)? {
+        for (item, issue) in enumerate_source(reader, source)? {
             if !source
                 .repositories
                 .iter()
