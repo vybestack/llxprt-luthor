@@ -8,6 +8,7 @@ pub struct ProjectItem {
     pub item_id: String,
     pub issue_node_id: String,
     pub repository: String,
+    pub tracker_repo_id: Option<String>,
     pub issue_number: u64,
     pub fields: Vec<(String, String)>,
 }
@@ -209,7 +210,7 @@ impl ProjectReader for GhProjectReader {
         project_id: &str,
         cursor: Option<&str>,
     ) -> Result<Page<ProjectItem>, ProjectReadError> {
-        const QUERY: &str = "query($projectId: ID!, $cursor: String) { node(id: $projectId) { ... on ProjectV2 { items(first: 100, after: $cursor) { nodes { id content { __typename ... on Issue { id number repository { nameWithOwner } } } fieldValues(first: 100) { nodes { __typename ... on ProjectV2ItemFieldSingleSelectValue { name field { ... on ProjectV2SingleSelectField { name } ... on ProjectV2Field { name } } } ... on ProjectV2ItemFieldTextValue { text field { ... on ProjectV2SingleSelectField { name } ... on ProjectV2Field { name } } } } pageInfo { hasNextPage endCursor } } } pageInfo { hasNextPage endCursor } } } } }";
+        const QUERY: &str = "query($projectId: ID!, $cursor: String) { node(id: $projectId) { ... on ProjectV2 { items(first: 100, after: $cursor) { nodes { id content { __typename ... on Issue { id number repository { id nameWithOwner } } } fieldValues(first: 100) { nodes { __typename ... on ProjectV2ItemFieldSingleSelectValue { name field { ... on ProjectV2SingleSelectField { name } ... on ProjectV2Field { name } } } ... on ProjectV2ItemFieldTextValue { text field { ... on ProjectV2SingleSelectField { name } ... on ProjectV2Field { name } } } } pageInfo { hasNextPage endCursor } } } pageInfo { hasNextPage endCursor } } } } }";
         let query_arg = format!("query={QUERY}");
         let project_id_arg = format!("projectId={project_id}");
         let cursor_arg = cursor.map(|cursor| format!("cursor={cursor}"));
@@ -285,6 +286,11 @@ impl ProjectReader for GhProjectReader {
                 .and_then(Value::as_str)
                 .filter(|s| !s.is_empty())
                 .ok_or_else(|| "invalid-project-issue".to_owned())?;
+            let tracker_repo_id = content
+                .pointer("/repository/id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty())
+                .map(str::to_owned);
             let field_values = node
                 .get("fieldValues")
                 .ok_or_else(|| "missing-project-field-values".to_owned())?;
@@ -329,6 +335,7 @@ impl ProjectReader for GhProjectReader {
                 item_id,
                 issue_node_id,
                 repository: repository.to_owned(),
+                tracker_repo_id,
                 issue_number: number,
                 fields,
             });

@@ -50,6 +50,7 @@ fn item(id: &str, issue: &str, fields: Vec<(String, String)>) -> ProjectItem {
         item_id: id.into(),
         issue_node_id: issue.into(),
         repository: "org/tracker".into(),
+        tracker_repo_id: None,
         issue_number: 7,
         fields,
     }
