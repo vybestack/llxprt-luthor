@@ -1,7 +1,7 @@
 {
-  "event_count": 98,
-  "last_event_id": "01M3Q03F028VV924VXVBFMXF11",
-  "materialized_at": "2026-09-29T16:31:26.210124+00:00",
+  "event_count": 99,
+  "last_event_id": "01M3Q05KQFM09EWWHV2EQVA3ZP",
+  "materialized_at": "2026-09-29T16:32:36.591427+00:00",
   "mission_number": "",
   "mission_slug": "luthor-issue-to-pr-daemon-01M3N2VK",
   "mission_type": "software-dev",
@@ -11,9 +11,9 @@
     "canceled": 0,
     "claimed": 0,
     "done": 0,
-    "for_review": 1,
+    "for_review": 0,
     "in_progress": 0,
-    "in_review": 0,
+    "in_review": 1,
     "planned": 2
   },
   "work_packages": {
@@ -81,14 +81,14 @@
       }
     },
     "WP03": {
-      "actor": "architect",
-      "agent": "architect",
+      "actor": "deep-bug-investigator",
+      "agent": "deep-bug-investigator",
       "agent_profile": "__resolved_profile_absent__",
       "agent_profile_version": "__resolved_profile_version_absent__",
       "force_count": 8,
-      "lane": "for_review",
-      "last_event_id": "01M3Q03F028VV924VXVBFMXF11",
-      "last_transition_at": "2026-09-29T16:31:26.210124+00:00",
+      "lane": "in_review",
+      "last_event_id": "01M3Q05KQFM09EWWHV2EQVA3ZP",
+      "last_transition_at": "2026-09-29T16:32:36.591427+00:00",
       "model": "__resolved_model_absent__",
       "notes": [
         "WP03 fix integrated; root fmt, locked offline all-target tests, and strict Clippy passed.",
@@ -103,9 +103,9 @@
         "reviewer": "architect",
         "verdict": "changes_requested"
       },
-      "role": "implementer",
-      "shell_pid": null,
-      "shell_pid_created_at": null,
+      "role": "reviewer",
+      "shell_pid": 10018,
+      "shell_pid_created_at": "1790699553.77733",
       "subtasks": {
         "T006": "done",
         "T007": "done",
