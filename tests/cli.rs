@@ -256,6 +256,53 @@ fn show_reports_verified_pr_as_cached_and_rejects_malformed_or_duplicate_proof()
 }
 
 #[test]
+fn status_reports_cached_pr_only_for_completed_task_without_gating_on_checks() {
+    let f = Fixture::new();
+    f.task("completed");
+    f.task("held");
+    f.db()
+        .execute(
+            "UPDATE tasks SET state='pr_complete' WHERE id='completed'",
+            [],
+        )
+        .unwrap();
+    let proof = json!({"id":123,"url":"https://github.com/org/code/pull/9",
+        "repository":"org/code","head_repository":"org/fork","draft":false,
+        "checks":["failure","pending"],"observed_at":1700000000,"attempt_id":"attempt"});
+    f.evidence(
+        "completed",
+        Some("attempt"),
+        "verified_open_pr",
+        &proof.to_string(),
+    );
+
+    let status = f.run(&["status"]).unwrap();
+    let completed = status["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["task_id"] == "completed")
+        .unwrap();
+    let held = status["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["task_id"] == "held")
+        .unwrap();
+    assert_eq!(completed["phase"], "pr_complete");
+    assert_eq!(completed["pr_state"], "open_at_last_verification");
+    assert_eq!(completed["verified_pr"]["id"], 123);
+    assert_eq!(completed["verified_pr"]["url"], proof["url"]);
+    assert_eq!(completed["verified_pr"]["draft"], false);
+    assert_eq!(completed["verified_pr"]["checks"], proof["checks"]);
+    assert_eq!(completed["verified_pr"]["observed_at"], 1700000000);
+    assert_eq!(completed["verified_pr"]["attempt_id"], "attempt");
+    assert_eq!(held["pr_state"], "unavailable");
+    assert!(held["verified_pr"].is_null());
+    assert!(held["pr_unavailable_reason"].is_string());
+}
+
+#[test]
 fn status_and_show_report_missing_or_unsafe_active_logs_as_unavailable() {
     let f = Fixture::new();
     f.task("task");

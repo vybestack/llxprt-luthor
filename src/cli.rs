@@ -430,6 +430,62 @@ pub fn execute(root: &Path, args: &[String]) -> Result<String, CliError> {
     serde_json::to_string(&output).map_err(|_| CliError::Serialization)
 }
 
+fn cached_verified_pr(conn: &Connection, task: &str) -> Result<Value, CliError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT attempt_id,payload FROM evidence WHERE task_id=?1 AND kind='verified_open_pr'",
+        )
+        .map_err(|_| CliError::Database)?;
+    let rows = stmt
+        .query_map([task], |row| {
+            Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|_| CliError::Database)?;
+    let proofs = rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| CliError::Database)?;
+    let [(evidence_attempt, payload)] = proofs.as_slice() else {
+        return Err(CliError::Database);
+    };
+    let detail: Value = serde_json::from_str(payload).map_err(|_| CliError::Database)?;
+    let id = detail["id"]
+        .as_u64()
+        .filter(|id| *id > 0)
+        .ok_or(CliError::Database)?;
+    let url = detail["url"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .ok_or(CliError::Database)?;
+    let repository = detail["repository"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .ok_or(CliError::Database)?;
+    let head_repository = detail["head_repository"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .ok_or(CliError::Database)?;
+    let draft = detail["draft"].as_bool().ok_or(CliError::Database)?;
+    let checks = detail["checks"]
+        .as_array()
+        .filter(|checks| checks.iter().all(Value::is_string))
+        .ok_or(CliError::Database)?;
+    let observed_at = detail["observed_at"]
+        .as_u64()
+        .filter(|value| *value > 0)
+        .ok_or(CliError::Database)?;
+    let attempt_id = detail["attempt_id"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .ok_or(CliError::Database)?;
+    if evidence_attempt.as_deref() != Some(attempt_id) {
+        return Err(CliError::Database);
+    }
+    Ok(
+        json!({"id":id,"url":url,"repository":repository,"head_repository":head_repository,
+        "draft":draft,"checks":checks,"observed_at":observed_at,"attempt_id":attempt_id}),
+    )
+}
+
 fn status(conn: &Connection, root: &Path) -> Result<Value, CliError> {
     let capacity: i64 = conn
         .query_row(
@@ -510,6 +566,14 @@ fn status(conn: &Connection, root: &Path) -> Result<Value, CliError> {
             .as_str()
             .ok_or(CliError::Database)?
             .to_owned();
+        if task["phase"] == "pr_complete" {
+            let verified_pr = cached_verified_pr(conn, &task_id)?;
+            task["pr_state"] = json!("open_at_last_verification");
+            task["pr_unavailable_reason"] = Value::Null;
+            task["verified_pr"] = verified_pr;
+        } else {
+            task["verified_pr"] = Value::Null;
+        }
         let reserved_attempt: Option<String> = conn
             .query_row(
                 "SELECT a.id FROM attempts a JOIN reservations r ON r.attempt_id=a.id
@@ -716,46 +780,7 @@ fn show(conn: &Connection, root: &Path, task: &str) -> Result<Value, CliError> {
         .and_then(|a| a["outcome"].as_str())
         .map(str::to_owned);
     let verified_pr = if phase == "pr_complete" {
-        let proofs: Vec<&Value> = evidence
-            .iter()
-            .filter(|item| item["kind"] == "verified_open_pr")
-            .collect();
-        let [proof] = proofs.as_slice() else {
-            return Err(CliError::Database);
-        };
-        let detail = proof.get("detail").ok_or(CliError::Database)?;
-        let id = detail["id"]
-            .as_u64()
-            .filter(|id| *id > 0)
-            .ok_or(CliError::Database)?;
-        let url = detail["url"]
-            .as_str()
-            .filter(|value| !value.is_empty())
-            .ok_or(CliError::Database)?;
-        let repository = detail["repository"]
-            .as_str()
-            .filter(|value| !value.is_empty())
-            .ok_or(CliError::Database)?;
-        let head_repository = detail["head_repository"]
-            .as_str()
-            .filter(|value| !value.is_empty())
-            .ok_or(CliError::Database)?;
-        let draft = detail["draft"].as_bool().ok_or(CliError::Database)?;
-        let checks = detail["checks"]
-            .as_array()
-            .filter(|checks| checks.iter().all(Value::is_string))
-            .ok_or(CliError::Database)?;
-        let observed_at = detail["observed_at"]
-            .as_u64()
-            .filter(|value| *value > 0)
-            .ok_or(CliError::Database)?;
-        let attempt_id = detail["attempt_id"]
-            .as_str()
-            .filter(|value| !value.is_empty())
-            .ok_or(CliError::Database)?;
-        Some(
-            json!({"id":id,"url":url,"repository":repository,"head_repository":head_repository,"draft":draft,"checks":checks,"observed_at":observed_at,"attempt_id":attempt_id}),
-        )
+        Some(cached_verified_pr(conn, task)?)
     } else {
         None
     };
