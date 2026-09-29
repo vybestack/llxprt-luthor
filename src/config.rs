@@ -67,14 +67,31 @@ impl Config {
                 "capacity, sources and mappings must be non-empty".into(),
             ));
         }
+        let mapping_repositories: HashSet<_> = self
+            .mappings
+            .iter()
+            .map(|mapping| mapping.tracker_repository.as_str())
+            .collect();
+        let mut project_ids = HashSet::new();
         for source in &self.sources {
             if source.project_id.trim().is_empty() || source.repositories.is_empty() {
                 return Err(ConfigError::Invalid(
                     "source project_id and repositories are required".into(),
                 ));
             }
+            if !project_ids.insert(&source.project_id) {
+                return Err(ConfigError::Invalid(format!(
+                    "duplicate source project_id: {}",
+                    source.project_id
+                )));
+            }
             for repository in &source.repositories {
                 validate_repository(repository)?;
+                if !mapping_repositories.contains(repository.as_str()) {
+                    return Err(ConfigError::Invalid(format!(
+                        "source repository has no mapping: {repository}"
+                    )));
+                }
             }
             match &source.ready_marker {
                 Marker::Label { name } if name.trim().is_empty() => {
@@ -98,6 +115,7 @@ impl Config {
             }
         }
         let mut trackers = HashSet::new();
+        let mut code_repositories = HashSet::new();
         for mapping in &self.mappings {
             validate_repository(&mapping.tracker_repository)?;
             validate_repository(&mapping.code_repository)?;
@@ -105,6 +123,12 @@ impl Config {
                 return Err(ConfigError::Invalid(format!(
                     "duplicate mapping for {}",
                     mapping.tracker_repository
+                )));
+            }
+            if !code_repositories.insert(&mapping.code_repository) {
+                return Err(ConfigError::Invalid(format!(
+                    "duplicate code repository mapping: {}",
+                    mapping.code_repository
                 )));
             }
             if mapping.checkout.as_os_str().is_empty() || mapping.base_branch.trim().is_empty() {

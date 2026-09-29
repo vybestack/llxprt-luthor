@@ -148,6 +148,32 @@ fn optional_milestone_and_project_field_marker_are_exact() {
 }
 
 #[test]
+fn closed_or_milestone_mismatched_issue_is_stale_and_not_eligible() {
+    let mut fake = Fake {
+        pages: vec![Page {
+            items: vec![item("I1", "N7", vec![])],
+            has_next_page: false,
+            end_cursor: None,
+        }],
+        issues: vec![issue("closed", vec!["ready"], vec![], Some("old"))],
+        calls: 0,
+        fail_page: false,
+    };
+    let selected = select(
+        &mut fake,
+        &[source(
+            Marker::Label {
+                name: "ready".into(),
+            },
+            Some("current"),
+        )],
+        &[mapping()],
+    )
+    .unwrap();
+    assert!(selected.is_empty());
+}
+
+#[test]
 fn issue_from_another_project_is_not_eligible() {
     let mut fake = Fake {
         pages: vec![Page {

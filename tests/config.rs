@@ -11,6 +11,34 @@ fn accepts_valid_configuration_and_exact_optional_milestone() {
 }
 
 #[test]
+fn rejects_unmapped_source_repository_and_duplicate_project_sources() {
+    let unmapped = valid().replace(
+        r#""repositories":["org/tracker"]"#,
+        r#""repositories":["org/elsewhere"]"#,
+    );
+    assert!(
+        Config::from_json(&unmapped)
+            .unwrap_err()
+            .to_string()
+            .contains("no mapping")
+    );
+    let duplicate = valid().replace(
+        r#"}],"mappings""#,
+        r#"},{"project_id":"PVT_1","repositories":["org/tracker"],"ready_marker":{"kind":"label","name":"ready"},"milestone":null}],"mappings""#,
+    );
+    assert!(Config::from_json(&duplicate).is_err());
+}
+
+#[test]
+fn rejects_duplicate_code_repository_mappings() {
+    let duplicate = valid().replace(
+        r#"}],"initial""#,
+        r#"},{"tracker_repository":"org/other","code_repository":"org/code","checkout":"/src/other","base_branch":"main"}],"initial""#,
+    );
+    assert!(Config::from_json(&duplicate).is_err());
+}
+
+#[test]
 fn rejects_unknown_template_and_shell_expansion() {
     let json = valid().replace("{task.issue_number}", "$(curl bad)");
     assert!(

@@ -71,6 +71,31 @@ fn persists_identity_evidence_and_reservations_transactionally() {
 }
 
 #[test]
+fn coordinator_lock_is_exclusive_across_processes_and_scoped_to_root() {
+    use std::process::Command;
+    let held = tempfile::tempdir().unwrap();
+    let independent = tempfile::tempdir().unwrap();
+    let store = StateStore::open(held.path(), 1).unwrap();
+    let status = Command::new(std::env::current_exe().unwrap())
+        .arg("--exact")
+        .arg("coordinator_child_cannot_open_held_root")
+        .arg("--nocapture")
+        .env("LUTHOR_LOCK_CHILD_ROOT", held.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert!(StateStore::open(independent.path(), 1).is_ok());
+    drop(store);
+}
+
+#[test]
+fn coordinator_child_cannot_open_held_root() {
+    if let Ok(root) = std::env::var("LUTHOR_LOCK_CHILD_ROOT") {
+        assert!(StateStore::open(root, 1).is_err());
+    }
+}
+
+#[test]
 fn serializes_coordinator_for_state_directory() {
     let dir = tempfile::tempdir().unwrap();
     let first = StateStore::open(dir.path(), 2).unwrap();
