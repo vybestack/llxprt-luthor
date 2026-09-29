@@ -378,17 +378,20 @@ fn identity(pid: u32) -> Result<(String, String), SupervisorError> {
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
     }
     let boot = query(&["-n", "kern.boottime"])?;
-    let output = Command::new("/bin/ps")
-        .args(["-o", "lstart=", "-p", &pid.to_string()])
-        .output()?;
-    if !output.status.success() {
+    let pid = i32::try_from(pid).map_err(|_| SupervisorError::IdentityUnavailable)?;
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of_val(&info) as i32;
+    if unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, (&raw mut info).cast(), size) }
+        != size
+        || info.pbi_pid != pid as u32
+        || info.pbi_start_tvsec == 0
+    {
         return Err(SupervisorError::IdentityUnavailable);
     }
-    let start = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    if start.is_empty() {
-        return Err(SupervisorError::IdentityUnavailable);
-    }
-    Ok((boot, start))
+    Ok((
+        boot,
+        format!("{}:{}", info.pbi_start_tvsec, info.pbi_start_tvusec),
+    ))
 }
 
 #[cfg(target_os = "linux")]
@@ -476,7 +479,133 @@ fn peer_pid(stream: &UnixStream) -> Result<u32, SupervisorError> {
     Err(SupervisorError::StopUnavailable)
 }
 
-/// Persist the request before contacting the supervisor. The coordinator never signals a PID.
+#[cfg(target_os = "macos")]
+fn zombie(pid: u32) -> bool {
+    let Ok(output) = Command::new("/bin/ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .output()
+    else {
+        return false;
+    };
+    output.status.success() && output.stdout.first() == Some(&b'Z')
+}
+
+#[cfg(target_os = "linux")]
+fn zombie(pid: u32) -> bool {
+    let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        return false;
+    };
+    stat.rsplit_once(')')
+        .and_then(|(_, fields)| fields.split_whitespace().next())
+        == Some("Z")
+}
+
+#[cfg(unix)]
+fn group_absent(pid: i32) -> bool {
+    if unsafe { libc::kill(-pid, 0) } == 0 {
+        return false;
+    }
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+}
+
+#[cfg(unix)]
+fn matching_child(child: &ChildIdentity) -> bool {
+    let Ok(pid) = i32::try_from(child.pid) else {
+        return false;
+    };
+    child.pid != 0
+        && child.group_id == child.pid
+        && !child.boot_identity.trim().is_empty()
+        && !child.start_identity.trim().is_empty()
+        && identity(child.pid).ok().as_ref()
+            == Some(&(child.boot_identity.clone(), child.start_identity.clone()))
+        && unsafe { libc::getpgid(pid) } == pid
+}
+
+/// The coordinator may signal only a registered, currently verified dedicated
+/// child group after the recorded supervisor has ceased matching its identity.
+#[cfg(unix)]
+fn stop_without_supervisor(
+    store: &mut StateStore,
+    task_id: &str,
+    attempt_id: &str,
+    supervisor: &ProcessIdentity,
+) -> Result<(), SupervisorError> {
+    let release = store
+        .intent_payload(task_id, attempt_id, "gate_release")?
+        .and_then(|payload| recorded_process(&payload))
+        .ok_or(SupervisorError::StopUnavailable)?;
+    let dispatch = store.intent_payload(task_id, attempt_id, "supervisor_dispatch")?;
+    let launch = store.intent_payload(task_id, attempt_id, "launch")?;
+    if &release != supervisor || dispatch.is_none() || dispatch != launch {
+        return Err(SupervisorError::StopUnavailable);
+    }
+    let registered = store
+        .evidence_payload(task_id, Some(attempt_id), "child_registered")?
+        .and_then(|payload| serde_json::from_str::<ChildIdentity>(&payload).ok())
+        .ok_or(SupervisorError::StopUnavailable)?;
+    let attempts = store.root().join("attempts");
+    use std::os::unix::fs::PermissionsExt;
+    let dir = fs::symlink_metadata(&attempts).map_err(|_| SupervisorError::StopUnavailable)?;
+    if !dir.file_type().is_dir() || dir.permissions().mode() & 0o777 != 0o700 {
+        return Err(SupervisorError::StopUnavailable);
+    }
+    let child = private_bytes(&attempts.join(format!("{attempt_id}.child.json")))
+        .and_then(|bytes| serde_json::from_slice::<ChildIdentity>(&bytes).ok())
+        .ok_or(SupervisorError::StopUnavailable)?;
+    if child != registered || child.pid == supervisor.pid || !matching_child(&child) {
+        return Err(SupervisorError::StopUnavailable);
+    }
+    let pid = i32::try_from(child.pid).map_err(|_| SupervisorError::StopUnavailable)?;
+    let target = serde_json::json!({"pid":child.pid,"group_id":child.group_id,
+        "boot_identity":child.boot_identity,"start_identity":child.start_identity});
+    for signal in [libc::SIGTERM, libc::SIGKILL] {
+        if signal == libc::SIGKILL {
+            // A fresh identity and group check is required before escalation.
+            if !matching_child(&child) {
+                return Err(SupervisorError::StopUnavailable);
+            }
+        }
+        let decision = serde_json::json!({"target":target,"signal":signal});
+        store.record_evidence(
+            task_id,
+            Some(attempt_id),
+            "independent_stop_decision",
+            &decision.to_string(),
+        )?;
+        if !matching_child(&child) {
+            return Err(SupervisorError::StopUnavailable);
+        }
+        let sent = unsafe { libc::kill(-pid, signal) } == 0;
+        let result = serde_json::json!({"target":target,"signal":signal,"sent":sent});
+        store.record_evidence(
+            task_id,
+            Some(attempt_id),
+            "independent_stop_signal",
+            &result.to_string(),
+        )?;
+        if !sent {
+            return Err(SupervisorError::StopUnavailable);
+        }
+        let deadline = Instant::now() + Duration::from_millis(800);
+        while Instant::now() < deadline {
+            if group_absent(pid) {
+                let absence = serde_json::json!({"target":target,"probe":"kill(-pgid, 0): ESRCH"});
+                store.record_evidence(
+                    task_id,
+                    Some(attempt_id),
+                    "independent_group_absent",
+                    &absence.to_string(),
+                )?;
+                return Ok(());
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+    Err(SupervisorError::StopUnavailable)
+}
+
+/// Persist the request before contacting the supervisor.
 #[cfg(unix)]
 pub fn request_stop(
     store: &mut StateStore,
@@ -492,10 +621,30 @@ pub fn request_stop(
         .as_deref()
         .and_then(recorded_process)
         .ok_or(SupervisorError::StopUnavailable)?;
-    if identity(recorded.pid).ok().as_ref()
-        != Some(&(recorded.boot_identity, recorded.start_identity))
-    {
-        return Err(SupervisorError::StopUnavailable);
+    match identity(recorded.pid) {
+        Ok((boot, start)) if boot == recorded.boot_identity && start == recorded.start_identity =>
+        {
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            if zombie(recorded.pid) {
+                return stop_without_supervisor(store, task_id, attempt_id, &recorded);
+            }
+        }
+        Ok(_) => return stop_without_supervisor(store, task_id, attempt_id, &recorded),
+        Err(_) => {
+            let pid = i32::try_from(recorded.pid).map_err(|_| SupervisorError::StopUnavailable)?;
+            // A failed identity lookup alone is not proof of death.
+            if unsafe { libc::kill(pid, 0) } == 0 {
+                #[cfg(any(target_os = "macos", target_os = "linux"))]
+                if zombie(recorded.pid) {
+                    return stop_without_supervisor(store, task_id, attempt_id, &recorded);
+                }
+                return Err(SupervisorError::StopUnavailable);
+            }
+            if std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH) {
+                return Err(SupervisorError::StopUnavailable);
+            }
+            return stop_without_supervisor(store, task_id, attempt_id, &recorded);
+        }
     }
     let path = stop_socket(&store.root().join("attempts"), attempt_id);
     let mut stream = UnixStream::connect(path).map_err(|_| SupervisorError::StopUnavailable)?;
@@ -1018,9 +1167,16 @@ pub fn reconcile_attempt(
         Err(_) => {
             let supervisor_group =
                 i32::try_from(supervisor.pid).map_err(|_| SupervisorError::IdentityUnavailable)?;
-            if unsafe { libc::kill(-supervisor_group, 0) } == 0
-                || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
-            {
+            if !group_absent(supervisor_group) {
+                // Darwin retains detached supervisors as zombies until their
+                // parent reaps them; a zombie cannot launch or control a worker.
+                #[cfg(target_os = "macos")]
+                if zombie(supervisor.pid) {
+                    // Child group absence is checked separately below.
+                } else {
+                    return Ok(held("supervisor identity unavailable"));
+                }
+                #[cfg(not(target_os = "macos"))]
                 return Ok(held("supervisor identity unavailable"));
             }
         }

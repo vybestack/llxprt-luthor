@@ -423,13 +423,23 @@ fn test_process_identity(pid: u32) -> (String, String) {
         .args(["-n", "kern.boottime"])
         .output()
         .unwrap();
-    let start = Command::new("/bin/ps")
-        .args(["-o", "lstart=", "-p", &pid.to_string()])
-        .output()
-        .unwrap();
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of_val(&info) as i32;
+    assert_eq!(
+        unsafe {
+            libc::proc_pidinfo(
+                pid as i32,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                (&raw mut info).cast(),
+                size,
+            )
+        },
+        size
+    );
     (
         String::from_utf8(boot.stdout).unwrap().trim().into(),
-        String::from_utf8(start.stdout).unwrap().trim().into(),
+        format!("{}:{}", info.pbi_start_tvsec, info.pbi_start_tvusec),
     )
 }
 
@@ -774,7 +784,7 @@ fn registered_shim_stays_gated_and_survives_supervisor_crash_after_release() {
     fs::write(
         &plan.executable,
         format!(
-            "#!/bin/sh\necho started > '{}'\nsleep 2\n",
+            "#!/bin/sh\necho started > '{}'\nexec /bin/sleep 30\n",
             marker.display()
         ),
     )
@@ -874,7 +884,169 @@ fn registered_shim_stays_gated_and_survives_supervisor_crash_after_release() {
         Reconciliation::Held { .. }
     ));
     assert_eq!(store.reservation_count().unwrap(), 1);
-    thread::sleep(Duration::from_secs(3));
+    request_stop(&mut store, "task", "attempt-real").unwrap();
+    assert!(store.stop_intent("task", "attempt-real").unwrap().is_some());
+    assert_eq!(unsafe { libc::kill(-pid, 0) }, -1);
+    assert_eq!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::ESRCH)
+    );
+    assert!(!attempts.join("attempt-real.receipt.json").exists());
+    let kinds = store.evidence_kinds("task").unwrap();
+    assert!(kinds.contains(&"independent_stop_decision".into()));
+    assert!(kinds.contains(&"independent_stop_signal".into()));
+    assert!(kinds.contains(&"independent_group_absent".into()));
+    assert!(matches!(
+        reconcile_attempt(&mut store, "task", "attempt-real").unwrap(),
+        Reconciliation::Held { reason } if reason == "missing or invalid receipt"
+    ));
+    assert_eq!(store.reservation_count().unwrap(), 1);
+    drop(store);
+    let store = StateStore::open(&config.state_root, 1).unwrap();
+    assert_eq!(store.reservation_count().unwrap(), 1);
+    assert!(
+        store
+            .evidence_kinds("task")
+            .unwrap()
+            .contains(&"independent_group_absent".into())
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn spoofed_child_identity_does_not_signal_live_group() {
+    use std::os::unix::process::CommandExt;
+    let dir = tempfile::tempdir().unwrap();
+    let (config, mut store, plan, _) = prepared_fake_worker(&dir);
+    store
+        .begin_supervision(
+            "task",
+            "attempt-real",
+            &serde_json::to_string(&plan).unwrap(),
+        )
+        .unwrap();
+    let mut dead = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+    let (boot, start) = test_process_identity(dead.id());
+    dead.kill().unwrap();
+    dead.wait().unwrap();
+    let supervisor =
+        serde_json::json!({"pid":dead.id(),"boot_identity":boot,"start_identity":start});
+    store
+        .record_evidence(
+            "task",
+            Some("attempt-real"),
+            "supervisor_ready",
+            &supervisor.to_string(),
+        )
+        .unwrap();
+    store
+        .record_intent(
+            "gate-attempt-real",
+            "task",
+            Some("attempt-real"),
+            "gate_release",
+            &supervisor.to_string(),
+        )
+        .unwrap();
+    let mut live = Command::new("/bin/sleep")
+        .arg("30")
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    let (boot, _) = test_process_identity(live.id());
+    let spoof = serde_json::json!({"pid":live.id(),"boot_identity":boot,"start_identity":"recycled","group_id":live.id()});
+    let attempts = config.state_root.join("attempts");
+    fs::create_dir_all(&attempts).unwrap();
+    fs::write(attempts.join("attempt-real.child.json"), spoof.to_string()).unwrap();
+    store
+        .record_evidence(
+            "task",
+            Some("attempt-real"),
+            "child_registered",
+            &spoof.to_string(),
+        )
+        .unwrap();
+    assert!(matches!(
+        request_stop(&mut store, "task", "attempt-real"),
+        Err(SupervisorError::StopUnavailable)
+    ));
+    assert!(live.try_wait().unwrap().is_none());
+    assert_eq!(store.reservation_count().unwrap(), 1);
+    assert!(
+        !store
+            .evidence_kinds("task")
+            .unwrap()
+            .contains(&"independent_stop_decision".into())
+    );
+    live.kill().unwrap();
+    live.wait().unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn matching_supervisor_without_socket_does_not_fallback_to_group_signal() {
+    use std::os::unix::process::CommandExt;
+    let dir = tempfile::tempdir().unwrap();
+    let (config, mut store, plan, _) = prepared_fake_worker(&dir);
+    store
+        .begin_supervision(
+            "task",
+            "attempt-real",
+            &serde_json::to_string(&plan).unwrap(),
+        )
+        .unwrap();
+    let (boot, start) = test_process_identity(std::process::id());
+    let supervisor =
+        serde_json::json!({"pid":std::process::id(),"boot_identity":boot,"start_identity":start});
+    store
+        .record_evidence(
+            "task",
+            Some("attempt-real"),
+            "supervisor_ready",
+            &supervisor.to_string(),
+        )
+        .unwrap();
+    store
+        .record_intent(
+            "gate-attempt-real",
+            "task",
+            Some("attempt-real"),
+            "gate_release",
+            &supervisor.to_string(),
+        )
+        .unwrap();
+    let mut live = Command::new("/bin/sleep")
+        .arg("30")
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    let (boot, start) = test_process_identity(live.id());
+    let child = serde_json::json!({"pid":live.id(),"boot_identity":boot,"start_identity":start,"group_id":live.id()});
+    let attempts = config.state_root.join("attempts");
+    fs::create_dir_all(&attempts).unwrap();
+    fs::write(attempts.join("attempt-real.child.json"), child.to_string()).unwrap();
+    store
+        .record_evidence(
+            "task",
+            Some("attempt-real"),
+            "child_registered",
+            &child.to_string(),
+        )
+        .unwrap();
+    assert!(matches!(
+        request_stop(&mut store, "task", "attempt-real"),
+        Err(SupervisorError::StopUnavailable)
+    ));
+    assert!(live.try_wait().unwrap().is_none());
+    assert_eq!(store.reservation_count().unwrap(), 1);
+    assert!(
+        !store
+            .evidence_kinds("task")
+            .unwrap()
+            .contains(&"independent_stop_decision".into())
+    );
+    live.kill().unwrap();
+    live.wait().unwrap();
 }
 
 #[cfg(unix)]
