@@ -29,6 +29,8 @@ pub enum StateError {
     InvalidConfig,
     #[error("candidate selection does not match effective configuration")]
     InvalidSelection,
+    #[error("launch requires a verified worktree and an unused, accounted task")]
+    LaunchBlocked,
     #[error("configured capacity {configured} does not match persisted capacity {persisted}")]
     CapacityMismatch { configured: usize, persisted: usize },
     #[error("unsupported database version {0}")]
@@ -494,7 +496,95 @@ impl StateStore {
         Ok(())
     }
 
+    /// Persists a plan without granting permission to start a process.
+    pub fn hold_launch_intent(
+        &mut self,
+        task_id: &str,
+        attempt_id: &str,
+        detail: &str,
+    ) -> Result<(), StateError> {
+        if attempt_id.is_empty()
+            || attempt_id.len() > 128
+            || !attempt_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+        {
+            return Err(StateError::LaunchBlocked);
+        }
+        let tx = self.connection.transaction()?;
+        let phase: Option<String> = tx
+            .query_row("SELECT state FROM tasks WHERE id=?1", [task_id], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        let claims: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM evidence WHERE task_id=?1 AND kind='claim_verified'",
+            [task_id],
+            |row| row.get(0),
+        )?;
+        let worktrees: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM evidence WHERE task_id=?1 AND kind='worktree_created'",
+            [task_id],
+            |row| row.get(0),
+        )?;
+        let attempts: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM attempts WHERE task_id=?1",
+            [task_id],
+            |row| row.get(0),
+        )?;
+        if phase.as_deref() != Some("claimed") || claims != 1 || worktrees != 1 || attempts != 0 {
+            return Err(StateError::LaunchBlocked);
+        }
+        let capacity: usize = tx.query_row(
+            "SELECT value FROM state_meta WHERE key='capacity'",
+            [],
+            |row| row.get(0),
+        )?;
+        let reserved: usize = tx.query_row(
+            "SELECT COUNT(*) FROM reservations WHERE status='reserved'",
+            [],
+            |row| row.get(0),
+        )?;
+        if reserved >= capacity {
+            return Err(StateError::Capacity { reserved, capacity });
+        }
+        tx.execute(
+            "INSERT INTO attempts(id,task_id,lifecycle) VALUES(?1,?2,'launch_intended')",
+            params![attempt_id, task_id],
+        )?;
+        tx.execute(
+            "INSERT INTO reservations(attempt_id,task_id,status) VALUES(?1,?2,'reserved')",
+            params![attempt_id, task_id],
+        )?;
+        tx.execute(
+            "INSERT INTO intents(id,task_id,attempt_id,kind,detail) VALUES(?1,?2,?3,'launch',?4)",
+            params![format!("launch-{attempt_id}"), task_id, attempt_id, detail],
+        )?;
+        tx.execute("UPDATE tasks SET state='held' WHERE id=?1", [task_id])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn launch_intent(&self, attempt_id: &str) -> Result<Option<String>, StateError> {
+        self.connection
+            .query_row(
+                "SELECT detail FROM intents WHERE attempt_id=?1 AND kind='launch'",
+                [attempt_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(StateError::from)
+    }
+
     pub fn release_reservation(&mut self, attempt_id: &str) -> Result<usize, StateError> {
+        let launch: i64 = self.connection.query_row(
+            "SELECT COUNT(*) FROM intents WHERE attempt_id=?1 AND kind='launch'",
+            [attempt_id],
+            |row| row.get(0),
+        )?;
+        if launch != 0 {
+            return Err(StateError::LaunchBlocked);
+        }
         self.connection.execute(
             "UPDATE reservations SET status='released' WHERE attempt_id=?1 AND status='reserved'",
             [attempt_id],
