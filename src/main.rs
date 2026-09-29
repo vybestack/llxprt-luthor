@@ -146,7 +146,9 @@ fn mutate(command: &str, mut values: Vec<String>) -> Result<(), Box<dyn std::err
             );
         }
         "reconcile" => {
-            let result = luthor::supervisor::reconcile_attempt(&mut store, &task_id, &attempt)?;
+            let mut prs = GhPullRequestReader::new(PathBuf::from("gh"));
+            let result =
+                luthor::coordinator::reconcile_with_pr(&mut store, &task_id, &attempt, &mut prs)?;
             match result {
                 luthor::supervisor::Reconciliation::Completed { exit_code, signal } => println!(
                     "{}",

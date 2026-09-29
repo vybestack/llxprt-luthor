@@ -196,10 +196,34 @@ impl Fixture {
                 [attempt],
             )
             .unwrap();
-        connection
-            .execute("UPDATE tasks SET state='paused' WHERE id='task-a'", [])
+        drop(connection);
+        self.store
+            .record_pause_pr_lookup(
+                "task-a",
+                attempt,
+                &luthor::state::PausePrEvidence {
+                    observed_at_unix_secs: 2,
+                    repository: "org/code".into(),
+                    status: luthor::state::PausePrStatus::Absent,
+                },
+            )
             .unwrap();
         assert_eq!(self.store.reservation_count().unwrap(), 0);
+    }
+
+    fn stopped_but_unproven(&mut self) {
+        self.pause();
+        let connection =
+            rusqlite::Connection::open(self.config.state_root.join("state.sqlite3")).unwrap();
+        connection
+            .execute(
+                "DELETE FROM evidence WHERE task_id='task-a' AND kind='pause_pr_lookup'",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute("UPDATE tasks SET state='held' WHERE id='task-a'", [])
+            .unwrap();
     }
 
     fn resume(
@@ -718,11 +742,35 @@ fn startup_reconcile_holds_missing_receipt_without_relaunching() {
     f.run("task-a", &c, &mut github, &mut writer, &mut launcher)
         .unwrap();
     let launches = launcher.plans.len();
-    let report = startup_reconcile_all(&mut f.store).unwrap();
+    let report = startup_reconcile_all(&mut f.store, &mut github.prs).unwrap();
     assert_eq!(report.attempts.len(), 1);
     assert!(matches!(report.attempts[0].review, AttemptReview::Held(_)));
     assert_eq!(f.store.reservation_count().unwrap(), 1);
     assert_eq!(launcher.plans.len(), launches);
+}
+
+#[test]
+fn unproven_stopped_attempt_never_reads_pr_or_releases_task() {
+    let mut f = Fixture::new(1);
+    f.stopped_but_unproven();
+    let mut prs = FakePr::default();
+    let result =
+        luthor::coordinator::reconcile_with_pr(&mut f.store, "task-a", "attempt-task-a", &mut prs)
+            .unwrap();
+    assert!(matches!(
+        result,
+        luthor::supervisor::Reconciliation::Held { .. }
+    ));
+    assert_eq!(prs.lookups, 0);
+    assert_eq!(
+        f.store.task_phase("task-a").unwrap().as_deref(),
+        Some("held")
+    );
+    assert_eq!(f.store.reservation_count().unwrap(), 0);
+    assert!(matches!(
+        f.store.ensure_dispatch_capacity(),
+        Err(StateError::Capacity { .. })
+    ));
 }
 
 #[test]

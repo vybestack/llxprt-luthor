@@ -1091,12 +1091,12 @@ fn stop_term_has_durable_intent_and_keeps_slot_until_reconcile() {
         Reconciliation::Completed { .. }
     ));
     assert_eq!(store.reservation_count().unwrap(), 0);
-    assert_eq!(store.task_phase("task").unwrap().as_deref(), Some("paused"));
+    assert_eq!(store.task_phase("task").unwrap().as_deref(), Some("held"));
     drop(store);
     let mut reopened = StateStore::open(&config.state_root, config.capacity).unwrap();
     assert_eq!(
         reopened.task_phase("task").unwrap().as_deref(),
-        Some("paused")
+        Some("held")
     );
     assert_eq!(reopened.reservation_count().unwrap(), 0);
     assert!(matches!(
@@ -1177,6 +1177,17 @@ fn paused_fixture() -> (
         reconcile_attempt(&mut store, "task", "attempt-real").unwrap(),
         Reconciliation::Completed { .. }
     ));
+    store
+        .record_pause_pr_lookup(
+            "task",
+            "attempt-real",
+            &luthor::state::PausePrEvidence {
+                observed_at_unix_secs: 2,
+                repository: "org/code".into(),
+                status: luthor::state::PausePrStatus::Absent,
+            },
+        )
+        .unwrap();
     assert_eq!(store.task_phase("task").unwrap().as_deref(), Some("paused"));
     (dir, config, store, initial)
 }

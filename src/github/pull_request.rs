@@ -23,7 +23,7 @@ pub enum LookupResult {
     Ambiguous(Vec<PullRequestEvidence>),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ErrorCategory {
     Permission,
     RateLimit,
@@ -118,7 +118,13 @@ pub fn lookup<R: PullRequestReader>(
     let mut matches = Vec::new();
     let mut page_number = 1;
     loop {
+        if page_number > 10_000 {
+            return Err(error(ErrorCategory::Malformed, "page-limit", None));
+        }
         let page = reader.page(repository, page_number)?;
+        if page.len() > 100 {
+            return Err(error(ErrorCategory::Malformed, "oversized-page", None));
+        }
         let short_page = page.len() < 100;
         for item in page {
             let number = item

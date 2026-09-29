@@ -1,3 +1,4 @@
+use crate::github::pull_request::ErrorCategory;
 use crate::{
     config::{CommandTemplate, Config, Mapping, Source},
     eligibility::Candidate,
@@ -123,6 +124,26 @@ pub struct EffectiveConfigSnapshot {
     pub resume: CommandTemplate,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum PausePrStatus {
+    Absent,
+    Open,
+    Ambiguous,
+    Error {
+        category: ErrorCategory,
+        code: String,
+        http_status: Option<u16>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PausePrEvidence {
+    pub observed_at_unix_secs: u64,
+    pub repository: String,
+    pub status: PausePrStatus,
+}
+
 impl From<&Config> for EffectiveConfigSnapshot {
     fn from(config: &Config) -> Self {
         Self {
@@ -151,6 +172,7 @@ fn resume_context(
          WHERE a.task_id=?1 AND t.state='paused' AND a.lifecycle='completed'
            AND a.outcome IS NOT NULL AND r.status='released'
            AND (SELECT COUNT(*) FROM evidence WHERE attempt_id=a.id AND kind='attempt_exit')=1
+           AND (SELECT COUNT(*) FROM evidence WHERE attempt_id=a.id AND task_id=?1 AND kind='pause_pr_lookup' AND json_extract(payload,'$.status.status')='absent')=1
            AND (SELECT COUNT(*) FROM intents WHERE attempt_id=a.id AND kind='launch')=1
            AND (SELECT COUNT(*) FROM intents WHERE task_id=?1 AND attempt_id=a.id AND kind='stop')=1
            AND (SELECT COUNT(*) FROM reservations WHERE task_id=?1 AND status='reserved')=0
@@ -464,7 +486,11 @@ impl StateStore {
     pub fn pending_attempts(&self) -> Result<Vec<(String, String)>, StateError> {
         let mut statement = self.connection.prepare(
             "SELECT a.task_id,a.id FROM attempts a WHERE a.lifecycle!='completed' OR a.outcome IS NULL OR EXISTS
-             (SELECT 1 FROM reservations r WHERE r.attempt_id=a.id AND r.status='reserved') ORDER BY a.rowid",
+             (SELECT 1 FROM reservations r WHERE r.attempt_id=a.id AND r.status='reserved') OR
+             (EXISTS (SELECT 1 FROM intents i WHERE i.task_id=a.task_id AND i.attempt_id=a.id AND i.kind='stop')
+              AND EXISTS (SELECT 1 FROM evidence e WHERE e.task_id=a.task_id AND e.attempt_id=a.id AND e.kind='attempt_exit')
+              AND NOT EXISTS (SELECT 1 FROM evidence e WHERE e.task_id=a.task_id AND e.attempt_id=a.id AND e.kind='pause_pr_lookup'))
+             ORDER BY a.rowid",
         )?;
         Ok(statement
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
@@ -516,6 +542,7 @@ impl StateStore {
         let unresolved_tasks: usize = self.connection.query_row(
             "SELECT COUNT(DISTINCT t.id) FROM tasks t WHERE t.state!='completed'
              AND NOT (t.state='paused'
+               AND EXISTS (SELECT 1 FROM evidence e WHERE e.task_id=t.id AND e.attempt_id=(SELECT id FROM attempts WHERE task_id=t.id ORDER BY rowid DESC LIMIT 1) AND e.kind='pause_pr_lookup' AND json_extract(e.payload,'$.status.status')='absent')
                AND NOT EXISTS (SELECT 1 FROM reservations r WHERE r.task_id=t.id AND r.status='reserved')
                AND EXISTS (SELECT 1 FROM attempts a JOIN reservations r ON r.attempt_id=a.id
                  WHERE a.task_id=t.id AND a.lifecycle='completed' AND a.outcome IS NOT NULL
@@ -1003,14 +1030,62 @@ impl StateStore {
         if tx.changes() != 1 {
             return Err(StateError::LaunchBlocked);
         }
-        let stopped: i64 = tx.query_row(
-            "SELECT COUNT(*) FROM intents WHERE task_id=?1 AND attempt_id=?2 AND kind='stop'",
-            params![task_id, attempt_id],
-            |row| row.get(0),
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Only a completed, independently reconciled stop can request PR proof.
+    pub fn stopped_exit_for_pause(
+        &self,
+        task_id: &str,
+        attempt_id: &str,
+    ) -> Result<bool, StateError> {
+        let exit: Option<String> = self.connection.query_row(
+            "SELECT e.payload FROM evidence e JOIN attempts a ON a.id=e.attempt_id AND a.task_id=e.task_id
+             JOIN reservations r ON r.attempt_id=a.id AND r.task_id=a.task_id
+             JOIN tasks t ON t.id=a.task_id
+             WHERE e.task_id=?1 AND e.attempt_id=?2 AND e.kind='attempt_exit'
+               AND t.state='held' AND a.lifecycle='completed' AND a.outcome IS NOT NULL AND r.status='released'
+               AND (SELECT COUNT(*) FROM intents WHERE task_id=?1 AND attempt_id=?2 AND kind='stop')=1
+               AND (SELECT COUNT(*) FROM evidence WHERE task_id=?1 AND attempt_id=?2 AND kind='attempt_exit')=1
+               AND (SELECT COUNT(*) FROM reservations WHERE task_id=?1 AND status='reserved')=0
+               AND (SELECT COUNT(*) FROM attempts WHERE task_id=?1 AND (lifecycle!='completed' OR outcome IS NULL))=0
+               AND a.id=(SELECT id FROM attempts WHERE task_id=?1 ORDER BY rowid DESC LIMIT 1)",
+            params![task_id, attempt_id], |row| row.get(0)
+        ).optional()?;
+        let Some(exit) = exit else {
+            return Ok(false);
+        };
+        let receipt: crate::supervisor::ExitReceipt = serde_json::from_str(&exit)?;
+        Ok(receipt.attempt_id == attempt_id && !receipt.stop_signals.is_empty())
+    }
+
+    /// The fresh lookup and phase change are one transaction. A crash between
+    /// lookup and commit leaves held work requiring another read.
+    pub fn record_pause_pr_lookup(
+        &mut self,
+        task_id: &str,
+        attempt_id: &str,
+        proof: &PausePrEvidence,
+    ) -> Result<(), StateError> {
+        if !self.stopped_exit_for_pause(task_id, attempt_id)? || proof.observed_at_unix_secs == 0 {
+            return Err(StateError::LaunchBlocked);
+        }
+        let tx = self.connection.transaction()?;
+        let selection: String = tx.query_row(
+            "SELECT payload FROM evidence WHERE task_id=?1 AND attempt_id IS NULL AND kind='selection'",
+            [task_id], |row| row.get(0)
         )?;
-        if stopped > 0 {
-            let receipt: crate::supervisor::ExitReceipt = serde_json::from_str(evidence)?;
-            if !receipt.stop_signals.is_empty() {
+        let selection: SelectionEvidence = serde_json::from_str(&selection)?;
+        if selection.candidate.mapping.code_repository != proof.repository {
+            return Err(StateError::LaunchBlocked);
+        }
+        tx.execute(
+            "INSERT INTO evidence(task_id,attempt_id,kind,payload) VALUES(?1,?2,'pause_pr_lookup',?3)",
+            params![task_id, attempt_id, serde_json::to_string(proof)?]
+        )?;
+        match &proof.status {
+            PausePrStatus::Absent => {
                 tx.execute(
                     "UPDATE tasks SET state='paused' WHERE id=?1 AND state='held'",
                     [task_id],
@@ -1018,6 +1093,18 @@ impl StateStore {
                 if tx.changes() != 1 {
                     return Err(StateError::LaunchBlocked);
                 }
+            }
+            status => {
+                let reason = match status {
+                    PausePrStatus::Open => "pause PR present",
+                    PausePrStatus::Ambiguous => "pause PR ambiguous",
+                    PausePrStatus::Error { .. } => "pause PR read failed",
+                    PausePrStatus::Absent => unreachable!(),
+                };
+                tx.execute(
+                    "INSERT INTO evidence(task_id,attempt_id,kind,payload) VALUES(?1,?2,'held_reason',?3)",
+                    params![task_id, attempt_id, reason]
+                )?;
             }
         }
         tx.commit()?;

@@ -6,11 +6,15 @@ use crate::{
         project::ProjectReader,
         pull_request::{LookupError, LookupResult, PullRequestReader, lookup},
     },
-    state::{StateError, StateStore},
+    state::{PausePrEvidence, PausePrStatus, StateError, StateStore},
     supervisor::{self, LaunchPlan, SupervisorError},
     worktree::{self, WorktreeError},
 };
-use std::{collections::HashSet, io::Read};
+use std::{
+    collections::HashSet,
+    io::Read,
+    time::{SystemTime, UNIX_EPOCH},
+};
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,10 +56,13 @@ impl StartupReport {
 /// Reconcile every durable nonterminal attempt, even if a prior attempt cannot
 /// be verified. An error never releases its reservation and cannot be ignored by
 /// the scheduler. Source operations require proof before new selection.
-pub fn startup_reconcile_all(store: &mut StateStore) -> Result<StartupReport, StateError> {
+pub fn startup_reconcile_all<Q: PullRequestReader>(
+    store: &mut StateStore,
+    prs: &mut Q,
+) -> Result<StartupReport, StateError> {
     let mut report = StartupReport::default();
     for (task_id, attempt_id) in store.pending_attempts()? {
-        let review = match supervisor::reconcile_attempt(store, &task_id, &attempt_id) {
+        let review = match reconcile_with_pr(store, &task_id, &attempt_id, prs) {
             Ok(result @ supervisor::Reconciliation::Completed { .. }) => {
                 AttemptReview::Completed(result)
             }
@@ -74,6 +81,65 @@ pub fn startup_reconcile_all(store: &mut StateStore) -> Result<StartupReport, St
         .map(|(task_id, kind)| SourceHold { task_id, kind })
         .collect();
     Ok(report)
+}
+
+/// Process and receipt proof precede the PR read; only an exhaustive absent
+/// result may make a stopped task resumable. No lookup starts another worker.
+pub fn reconcile_with_pr<Q: PullRequestReader>(
+    store: &mut StateStore,
+    task_id: &str,
+    attempt_id: &str,
+    prs: &mut Q,
+) -> Result<supervisor::Reconciliation, SupervisorError> {
+    let result = supervisor::reconcile_attempt(store, task_id, attempt_id)?;
+    if !matches!(result, supervisor::Reconciliation::Completed { .. })
+        || !store.stopped_exit_for_pause(task_id, attempt_id)?
+    {
+        return Ok(result);
+    }
+    finish_verified_stopped_attempt_with_pr(store, task_id, attempt_id, prs, result)
+}
+
+fn finish_verified_stopped_attempt_with_pr<Q: PullRequestReader>(
+    store: &mut StateStore,
+    task_id: &str,
+    attempt_id: &str,
+    prs: &mut Q,
+    result: supervisor::Reconciliation,
+) -> Result<supervisor::Reconciliation, SupervisorError> {
+    let selection = store
+        .selection_evidence(task_id)?
+        .ok_or(StateError::InvalidSelection)?;
+    let repository = &selection.candidate.mapping.code_repository;
+    let status = match lookup(prs, repository, &selection.candidate.issue_url) {
+        Ok(LookupResult::Absent) => PausePrStatus::Absent,
+        Ok(LookupResult::OpenPreexisting(_)) => PausePrStatus::Open,
+        Ok(LookupResult::Ambiguous(_)) => PausePrStatus::Ambiguous,
+        Err(error) => PausePrStatus::Error {
+            category: error.category,
+            code: error.code.to_owned(),
+            http_status: error.status,
+        },
+    };
+    let observed_at_unix_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| SupervisorError::IdentityUnavailable)?
+        .as_secs();
+    let proof = PausePrEvidence {
+        observed_at_unix_secs,
+        repository: repository.clone(),
+        status,
+    };
+    store.record_pause_pr_lookup(task_id, attempt_id, &proof)?;
+    let reason = match proof.status {
+        PausePrStatus::Absent => return Ok(result),
+        PausePrStatus::Open => "pause PR present",
+        PausePrStatus::Ambiguous => "pause PR ambiguous",
+        PausePrStatus::Error { .. } => "pause PR read failed",
+    };
+    Ok(supervisor::Reconciliation::Held {
+        reason: reason.into(),
+    })
 }
 
 pub trait IdCreator {
@@ -252,7 +318,7 @@ where
         ids,
     } = dependencies;
     let mut report = ScheduleReport {
-        startup: startup_reconcile_all(store)?,
+        startup: startup_reconcile_all(store, prs)?,
         ..Default::default()
     };
     if report.startup.scheduling_blocked() {
@@ -372,4 +438,202 @@ where
         store.hold_task(task_id, reason)?;
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::github::pull_request::ErrorCategory;
+    use rusqlite::params;
+    use serde_json::{Value, json};
+
+    struct FakePr {
+        scenario: &'static str,
+        lookups: usize,
+    }
+
+    impl PullRequestReader for FakePr {
+        fn page(&mut self, repository: &str, page: u32) -> Result<Vec<Value>, LookupError> {
+            assert_eq!(repository, "org/code");
+            assert_eq!(page, 1);
+            self.lookups += 1;
+            let entry = |number| {
+                json!({
+                    "number": number,
+                    "body": "Tracker-Issue: https://github.com/org/tracker/issues/1"
+                })
+            };
+            match self.scenario {
+                "absent" => Ok(vec![]),
+                "open" => Ok(vec![entry(7)]),
+                "ambiguous" => Ok(vec![entry(7), entry(8)]),
+                "error" => Err(LookupError {
+                    category: ErrorCategory::Transport,
+                    code: "offline",
+                    status: None,
+                }),
+                _ => unreachable!(),
+            }
+        }
+
+        fn detail(&mut self, repository: &str, number: u64) -> Result<Value, LookupError> {
+            assert_eq!(repository, "org/code");
+            Ok(json!({
+                "id": number, "state": "open",
+                "html_url": format!("https://github.com/org/code/pull/{number}"),
+                "base": {"repo": {"full_name": "org/code"}, "ref": "main"},
+                "head": {"repo": {"full_name": "org/code"}, "ref": "branch"},
+                "user": {"login": "bot"}, "draft": false
+            }))
+        }
+    }
+
+    fn stopped_store(dir: &tempfile::TempDir) -> StateStore {
+        let store = StateStore::open(dir.path(), 1).unwrap();
+        let connection = rusqlite::Connection::open(dir.path().join("state.sqlite3")).unwrap();
+        let selection = json!({
+            "candidate": {
+                "project_id": "p", "item_id": "i", "repository": "org/tracker",
+                "issue_node_id": "issue", "issue_number": 1,
+                "issue_url": "https://github.com/org/tracker/issues/1",
+                "tracker_repo_id": "repo", "milestone_id": null, "milestone_title": null,
+                "observed_at_unix_secs": 1, "observed_state": "open",
+                "observed_assignees": [], "observed_labels": [],
+                "observed_project_fields": [], "marker": {"kind": "label", "name": "ready"},
+                "mapping": {
+                    "tracker_repository": "org/tracker", "code_repository": "org/code",
+                    "checkout": "checkout", "base_branch": "main", "push_remote": "origin",
+                    "allowed_pr_head_repository": "org/code", "allowed_pr_author": "bot"
+                },
+                "source": {"project_id": "p", "repositories": ["org/tracker"],
+                    "ready_marker": {"kind": "label", "name": "ready"}, "milestone": null}
+            },
+            "config_revision": "r",
+            "effective_config": {
+                "state_root": "state", "worktree_root": "private", "capacity": 1,
+                "assignment_login": "bot", "sources": [], "mappings": [],
+                "initial": {"executable": "worker", "args": []},
+                "resume": {"executable": "worker", "args": []}
+            }
+        });
+        let receipt = json!({
+            "attempt_id": "attempt", "child_pid": 123, "boot_identity": "boot",
+            "child_start_identity": "start", "exit_code": null, "signal": 15,
+            "stdout_path": "stdout", "stdout_bytes": 0,
+            "stderr_path": "stderr", "stderr_bytes": 0, "stop_signals": [15]
+        });
+        connection.execute(
+            "INSERT INTO tasks(id,tracker_repo_id,issue_node_id,repository,issue_number,state,config_revision)
+             VALUES('task','repo','issue','org/tracker',1,'held','r')", [],
+        ).unwrap();
+        connection
+            .execute(
+                "INSERT INTO attempts(id,task_id,lifecycle,outcome)
+             VALUES('attempt','task','completed','exit_code=None;signal=Some(15)')",
+                [],
+            )
+            .unwrap();
+        connection.execute(
+            "INSERT INTO reservations(attempt_id,task_id,status) VALUES('attempt','task','released')", [],
+        ).unwrap();
+        connection
+            .execute(
+                "INSERT INTO intents(id,task_id,attempt_id,kind,detail)
+             VALUES('stop','task','attempt','stop','')",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO intents(id,task_id,attempt_id,kind,detail)
+             VALUES('launch','task','attempt','launch','plan')",
+                [],
+            )
+            .unwrap();
+        for kind in ["claim_verified", "worktree_created"] {
+            connection
+                .execute(
+                    "INSERT INTO evidence(task_id,kind,payload) VALUES('task',?1,'proof')",
+                    [kind],
+                )
+                .unwrap();
+        }
+        connection.execute(
+            "INSERT INTO evidence(task_id,attempt_id,kind,payload) VALUES('task',NULL,'selection',?1)",
+            [selection.to_string()],
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO evidence(task_id,attempt_id,kind,payload) VALUES('task','attempt','attempt_exit',?1)",
+            [receipt.to_string()],
+        ).unwrap();
+        store
+    }
+
+    #[test]
+    fn verified_stopped_attempt_pr_outcomes_gate_slot() {
+        for (scenario, expected) in [
+            ("absent", PausePrStatus::Absent),
+            ("open", PausePrStatus::Open),
+            ("ambiguous", PausePrStatus::Ambiguous),
+            (
+                "error",
+                PausePrStatus::Error {
+                    category: ErrorCategory::Transport,
+                    code: "offline".into(),
+                    http_status: None,
+                },
+            ),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut store = stopped_store(&dir);
+            let mut prs = FakePr {
+                scenario,
+                lookups: 0,
+            };
+            let result = finish_verified_stopped_attempt_with_pr(
+                &mut store,
+                "task",
+                "attempt",
+                &mut prs,
+                supervisor::Reconciliation::Completed {
+                    exit_code: None,
+                    signal: Some(15),
+                },
+            )
+            .unwrap();
+            assert_eq!(prs.lookups, 1, "{scenario}");
+            let proof: PausePrEvidence = serde_json::from_str(
+                &store
+                    .evidence_payload("task", Some("attempt"), "pause_pr_lookup")
+                    .unwrap()
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(proof.repository, "org/code", "{scenario}");
+            assert!(proof.observed_at_unix_secs > 0);
+            assert_eq!(proof.status, expected, "{scenario}");
+            if scenario == "absent" {
+                assert!(matches!(
+                    result,
+                    supervisor::Reconciliation::Completed { .. }
+                ));
+                assert_eq!(store.task_phase("task").unwrap().as_deref(), Some("paused"));
+                assert!(store.ensure_dispatch_capacity().is_ok());
+            } else {
+                assert!(matches!(result, supervisor::Reconciliation::Held { .. }));
+                assert_eq!(store.task_phase("task").unwrap().as_deref(), Some("held"));
+                assert!(matches!(
+                    store.ensure_dispatch_capacity(),
+                    Err(StateError::Capacity { .. })
+                ));
+            }
+            assert_eq!(store.reservation_count().unwrap(), 0, "{scenario}");
+            let connection = rusqlite::Connection::open(dir.path().join("state.sqlite3")).unwrap();
+            let count: i64 = connection.query_row(
+                "SELECT COUNT(*) FROM evidence WHERE task_id='task' AND attempt_id='attempt' AND kind='pause_pr_lookup'",
+                params![], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(count, 1, "{scenario}");
+        }
+    }
 }
