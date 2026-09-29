@@ -1,4 +1,62 @@
 #[test]
+fn migrates_v2_released_reservation_and_preserves_attempt_history() {
+    use rusqlite::Connection;
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("state.sqlite3");
+    let connection = Connection::open(&db).unwrap();
+    connection.execute_batch("CREATE TABLE tasks (id TEXT PRIMARY KEY, tracker_repo_id TEXT NOT NULL, issue_node_id TEXT NOT NULL, repository TEXT NOT NULL, issue_number INTEGER NOT NULL, state TEXT NOT NULL, config_revision TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(tracker_repo_id, issue_node_id)); CREATE TABLE attempts (id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id), lifecycle TEXT NOT NULL, outcome TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP); CREATE TABLE intents (sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, task_id TEXT NOT NULL REFERENCES tasks(id), attempt_id TEXT, kind TEXT NOT NULL, detail TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP); CREATE TABLE reservations (task_id TEXT PRIMARY KEY REFERENCES tasks(id), attempt_id TEXT NOT NULL UNIQUE, status TEXT NOT NULL CHECK(status IN ('reserved','released')), created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP); CREATE TABLE evidence (sequence INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL REFERENCES tasks(id), attempt_id TEXT, kind TEXT NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP); CREATE TABLE state_meta(key TEXT PRIMARY KEY, value INTEGER NOT NULL); INSERT INTO state_meta VALUES('capacity',1); INSERT INTO tasks(id,tracker_repo_id,issue_node_id,repository,issue_number,state,config_revision) VALUES('task','repo-id','issue-id','org/repo',7,'preparing','rev'); INSERT INTO attempts(id,task_id,lifecycle) VALUES('old-attempt','task','completed'); INSERT INTO evidence(task_id,attempt_id,kind,payload) VALUES('task','old-attempt','result','old evidence'); INSERT INTO reservations(task_id,attempt_id,status) VALUES('task','old-attempt','released'); PRAGMA user_version=2;").unwrap();
+    drop(connection);
+
+    let mut store = StateStore::open(dir.path(), 1).unwrap();
+    assert_eq!(store.task_count().unwrap(), 1);
+    assert_eq!(store.reservation_count().unwrap(), 0);
+    store.reserve("task", "new-attempt").unwrap();
+    assert_eq!(store.reservation_count().unwrap(), 1);
+    drop(store);
+
+    let connection = Connection::open(&db).unwrap();
+    let version: i32 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 3);
+    let rows: Vec<(String, String)> = connection
+        .prepare("SELECT attempt_id,status FROM reservations ORDER BY attempt_id")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            ("new-attempt".into(), "reserved".into()),
+            ("old-attempt".into(), "released".into()),
+        ]
+    );
+    let attempt_ids: Vec<String> = connection
+        .prepare("SELECT id FROM attempts ORDER BY id")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(attempt_ids, vec!["new-attempt", "old-attempt"]);
+    let evidence_attempt_ids: Vec<Option<String>> = connection
+        .prepare("SELECT attempt_id FROM evidence ORDER BY sequence")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(evidence_attempt_ids, vec![Some("old-attempt".into())]);
+    drop(connection);
+
+    let reopened = StateStore::open(dir.path(), 1).unwrap();
+    assert_eq!(reopened.reservation_count().unwrap(), 1);
+}
+
+#[test]
 fn migrates_v1_database_atomically_and_preserves_records_and_capacity() {
     use rusqlite::Connection;
     let dir = tempfile::tempdir().unwrap();
