@@ -50,7 +50,7 @@ fn parses_project_fields_and_direct_issue_identity() {
     let page = r.page("P", None).unwrap();
     assert_eq!(page.items[0].issue_node_id, "ISSUE1");
     assert_eq!(page.items[0].repository, "org/tracker");
-    assert_eq!(page.items[0].tracker_repo_id.as_deref(), Some("REPO1"));
+    assert_eq!(page.items[0].tracker_repo_id, "REPO1");
     assert_eq!(page.items[0].issue_number, 7);
     assert_eq!(
         page.items[0].fields,
@@ -59,6 +59,25 @@ fn parses_project_fields_and_direct_issue_identity() {
             ("Owner".into(), "Ada".into())
         ]
     );
+}
+#[test]
+fn missing_or_null_tracker_repository_id_fails_closed() {
+    let fields = r#"{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}"#;
+    for repository in [
+        r#"{"nameWithOwner":"org/tracker"}"#,
+        r#"{"id":null,"nameWithOwner":"org/tracker"}"#,
+        r#"{"id":"","nameWithOwner":"org/tracker"}"#,
+    ] {
+        let json = response(fields).replace(
+            r#"{"id":"REPO1","nameWithOwner":"org/tracker"}"#,
+            repository,
+        );
+        let (_dir, mut reader) = reader(&json);
+        assert_eq!(
+            reader.page("P", None).unwrap_err().category,
+            luthor::github::project::ReadCategory::Malformed
+        );
+    }
 }
 #[test]
 fn graphql_errors_and_incomplete_field_values_fail() {

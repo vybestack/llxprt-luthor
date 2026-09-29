@@ -8,7 +8,7 @@ pub struct ProjectItem {
     pub item_id: String,
     pub issue_node_id: String,
     pub repository: String,
-    pub tracker_repo_id: Option<String>,
+    pub tracker_repo_id: String,
     pub issue_number: u64,
     pub fields: Vec<(String, String)>,
 }
@@ -286,11 +286,13 @@ impl ProjectReader for GhProjectReader {
                 .and_then(Value::as_str)
                 .filter(|s| !s.is_empty())
                 .ok_or_else(|| "invalid-project-issue".to_owned())?;
-            let tracker_repo_id = content
-                .pointer("/repository/id")
-                .and_then(Value::as_str)
-                .filter(|id| !id.is_empty())
-                .map(str::to_owned);
+            let tracker_repo_id = required_string(
+                content
+                    .get("repository")
+                    .ok_or_else(|| "invalid-project-issue".to_owned())?,
+                "id",
+                "invalid-project-issue",
+            )?;
             let field_values = node
                 .get("fieldValues")
                 .ok_or_else(|| "missing-project-field-values".to_owned())?;
