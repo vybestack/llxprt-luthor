@@ -1,7 +1,7 @@
 {
-  "event_count": 112,
-  "last_event_id": "01M3Q3SDD4AM2K1DHF5YHF6H9Y",
-  "materialized_at": "2026-09-29T17:35:51.203906+00:00",
+  "event_count": 113,
+  "last_event_id": "01M3Q59APZMJZWHQEWNMV2R07C",
+  "materialized_at": "2026-09-29T18:02:01.311806+00:00",
   "mission_number": "",
   "mission_slug": "luthor-issue-to-pr-daemon-01M3N2VK",
   "mission_type": "software-dev",
@@ -11,8 +11,8 @@
     "canceled": 0,
     "claimed": 0,
     "done": 0,
-    "for_review": 0,
-    "in_progress": 1,
+    "for_review": 1,
+    "in_progress": 0,
     "in_review": 0,
     "planned": 2
   },
@@ -81,14 +81,14 @@
       }
     },
     "WP03": {
-      "actor": "llxprt",
+      "actor": "deepthinker",
       "agent": "deepthinker",
       "agent_profile": "__resolved_profile_absent__",
       "agent_profile_version": "__resolved_profile_version_absent__",
       "force_count": 11,
-      "lane": "in_progress",
-      "last_event_id": "01M3Q3SDD4AM2K1DHF5YHF6H9Y",
-      "last_transition_at": "2026-09-29T17:35:51.203906+00:00",
+      "lane": "for_review",
+      "last_event_id": "01M3Q59APZMJZWHQEWNMV2R07C",
+      "last_transition_at": "2026-09-29T18:02:01.311806+00:00",
       "model": "__resolved_model_absent__",
       "notes": [
         "WP03 fix integrated; root fmt, locked offline all-target tests, and strict Clippy passed.",
