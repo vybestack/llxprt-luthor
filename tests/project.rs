@@ -62,13 +62,13 @@ fn parses_project_fields_and_direct_issue_identity() {
 #[test]
 fn graphql_errors_and_incomplete_field_values_fail() {
     let (_dir, mut r) = reader(r#"{"errors":[{"message":"broken"}]}"#);
-    assert_eq!(r.page("P", None).unwrap_err(), "graphql-error");
+    assert_eq!(r.page("P", None).unwrap_err().code, "graphql-error");
     let (_dir, mut r) = reader(&response(
         r#"{"nodes":[],"pageInfo":{"hasNextPage":true,"endCursor":"C"}}"#,
     ));
     assert_eq!(
-        r.page("P", None).unwrap_err(),
-        "incomplete-project-field-values"
+        r.page("P", None).unwrap_err().category,
+        luthor::github::project::ReadCategory::Malformed
     );
 }
 #[test]
@@ -84,6 +84,49 @@ fn rejects_non_issue_project_items_with_item_identity() {
         );
         let (_dir, mut r) = reader(&json);
         let error = r.page("P", None).unwrap_err();
-        assert!(error.contains("PVTI2"), "{error}");
+        assert_eq!(
+            error.category,
+            luthor::github::project::ReadCategory::Malformed
+        );
     }
+}
+
+#[test]
+fn classifies_safe_api_failure_categories_and_malformed_output() {
+    use luthor::github::project::{ReadCategory, ReadOperation};
+    for (body, expected, status) in [
+        (
+            r#"{"status":"403","message":"permission denied token=secret"}"#,
+            ReadCategory::Permission,
+            Some(403),
+        ),
+        (
+            r#"{"status":"429","message":"rate limited token=secret"}"#,
+            ReadCategory::RateLimit,
+            Some(429),
+        ),
+    ] {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("gh");
+        fs::write(
+            &path,
+            format!(
+                "#!/bin/sh\nprintf '%s' '{}'\necho 'secret stderr' >&2\nexit 1\n",
+                body.replace('\'', "'\\''")
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        let mut r = GhProjectReader::new(path);
+        let error = r.page("PROJECT-1", None).unwrap_err();
+        assert_eq!(error.category, expected);
+        assert_eq!(error.status, status);
+        assert_eq!(error.operation, ReadOperation::ProjectPage);
+        assert_eq!(error.project_id.as_deref(), Some("PROJECT-1"));
+        assert!(!error.to_string().contains("secret"));
+    }
+    let (_dir, mut r) = reader("not json");
+    let error = r.page("PROJECT-2", None).unwrap_err();
+    assert_eq!(error.category, ReadCategory::Malformed);
+    assert_eq!(error.project_id.as_deref(), Some("PROJECT-2"));
 }

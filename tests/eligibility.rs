@@ -1,7 +1,9 @@
 use luthor::{
     config::{Mapping, Marker, Source},
     eligibility::select,
-    github::project::{Issue, Page, ProjectItem, ProjectReader},
+    github::project::{
+        Issue, Page, ProjectItem, ProjectReadError, ProjectReader, ReadCategory, ReadOperation,
+    },
 };
 
 struct Fake {
@@ -15,24 +17,32 @@ impl ProjectReader for Fake {
         &mut self,
         _project_id: &str,
         _cursor: Option<&str>,
-    ) -> Result<Page<ProjectItem>, String> {
+    ) -> Result<Page<ProjectItem>, ProjectReadError> {
         if self.fail_page {
-            return Err("network unavailable".into());
+            return Err(ProjectReadError {
+                operation: ReadOperation::ProjectPage,
+                project_id: None,
+                item_id: None,
+                issue_id: None,
+                category: ReadCategory::Transport,
+                status: None,
+                code: "transport-error".into(),
+            });
         }
         let page = self
             .pages
             .get(self.calls % self.pages.len())
             .cloned()
-            .ok_or("unexpected page")?;
+            .ok_or_else(|| "unexpected-page".to_owned())?;
         self.calls += 1;
         Ok(page)
     }
-    fn issue(&mut self, item: &ProjectItem) -> Result<Issue, String> {
+    fn issue(&mut self, item: &ProjectItem) -> Result<Issue, ProjectReadError> {
         self.issues
             .iter()
             .find(|issue| issue.node_id == item.issue_node_id)
             .cloned()
-            .ok_or("missing issue".into())
+            .ok_or_else(|| "missing-issue".to_owned().into())
     }
 }
 fn item(id: &str, issue: &str, fields: Vec<(String, String)>) -> ProjectItem {

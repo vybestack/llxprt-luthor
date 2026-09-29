@@ -30,16 +30,89 @@ pub struct Page<T> {
     pub end_cursor: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReadOperation {
+    ProjectPage,
+    DirectIssue,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReadCategory {
+    Permission,
+    RateLimit,
+    NotFound,
+    Malformed,
+    Transport,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectReadError {
+    pub operation: ReadOperation,
+    pub project_id: Option<String>,
+    pub item_id: Option<String>,
+    pub issue_id: Option<String>,
+    pub category: ReadCategory,
+    pub status: Option<u16>,
+    pub code: String,
+}
+
+impl From<String> for ProjectReadError {
+    fn from(code: String) -> Self {
+        let safe_code = if !code.is_empty()
+            && code
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        {
+            code
+        } else {
+            "malformed-response".to_owned()
+        };
+        Self {
+            operation: ReadOperation::ProjectPage,
+            project_id: None,
+            item_id: None,
+            issue_id: None,
+            category: ReadCategory::Malformed,
+            status: None,
+            code: safe_code,
+        }
+    }
+}
+
+impl std::fmt::Display for ProjectReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{:?} {:?} ({})",
+            self.operation, self.category, self.code
+        )?;
+        if let Some(status) = self.status {
+            write!(f, " HTTP {status}")?;
+        }
+        if let Some(id) = &self.project_id {
+            write!(f, " project={id}")?;
+        }
+        if let Some(id) = &self.item_id {
+            write!(f, " item={id}")?;
+        }
+        if let Some(id) = &self.issue_id {
+            write!(f, " issue={id}")?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ProjectError {
     #[error("Project enumeration failed: {0}")]
-    Read(String),
+    Read(ProjectReadError),
     #[error("Project pagination returned no cursor")]
     MissingCursor,
     #[error("Project pagination repeated cursor")]
     RepeatedCursor,
-    #[error("direct issue read failed for {0}")]
-    IssueRead(String),
+    #[error("direct issue read failed: {0}")]
+    IssueRead(ProjectReadError),
     #[error("Project item {item_id} disagrees with direct issue {issue_id}")]
     Inconsistent { item_id: String, issue_id: String },
     #[error("duplicate issue identity {0}")]
@@ -49,9 +122,12 @@ pub enum ProjectError {
 }
 
 pub trait ProjectReader {
-    fn page(&mut self, project_id: &str, cursor: Option<&str>)
-    -> Result<Page<ProjectItem>, String>;
-    fn issue(&mut self, item: &ProjectItem) -> Result<Issue, String>;
+    fn page(
+        &mut self,
+        project_id: &str,
+        cursor: Option<&str>,
+    ) -> Result<Page<ProjectItem>, ProjectReadError>;
+    fn issue(&mut self, item: &ProjectItem) -> Result<Issue, ProjectReadError>;
 }
 
 pub struct GhProjectReader {
@@ -63,18 +139,65 @@ impl GhProjectReader {
         Self { executable }
     }
 
-    fn api(&self, args: &[&str]) -> Result<Value, String> {
+    fn api(&self, args: &[&str]) -> Result<Value, ProjectReadError> {
         let output = Command::new(&self.executable)
             .args(args)
             .output()
-            .map_err(|_| "transport-error".to_owned())?;
+            .map_err(|_| ProjectReadError {
+                operation: ReadOperation::ProjectPage,
+                project_id: None,
+                item_id: None,
+                issue_id: None,
+                category: ReadCategory::Transport,
+                status: None,
+                code: "transport-error".into(),
+            })?;
+        let parsed = serde_json::from_slice::<Value>(&output.stdout);
         if !output.status.success() {
-            return Err("command-failed".to_owned());
+            let status = parsed
+                .as_ref()
+                .ok()
+                .and_then(|v| v.get("status").and_then(Value::as_str))
+                .and_then(|s| s.parse().ok());
+            let message = parsed
+                .as_ref()
+                .ok()
+                .and_then(|v| v.get("message").and_then(Value::as_str))
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            let category = match status {
+                Some(401 | 403) => {
+                    if message.contains("rate limit") {
+                        ReadCategory::RateLimit
+                    } else {
+                        ReadCategory::Permission
+                    }
+                }
+                Some(429) => ReadCategory::RateLimit,
+                Some(404) => ReadCategory::NotFound,
+                _ => ReadCategory::Unknown,
+            };
+            return Err(ProjectReadError {
+                operation: ReadOperation::ProjectPage,
+                project_id: None,
+                item_id: None,
+                issue_id: None,
+                category,
+                status,
+                code: "command-failed".into(),
+            });
         }
-        let value: Value =
-            serde_json::from_slice(&output.stdout).map_err(|_| "invalid-json".to_owned())?;
+        let value = parsed.map_err(|_| ProjectReadError {
+            operation: ReadOperation::ProjectPage,
+            project_id: None,
+            item_id: None,
+            issue_id: None,
+            category: ReadCategory::Malformed,
+            status: None,
+            code: "invalid-json".into(),
+        })?;
         if value.get("message").is_some() && value.get("documentation_url").is_some() {
-            return Err("api-error".to_owned());
+            return Err("api-error".to_owned().into());
         }
         Ok(value)
     }
@@ -85,7 +208,7 @@ impl ProjectReader for GhProjectReader {
         &mut self,
         project_id: &str,
         cursor: Option<&str>,
-    ) -> Result<Page<ProjectItem>, String> {
+    ) -> Result<Page<ProjectItem>, ProjectReadError> {
         const QUERY: &str = "query($projectId: ID!, $cursor: String) { node(id: $projectId) { ... on ProjectV2 { items(first: 100, after: $cursor) { nodes { id content { __typename ... on Issue { id number repository { nameWithOwner } } } fieldValues(first: 100) { nodes { __typename ... on ProjectV2ItemFieldSingleSelectValue { name field { ... on ProjectV2SingleSelectField { name } ... on ProjectV2Field { name } } } ... on ProjectV2ItemFieldTextValue { text field { ... on ProjectV2SingleSelectField { name } ... on ProjectV2Field { name } } } } pageInfo { hasNextPage endCursor } } } pageInfo { hasNextPage endCursor } } } } }";
         let query_arg = format!("query={QUERY}");
         let project_id_arg = format!("projectId={project_id}");
@@ -94,9 +217,21 @@ impl ProjectReader for GhProjectReader {
         if let Some(cursor_arg) = &cursor_arg {
             args.extend(["-F", cursor_arg]);
         }
-        let value = self.api(&args)?;
+        let value = self.api(&args).map_err(|mut error| {
+            error.operation = ReadOperation::ProjectPage;
+            error.project_id = Some(project_id.to_owned());
+            error
+        })?;
         if value.get("errors").is_some() {
-            return Err("graphql-error".to_owned());
+            return Err(ProjectReadError {
+                operation: ReadOperation::ProjectPage,
+                project_id: Some(project_id.to_owned()),
+                item_id: None,
+                issue_id: None,
+                category: ReadCategory::Unknown,
+                status: None,
+                code: "graphql-error".to_owned(),
+            });
         }
         let connection = value
             .pointer("/data/node/items")
@@ -115,10 +250,10 @@ impl ProjectReader for GhProjectReader {
         let end_cursor = match page_info.get("endCursor") {
             Some(Value::String(cursor)) => Some(cursor.clone()),
             Some(Value::Null) => None,
-            _ => return Err("invalid-page-info".to_owned()),
+            _ => return Err("invalid-page-info".to_owned().into()),
         };
         if has_next_page && end_cursor.as_deref().is_none_or(str::is_empty) {
-            return Err("missing-page-cursor".to_owned());
+            return Err("missing-page-cursor".to_owned().into());
         }
 
         let mut items = Vec::new();
@@ -128,7 +263,7 @@ impl ProjectReader for GhProjectReader {
                 .get("content")
                 .ok_or_else(|| format!("project item {item_id} has missing content"))?;
             if content.is_null() {
-                return Err(format!("project item {item_id} has null content"));
+                return Err(format!("project item {item_id} has null content").into());
             }
             let typename = content
                 .get("__typename")
@@ -137,7 +272,8 @@ impl ProjectReader for GhProjectReader {
             if typename != "Issue" {
                 return Err(format!(
                     "project item {item_id} has unsupported content type {typename}"
-                ));
+                )
+                .into());
             }
             let issue_node_id = required_string(content, "id", "invalid-project-issue")?;
             let number = content
@@ -157,7 +293,7 @@ impl ProjectReader for GhProjectReader {
                 .and_then(Value::as_bool)
                 != Some(false)
             {
-                return Err("incomplete-project-field-values".to_owned());
+                return Err("incomplete-project-field-values".to_owned().into());
             }
             let field_nodes = field_values
                 .get("nodes")
@@ -204,14 +340,27 @@ impl ProjectReader for GhProjectReader {
         })
     }
 
-    fn issue(&mut self, item: &ProjectItem) -> Result<Issue, String> {
+    fn issue(&mut self, item: &ProjectItem) -> Result<Issue, ProjectReadError> {
         let path = format!(
             "repos/{}/issues/{}?per_page=100",
             item.repository, item.issue_number
         );
-        let value = self.api(&["api", &path])?;
+        let value = self.api(&["api", &path]).map_err(|mut error| {
+            error.operation = ReadOperation::DirectIssue;
+            error.item_id = Some(item.item_id.clone());
+            error.issue_id = Some(item.issue_node_id.clone());
+            error
+        })?;
         if value.get("message").is_some() && value.get("documentation_url").is_some() {
-            return Err("api-error".to_owned());
+            return Err(ProjectReadError {
+                operation: ReadOperation::DirectIssue,
+                project_id: None,
+                item_id: Some(item.item_id.clone()),
+                issue_id: Some(item.issue_node_id.clone()),
+                category: ReadCategory::Unknown,
+                status: None,
+                code: "api-error".to_owned(),
+            });
         }
         let node_id = required_string(&value, "node_id", "invalid-issue")?;
         let repository = value
@@ -225,7 +374,7 @@ impl ProjectReader for GhProjectReader {
             .and_then(Value::as_u64)
             .ok_or_else(|| "invalid-issue".to_owned())?;
         if number != item.issue_number {
-            return Err("issue-number-mismatch".to_owned());
+            return Err("issue-number-mismatch".to_owned().into());
         }
         let state = required_string(&value, "state", "invalid-issue")?;
         let assignees = value
@@ -237,7 +386,7 @@ impl ProjectReader for GhProjectReader {
             .and_then(Value::as_array)
             .ok_or_else(|| "invalid-issue-labels".to_owned())?;
         if assignees.len() >= 100 || labels.len() >= 100 {
-            return Err("issue-subcollection-at-cap".to_owned());
+            return Err("issue-subcollection-at-cap".to_owned().into());
         }
         let assignees = assignees
             .iter()
@@ -254,7 +403,7 @@ impl ProjectReader for GhProjectReader {
                 "title",
                 "invalid-issue-milestone",
             )?),
-            None => return Err("invalid-issue-milestone".to_owned()),
+            None => return Err("invalid-issue-milestone".to_owned().into()),
         };
         Ok(Issue {
             node_id,
@@ -297,9 +446,7 @@ pub fn enumerate<R: ProjectReader>(
             if item.issue_node_id.is_empty() {
                 return Err(ProjectError::InvalidItem(item.item_id));
             }
-            let issue = reader
-                .issue(&item)
-                .map_err(|_| ProjectError::IssueRead(item.issue_node_id.clone()))?;
+            let issue = reader.issue(&item).map_err(ProjectError::IssueRead)?;
             if issue.node_id != item.issue_node_id
                 || issue.repository != item.repository
                 || issue.number != item.issue_number
