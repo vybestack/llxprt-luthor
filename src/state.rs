@@ -1232,13 +1232,24 @@ impl StateStore {
     ) -> Result<(), StateError> {
         if !self.natural_exit_for_attention(task_id, attempt_id)?
             || proof.observed_at_unix_secs == 0
-            || self
-                .evidence_payload(task_id, Some(attempt_id), "exit_pr_lookup")?
-                .is_some()
         {
             return Err(StateError::LaunchBlocked);
         }
         let tx = self.connection.transaction()?;
+        let prior: Vec<String> = tx
+            .prepare(
+                "SELECT payload FROM evidence WHERE task_id=?1 AND attempt_id=?2 AND kind='exit_pr_lookup' ORDER BY sequence",
+            )?
+            .query_map(params![task_id, attempt_id], |row| row.get(0))?
+            .collect::<Result<_, _>>()?;
+        if prior.iter().any(|payload| {
+            !matches!(
+                serde_json::from_str::<ExitPrEvidence>(payload).map(|evidence| evidence.status),
+                Ok(PausePrStatus::Error { .. } | PausePrStatus::Ambiguous | PausePrStatus::Open)
+            )
+        }) {
+            return Err(StateError::LaunchBlocked);
+        }
         let selection: String = tx.query_row(
             "SELECT payload FROM evidence WHERE task_id=?1 AND attempt_id IS NULL AND kind='selection'",
             [task_id], |row| row.get(0)

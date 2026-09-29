@@ -1502,6 +1502,76 @@ fn natural_exit_pr_error_keeps_held_slot_and_evidence() {
         }
     ));
     assert!(store.pending_attempts().unwrap().is_empty());
+    assert_eq!(prs.reads, 1);
+    let outcome_before: String =
+        rusqlite::Connection::open(config.state_root.join("state.sqlite3"))
+            .unwrap()
+            .query_row(
+                "SELECT outcome FROM attempts WHERE id='attempt-real'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+    let mut recovered_prs = ExitPr::default();
+    assert!(matches!(
+        luthor::coordinator::reconcile_with_pr(
+            &mut store,
+            "task",
+            "attempt-real",
+            &mut recovered_prs
+        )
+        .unwrap(),
+        Reconciliation::Completed {
+            exit_code: Some(7),
+            signal: None
+        }
+    ));
+    assert_eq!(recovered_prs.reads, 1);
+    assert_eq!(
+        store.task_phase("task").unwrap().as_deref(),
+        Some("attention")
+    );
+    assert_eq!(store.reservation_count().unwrap(), 0);
+    assert_eq!(
+        store.latest_attempt("task").unwrap().as_deref(),
+        Some("attempt-real")
+    );
+    let connection = rusqlite::Connection::open(config.state_root.join("state.sqlite3")).unwrap();
+    let records: Vec<String> = connection
+        .prepare("SELECT payload FROM evidence WHERE task_id='task' AND attempt_id='attempt-real' AND kind='exit_pr_lookup' ORDER BY sequence")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let proofs: Vec<ExitPrEvidence> = records
+        .iter()
+        .map(|record| serde_json::from_str(record).unwrap())
+        .collect();
+    assert_eq!(proofs.len(), 2);
+    assert!(matches!(proofs[0].status, PausePrStatus::Error { .. }));
+    assert_eq!(proofs[1].status, PausePrStatus::Absent);
+    let outcome_after: String = connection
+        .query_row(
+            "SELECT outcome FROM attempts WHERE id='attempt-real'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(outcome_after, outcome_before);
+
+    drop(store);
+    let mut reopened = StateStore::open(&config.state_root, config.capacity).unwrap();
+    let mut startup_prs = ExitPr::default();
+    let startup =
+        luthor::coordinator::startup_reconcile_all(&mut reopened, &mut startup_prs).unwrap();
+    assert!(startup.attempts.is_empty());
+    assert_eq!(startup_prs.reads, 0);
+    assert_eq!(
+        reopened.task_phase("task").unwrap().as_deref(),
+        Some("attention")
+    );
 }
 
 #[cfg(unix)]
