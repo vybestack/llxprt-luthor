@@ -1,7 +1,13 @@
 use luthor::{
+    claim::{AssignmentError, AssignmentWriter},
     config::{CommandTemplate, Config, Mapping, Marker, Source},
+    coordinator::{IdCreator, ScheduleDependencies, SupervisorLauncher, schedule_candidates},
     eligibility::Candidate,
-    state::{StateError, StateStore, WorktreeIdentity},
+    github::{
+        project::{Issue, Page, ProjectItem, ProjectReadError, ProjectReader},
+        pull_request::{ErrorCategory, LookupError, PullRequestReader},
+    },
+    state::{ExitPrEvidence, PausePrStatus, StateError, StateStore, WorktreeIdentity},
     supervisor::{
         Reconciliation, SupervisorError, execute_with_binary, prepare_initial, prepare_resume,
         reconcile_attempt, request_stop, run_gated_child_with_binary,
@@ -698,6 +704,249 @@ fn edit_receipt(config: &Config, change: impl FnOnce(&mut luthor::supervisor::Ex
         serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     change(&mut receipt);
     fs::write(path, serde_json::to_vec(&receipt).unwrap()).unwrap();
+}
+
+#[cfg(unix)]
+fn exit_proof(config: &Config) -> ExitPrEvidence {
+    let connection = rusqlite::Connection::open(config.state_root.join("state.sqlite3")).unwrap();
+    let payload: String = connection.query_row(
+        "SELECT payload FROM evidence WHERE task_id='task' AND attempt_id='attempt-real' AND kind='exit_pr_lookup'",
+        [], |row| row.get(0),
+    ).unwrap();
+    serde_json::from_str(&payload).unwrap()
+}
+
+#[cfg(unix)]
+#[derive(Default)]
+struct ExitPr {
+    reads: usize,
+    fail: bool,
+}
+#[cfg(unix)]
+impl PullRequestReader for ExitPr {
+    fn page(&mut self, _: &str, _: u32) -> Result<Vec<serde_json::Value>, LookupError> {
+        self.reads += 1;
+        if self.fail {
+            Err(LookupError {
+                category: ErrorCategory::Transport,
+                code: "offline",
+                status: None,
+            })
+        } else {
+            Ok(vec![])
+        }
+    }
+    fn detail(&mut self, _: &str, _: u64) -> Result<serde_json::Value, LookupError> {
+        unreachable!()
+    }
+}
+
+#[cfg(unix)]
+struct OtherProject(Candidate, usize);
+#[cfg(unix)]
+impl ProjectReader for OtherProject {
+    fn page(&mut self, _: &str, _: Option<&str>) -> Result<Page<ProjectItem>, ProjectReadError> {
+        let c = &self.0;
+        Ok(Page {
+            items: vec![ProjectItem {
+                item_id: c.item_id.clone(),
+                issue_node_id: c.issue_node_id.clone(),
+                repository: c.repository.clone(),
+                tracker_repo_id: c.tracker_repo_id.clone(),
+                issue_number: c.issue_number,
+                fields: vec![],
+                unsupported_fields: vec![],
+            }],
+            has_next_page: false,
+            end_cursor: None,
+        })
+    }
+    fn issue(&mut self, _: &ProjectItem) -> Result<Issue, ProjectReadError> {
+        self.1 += 1;
+        let c = &self.0;
+        Ok(Issue {
+            node_id: c.issue_node_id.clone(),
+            repository: c.repository.clone(),
+            tracker_repo_id: c.tracker_repo_id.clone(),
+            number: c.issue_number,
+            url: c.issue_url.clone(),
+            state: "open".into(),
+            assignees: if self.1 == 1 {
+                vec![]
+            } else {
+                vec!["operator".into()]
+            },
+            labels: vec!["ready".into()],
+            milestone: None,
+            milestone_id: None,
+            observed_at_unix_secs: 1,
+        })
+    }
+}
+#[cfg(unix)]
+struct OtherWriter;
+#[cfg(unix)]
+impl AssignmentWriter for OtherWriter {
+    fn assign(&mut self, _: &str, _: u64, _: &str) -> Result<(), AssignmentError> {
+        Ok(())
+    }
+}
+#[cfg(unix)]
+#[derive(Default)]
+struct OtherLauncher(usize);
+#[cfg(unix)]
+impl SupervisorLauncher for OtherLauncher {
+    fn launch(
+        &mut self,
+        _: &mut StateStore,
+        _: &luthor::supervisor::LaunchPlan,
+    ) -> Result<(), SupervisorError> {
+        self.0 += 1;
+        Ok(())
+    }
+}
+#[cfg(unix)]
+#[derive(Default)]
+struct OtherIds(usize);
+#[cfg(unix)]
+impl IdCreator for OtherIds {
+    fn create(&mut self) -> Result<String, std::io::Error> {
+        self.0 += 1;
+        Ok(self.0.to_string())
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn natural_exit_seven_attends_and_scheduler_dispatches_only_other_issue() {
+    let (_dir, config, mut store) = dispatched_fixture(7);
+    let mut prs = ExitPr::default();
+    let (_, mut other) = configured(config.state_root.parent().unwrap());
+    other.item_id = "other-item".into();
+    other.issue_node_id = "other-issue".into();
+    other.issue_number = 8;
+    other.issue_url = "https://github.com/org/tracker/issues/8".into();
+    let mut project = OtherProject(other.clone(), 0);
+    let mut writer = OtherWriter;
+    let mut launcher = OtherLauncher::default();
+    let mut ids = OtherIds::default();
+    let report = schedule_candidates(
+        &mut store,
+        vec![other.clone()],
+        ScheduleDependencies {
+            config: &config,
+            config_revision: "rev",
+            projects: &mut project,
+            prs: &mut prs,
+            assignments: &mut writer,
+            launcher: &mut launcher,
+            ids: &mut ids,
+        },
+    )
+    .unwrap();
+    assert_eq!(prs.reads, 4); // one fresh exit read, then claim and prelaunch reads
+    assert!(matches!(
+        report.startup.attempts[0].review,
+        luthor::coordinator::AttemptReview::Completed(Reconciliation::Completed {
+            exit_code: Some(7),
+            signal: None
+        })
+    ));
+    assert_eq!(
+        store.task_phase("task").unwrap().as_deref(),
+        Some("attention")
+    );
+    let proof = exit_proof(&config);
+    assert_eq!(proof.status, PausePrStatus::Absent);
+    assert!(proof.observed_at_unix_secs > 0);
+    assert!(
+        store
+            .evidence_kinds("task")
+            .unwrap()
+            .contains(&"attention_reason".into())
+    );
+    assert_eq!(
+        store.latest_attempt("task").unwrap().as_deref(),
+        Some("attempt-real")
+    );
+    assert_eq!(store.reservation_count().unwrap(), 1); // only the other issue
+    assert_eq!(report.launched.len(), 1);
+    assert_eq!(launcher.0, 1);
+    assert_eq!(store.pending_attempts().unwrap().len(), 1); // other task awaits worker
+    assert!(
+        store
+            .existing_issue(&other.tracker_repo_id, &other.issue_node_id)
+            .unwrap()
+    );
+    let again = schedule_candidates(
+        &mut store,
+        vec![other],
+        ScheduleDependencies {
+            config: &config,
+            config_revision: "rev",
+            projects: &mut project,
+            prs: &mut prs,
+            assignments: &mut writer,
+            launcher: &mut launcher,
+            ids: &mut ids,
+        },
+    )
+    .unwrap();
+    assert!(again.launched.is_empty());
+    assert_eq!(launcher.0, 1);
+    assert_eq!(
+        store.latest_attempt("task").unwrap().as_deref(),
+        Some("attempt-real")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn natural_exit_pr_error_keeps_held_slot_and_evidence() {
+    let (_dir, config, mut store) = dispatched_fixture(7);
+    let mut prs = ExitPr {
+        fail: true,
+        ..Default::default()
+    };
+    let report = luthor::coordinator::startup_reconcile_all(&mut store, &mut prs).unwrap();
+    assert!(matches!(
+        report.attempts[0].review,
+        luthor::coordinator::AttemptReview::Held(_)
+    ));
+    assert_eq!(store.task_phase("task").unwrap().as_deref(), Some("held"));
+    assert_eq!(store.reservation_count().unwrap(), 0);
+    assert!(matches!(
+        store.ensure_dispatch_capacity(),
+        Err(StateError::Capacity { .. })
+    ));
+    let proof = exit_proof(&config);
+    assert!(matches!(
+        proof.status,
+        PausePrStatus::Error {
+            category: ErrorCategory::Transport,
+            ..
+        }
+    ));
+    assert!(store.pending_attempts().unwrap().is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn uncertain_child_group_never_reads_pr_or_frees_capacity() {
+    let (_dir, config, mut store) = dispatched_fixture(7);
+    edit_receipt(&config, |receipt| receipt.child_pid = std::process::id());
+    let mut prs = ExitPr::default();
+    let report = luthor::coordinator::startup_reconcile_all(&mut store, &mut prs).unwrap();
+    assert!(matches!(
+        report.attempts[0].review,
+        luthor::coordinator::AttemptReview::Held(_)
+    ));
+    assert_eq!(prs.reads, 0);
+    assert_eq!(store.reservation_count().unwrap(), 1);
+    assert!(matches!(
+        store.ensure_dispatch_capacity(),
+        Err(StateError::Capacity { .. })
+    ));
 }
 
 #[cfg(unix)]

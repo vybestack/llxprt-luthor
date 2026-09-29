@@ -6,7 +6,7 @@ use crate::{
         project::{ProjectReader, enumerate_target},
         pull_request::{LookupError, LookupResult, PullRequestReader, lookup},
     },
-    state::{PausePrEvidence, PausePrStatus, StateError, StateStore},
+    state::{ExitPrEvidence, PausePrEvidence, PausePrStatus, StateError, StateStore},
     supervisor::{self, LaunchPlan, SupervisorError},
     worktree::{self, WorktreeError, WorktreeInspection},
 };
@@ -221,8 +221,8 @@ pub fn startup_reconcile_all<Q: PullRequestReader>(
     Ok(report)
 }
 
-/// Process and receipt proof precede the PR read; only an exhaustive absent
-/// result may make a stopped task resumable. No lookup starts another worker.
+/// Process and receipt proof precede the PR read. Only exhaustive absence
+/// releases a stopped task for resume or a natural exit for attention.
 pub fn reconcile_with_pr<Q: PullRequestReader>(
     store: &mut StateStore,
     task_id: &str,
@@ -230,12 +230,16 @@ pub fn reconcile_with_pr<Q: PullRequestReader>(
     prs: &mut Q,
 ) -> Result<supervisor::Reconciliation, SupervisorError> {
     let result = supervisor::reconcile_attempt(store, task_id, attempt_id)?;
-    if !matches!(result, supervisor::Reconciliation::Completed { .. })
-        || !store.stopped_exit_for_pause(task_id, attempt_id)?
-    {
+    if !matches!(result, supervisor::Reconciliation::Completed { .. }) {
         return Ok(result);
     }
-    finish_verified_stopped_attempt_with_pr(store, task_id, attempt_id, prs, result)
+    if store.stopped_exit_for_pause(task_id, attempt_id)? {
+        return finish_verified_stopped_attempt_with_pr(store, task_id, attempt_id, prs, result);
+    }
+    if store.natural_exit_for_attention(task_id, attempt_id)? {
+        return finish_verified_natural_exit_with_pr(store, task_id, attempt_id, prs, result);
+    }
+    Ok(result)
 }
 
 fn finish_verified_stopped_attempt_with_pr<Q: PullRequestReader>(
@@ -249,16 +253,7 @@ fn finish_verified_stopped_attempt_with_pr<Q: PullRequestReader>(
         .selection_evidence(task_id)?
         .ok_or(StateError::InvalidSelection)?;
     let repository = &selection.candidate.mapping.code_repository;
-    let status = match lookup(prs, repository, &selection.candidate.issue_url) {
-        Ok(LookupResult::Absent) => PausePrStatus::Absent,
-        Ok(LookupResult::OpenPreexisting(_)) => PausePrStatus::Open,
-        Ok(LookupResult::Ambiguous(_)) => PausePrStatus::Ambiguous,
-        Err(error) => PausePrStatus::Error {
-            category: error.category,
-            code: error.code.to_owned(),
-            http_status: error.status,
-        },
-    };
+    let status = exit_lookup_status(prs, repository, &selection.candidate.issue_url);
     let observed_at_unix_secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| SupervisorError::IdentityUnavailable)?
@@ -278,6 +273,56 @@ fn finish_verified_stopped_attempt_with_pr<Q: PullRequestReader>(
     Ok(supervisor::Reconciliation::Held {
         reason: reason.into(),
     })
+}
+
+fn finish_verified_natural_exit_with_pr<Q: PullRequestReader>(
+    store: &mut StateStore,
+    task_id: &str,
+    attempt_id: &str,
+    prs: &mut Q,
+    result: supervisor::Reconciliation,
+) -> Result<supervisor::Reconciliation, SupervisorError> {
+    let selection = store
+        .selection_evidence(task_id)?
+        .ok_or(StateError::InvalidSelection)?;
+    let repository = &selection.candidate.mapping.code_repository;
+    let status = exit_lookup_status(prs, repository, &selection.candidate.issue_url);
+    let observed_at_unix_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| SupervisorError::IdentityUnavailable)?
+        .as_secs();
+    let proof = ExitPrEvidence {
+        observed_at_unix_secs,
+        repository: repository.clone(),
+        status,
+    };
+    store.record_exit_pr_lookup(task_id, attempt_id, &proof)?;
+    let reason = match proof.status {
+        PausePrStatus::Absent => return Ok(result),
+        PausePrStatus::Open => "exit PR present",
+        PausePrStatus::Ambiguous => "exit PR ambiguous",
+        PausePrStatus::Error { .. } => "exit PR read failed",
+    };
+    Ok(supervisor::Reconciliation::Held {
+        reason: reason.into(),
+    })
+}
+
+fn exit_lookup_status<Q: PullRequestReader>(
+    prs: &mut Q,
+    repository: &str,
+    issue_url: &str,
+) -> PausePrStatus {
+    match lookup(prs, repository, issue_url) {
+        Ok(LookupResult::Absent) => PausePrStatus::Absent,
+        Ok(LookupResult::OpenPreexisting(_)) => PausePrStatus::Open,
+        Ok(LookupResult::Ambiguous(_)) => PausePrStatus::Ambiguous,
+        Err(error) => PausePrStatus::Error {
+            category: error.category,
+            code: error.code.to_owned(),
+            http_status: error.status,
+        },
+    }
 }
 
 pub trait IdCreator {
