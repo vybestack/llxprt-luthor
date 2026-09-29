@@ -186,3 +186,81 @@ fn classifies_safe_api_failure_categories_and_malformed_output() {
     assert_eq!(error.category, ReadCategory::Malformed);
     assert_eq!(error.project_id.as_deref(), Some("PROJECT-2"));
 }
+
+#[test]
+fn direct_issue_caches_repository_and_validates_identity_and_urls() {
+    use luthor::github::project::ProjectItem;
+
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("gh");
+    let calls = dir.path().join("repository-calls");
+    let issue = r#"{"node_id":"ISSUE1","repository_url":"https://api.github.com/repos/org/tracker","number":7,"html_url":"https://github.com/org/tracker/issues/7","state":"open","assignees":[],"labels":[],"milestone":null}"#;
+    let script = format!(
+        "#!/bin/sh\ncase \"$*\" in *'repos/org/tracker/issues/7'*) printf '%s' '{}' ;; *) echo call >> '{}' ; printf '%s' '{{\"node_id\":\"REPO1\"}}' ;; esac\n",
+        issue.replace('\'', "'\\''"),
+        calls.display()
+    );
+    fs::write(&path, script).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    let mut reader = GhProjectReader::new(path);
+    let item = ProjectItem {
+        item_id: "PVTI1".into(),
+        issue_node_id: "ISSUE1".into(),
+        repository: "org/tracker".into(),
+        tracker_repo_id: "REPO1".into(),
+        issue_number: 7,
+        fields: vec![],
+    };
+
+    let first = reader.issue(&item).unwrap();
+    let second = reader.issue(&item).unwrap();
+    assert_eq!(first.repository, "org/tracker");
+    assert_eq!(first.tracker_repo_id, "REPO1");
+    assert_eq!(first.url, "https://github.com/org/tracker/issues/7");
+    assert_eq!(first.node_id, "ISSUE1");
+    assert_eq!(first, second);
+    assert_eq!(fs::read_to_string(calls).unwrap().lines().count(), 1);
+}
+
+#[test]
+fn direct_issue_rejects_repository_id_and_renamed_repository_urls() {
+    use luthor::github::project::{ProjectItem, ReadCategory};
+
+    for (repository_json, issue_json, expected_category) in [
+        (
+            r#"{"node_id":"OTHER"}"#,
+            r#"{"node_id":"ISSUE1","repository_url":"https://api.github.com/repos/org/tracker","number":7,"html_url":"https://github.com/org/tracker/issues/7","state":"open","assignees":[],"labels":[],"milestone":null}"#,
+            ReadCategory::Malformed,
+        ),
+        (
+            r#"{"node_id":"REPO1"}"#,
+            r#"{"node_id":"ISSUE1","repository_url":"https://api.github.com/repos/org/renamed","number":7,"html_url":"https://github.com/org/tracker/issues/7","state":"open","assignees":[],"labels":[],"milestone":null}"#,
+            ReadCategory::Malformed,
+        ),
+        (
+            r#"{"node_id":"REPO1"}"#,
+            r#"{"node_id":"ISSUE1","repository_url":"https://api.github.com/repos/org/tracker","number":7,"html_url":"https://github.com/org/renamed/issues/7","state":"open","assignees":[],"labels":[],"milestone":null}"#,
+            ReadCategory::Malformed,
+        ),
+    ] {
+        let script = format!(
+            "#!/bin/sh\ncase \"$*\" in *issues/7*) printf '%s' '{}' ;; *) printf '%s' '{}' ;; esac\n",
+            issue_json.replace('\'', "'\\''"),
+            repository_json.replace('\'', "'\\''")
+        );
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("gh");
+        fs::write(&path, script).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        let mut reader = GhProjectReader::new(path);
+        let item = ProjectItem {
+            item_id: "PVTI1".into(),
+            issue_node_id: "ISSUE1".into(),
+            repository: "org/tracker".into(),
+            tracker_repo_id: "REPO1".into(),
+            issue_number: 7,
+            fields: vec![],
+        };
+        assert_eq!(reader.issue(&item).unwrap_err().category, expected_category);
+    }
+}
