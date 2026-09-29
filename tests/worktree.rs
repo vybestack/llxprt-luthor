@@ -2,7 +2,9 @@ use luthor::{
     config::{CommandTemplate, Config, Mapping, Marker, Source},
     eligibility::Candidate,
     state::StateStore,
-    worktree::{WorktreeError, WorktreeResult, ensure_worktree, ensure_worktree_with_hooks},
+    worktree::{
+        WorktreeError, WorktreeResult, ensure_worktree, ensure_worktree_with_hooks, verify_snapshot,
+    },
 };
 use std::{fs, path::Path, process::Command};
 
@@ -249,7 +251,7 @@ fn user_symlink_ancestor_is_rejected_before_creating_a_root() {
 }
 
 #[test]
-fn restart_mismatch_and_partial_intent_hold_without_retry() {
+fn restart_accepts_descendant_commit_but_partial_intent_holds_without_retry() {
     let mut f = Fixture::new();
     f.task("task-1", 1, true);
     let WorktreeResult::Created(identity) = f.create("task-1").unwrap() else {
@@ -258,17 +260,19 @@ fn restart_mismatch_and_partial_intent_hold_without_retry() {
     fs::write(identity.path.join("change"), "change").unwrap();
     git(&identity.path, &["add", "change"]);
     git(&identity.path, &["commit", "-m", "changed"]);
+    verify_snapshot(&identity).unwrap();
     drop(f.store);
     let mut store = StateStore::open(&f.config.state_root, 1).unwrap();
-    assert!(matches!(
+    assert_eq!(
         ensure_worktree(
             &mut store,
             "task-1",
             &f.config.worktree_root,
             &f.config.mappings[0]
-        ),
-        Err(WorktreeError::Conflict(_))
-    ));
+        )
+        .unwrap(),
+        WorktreeResult::Existing(identity)
+    );
     f.store = store;
     f.task("task-2", 2, true);
     let root = fs::canonicalize(&f.config.worktree_root).unwrap();
@@ -288,6 +292,39 @@ fn restart_mismatch_and_partial_intent_hold_without_retry() {
         Err(WorktreeError::Conflict(_))
     ));
     assert!(!root.join("task-2").exists());
+}
+
+#[test]
+fn rewound_or_unrelated_head_is_not_adopted() {
+    let mut f = Fixture::new();
+    let checkout = &f.config.mappings[0].checkout;
+    fs::write(checkout.join("second"), "second").unwrap();
+    git(checkout, &["add", "second"]);
+    git(checkout, &["commit", "-m", "second"]);
+    f.task("task-1", 1, true);
+    let WorktreeResult::Created(identity) = f.create("task-1").unwrap() else {
+        panic!()
+    };
+    let path = &identity.path;
+    git(path, &["reset", "--hard", &format!("{}^", identity.head)]);
+    assert!(verify_snapshot(&identity).is_err());
+    assert!(matches!(
+        f.create("task-1"),
+        Err(WorktreeError::Conflict(_))
+    ));
+
+    git(path, &["switch", "--orphan", "unrelated"]);
+    fs::write(path.join("other"), "other").unwrap();
+    git(path, &["add", "other"]);
+    git(path, &["commit", "-m", "unrelated"]);
+    let unrelated = git(path, &["rev-parse", "HEAD"]);
+    git(path, &["switch", "luthor/task-1"]);
+    git(path, &["reset", "--hard", &unrelated]);
+    assert!(verify_snapshot(&identity).is_err());
+    assert!(matches!(
+        f.create("task-1"),
+        Err(WorktreeError::Conflict(_))
+    ));
 }
 
 #[test]

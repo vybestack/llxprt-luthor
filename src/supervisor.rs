@@ -393,8 +393,8 @@ pub fn prepare_resume(
         || latest.session_id != task_id
         || first.worktree != identity.path
         || latest.worktree != identity.path
-        || first.expected_worktree != identity
-        || latest.expected_worktree != identity
+        || !worktree::matches_snapshot(&first.expected_worktree, &identity)?
+        || !worktree::matches_snapshot(&latest.expected_worktree, &identity)?
         || first.config_revision != selection.config_revision
         || latest.config_revision != selection.config_revision
     {
@@ -896,12 +896,15 @@ fn verify_launch_worktree(
     };
     if selection.config_revision != plan.config_revision
         || plan.worktree != plan.expected_worktree.path
-        || worktree::verify_record(
-            &record,
-            &selection.candidate.mapping,
-            &selection.effective_config.worktree_root,
-            &plan.task_id,
-        )? != plan.expected_worktree
+        || !worktree::matches_snapshot(
+            &plan.expected_worktree,
+            &worktree::verify_record(
+                &record,
+                &selection.candidate.mapping,
+                &selection.effective_config.worktree_root,
+                &plan.task_id,
+            )?,
+        )?
     {
         return Err(SupervisorError::Conflict);
     }
@@ -1618,7 +1621,7 @@ pub fn supervise(root: &Path, attempt: &str) -> Result<(), SupervisorError> {
         }
         let identity: WorktreeIdentity = serde_json::from_str(&worktree)?;
         verify_launch_worktree(&connection, &plan)?;
-        if identity != plan.expected_worktree
+        if !worktree::matches_snapshot(&identity, &plan.expected_worktree)?
             || identity.path != plan.worktree
             || fs::canonicalize(&plan.worktree)? != plan.worktree
         {

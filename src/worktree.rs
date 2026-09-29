@@ -71,17 +71,48 @@ pub fn verify_record(
         .as_ref()
         .ok_or(WorktreeError::Conflict("missing worktree identity"))?;
     if record.intent.path != check_root(root)?.join(task_id)
+        || record.intent.branch != format!("luthor/{task_id}")
+        || record.intent.base != mapping.base_branch
+        || record.intent.repository != mapping.code_repository
         || expected.path != record.intent.path
         || expected.branch != record.intent.branch
         || expected.base != record.intent.base
         || expected.repository != record.intent.repository
-        || inspect_record(record, mapping)? != WorktreeInspection::IdentityMatches
     {
         return Err(WorktreeError::Conflict(
             "persisted worktree identity differs from disk",
         ));
     }
-    Ok(expected.clone())
+    let (_, git_dir, remote) = validate_checkout(mapping)?;
+    let actual = identity(&record.intent.path, &record.intent, &git_dir, &remote)?;
+    if !matches_snapshot(expected, &actual)? {
+        return Err(WorktreeError::Conflict(
+            "persisted worktree identity differs from disk",
+        ));
+    }
+    Ok(actual)
+}
+
+/// Compare immutable ownership and require the live tip to extend the recorded tip.
+pub fn matches_snapshot(
+    expected: &WorktreeIdentity,
+    actual: &WorktreeIdentity,
+) -> Result<bool, WorktreeError> {
+    let mut stable = actual.clone();
+    stable.head = expected.head.clone();
+    if stable != *expected {
+        return Ok(false);
+    }
+    let status = git(
+        &actual.path,
+        &["merge-base", "--is-ancestor", &expected.head, &actual.head],
+    )?
+    .status;
+    match status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => Err(WorktreeError::Git("cannot compare worktree history")),
+    }
 }
 
 /// Check the live Git identity against an immutable launch snapshot without writing to Git.
@@ -97,7 +128,7 @@ pub fn verify_snapshot(expected: &WorktreeIdentity) -> Result<(), WorktreeError>
         &expected.git_directory,
         &expected.remote,
     )?;
-    if actual != *expected {
+    if !matches_snapshot(expected, &actual)? {
         return Err(WorktreeError::Conflict("live worktree identity changed"));
     }
     Ok(())
@@ -126,7 +157,9 @@ pub fn inspect_record(
     if let Some(expected) = &record.identity {
         let (_, git_dir, remote) = validate_checkout(mapping)?;
         return Ok(match identity(&intent.path, intent, &git_dir, &remote) {
-            Ok(actual) if &actual == expected => WorktreeInspection::IdentityMatches,
+            Ok(actual) if matches_snapshot(expected, &actual)? => {
+                WorktreeInspection::IdentityMatches
+            }
             _ => WorktreeInspection::IdentityMismatch,
         });
     }
@@ -436,7 +469,9 @@ pub fn ensure_worktree_with_hooks(
         };
         let result = identity(&intent.path, &intent, &git_dir, &remote);
         return match result {
-            Ok(actual) if actual == expected => Ok(WorktreeResult::Existing(expected)),
+            Ok(actual) if matches_snapshot(&expected, &actual)? => {
+                Ok(WorktreeResult::Existing(expected))
+            }
             _ => Err(WorktreeError::Conflict(
                 "persisted worktree identity differs from disk",
             )),
