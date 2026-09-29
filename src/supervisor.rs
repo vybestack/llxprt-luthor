@@ -1416,6 +1416,49 @@ pub(crate) fn recorded_process(payload: &str) -> Option<ProcessIdentity> {
     .then_some(value)
 }
 
+/// Proves the registered direct processes and their process groups are absent.
+/// This does not prove that an untracked descendant escaped into another group
+/// or session is absent; no descendant registry is available here.
+#[cfg(unix)]
+pub(crate) fn registered_processes_absent(
+    child: &ChildIdentity,
+    supervisor: &ProcessIdentity,
+) -> bool {
+    let bounded = |boot: &str, start: &str| {
+        !boot.trim().is_empty()
+            && boot.len() <= 256
+            && !start.trim().is_empty()
+            && start.len() <= 64
+    };
+    if child.pid == 0
+        || supervisor.pid == 0
+        || i32::try_from(child.pid).is_err()
+        || i32::try_from(supervisor.pid).is_err()
+        || child.pid == supervisor.pid
+        || child.group_id != child.pid
+        || !bounded(&child.boot_identity, &child.start_identity)
+        || !bounded(&supervisor.boot_identity, &supervisor.start_identity)
+    {
+        return false;
+    }
+    let Ok(current) = identity(std::process::id()) else {
+        return false;
+    };
+    if current.0 != child.boot_identity || current.0 != supervisor.boot_identity {
+        return false;
+    }
+    let pid_absent = |pid: u32| {
+        if unsafe { libc::kill(pid as libc::pid_t, 0) } == 0 {
+            return false;
+        }
+        std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    };
+    pid_absent(child.pid)
+        && pid_absent(supervisor.pid)
+        && group_absent(child.group_id as i32)
+        && group_absent(supervisor.pid as i32)
+}
+
 #[cfg(unix)]
 pub(crate) fn verified_live_process(child: &ChildIdentity, supervisor: &ProcessIdentity) -> bool {
     let bounded = |boot: &str, start: &str| {
@@ -1588,8 +1631,15 @@ pub fn reconcile_attempt(
             || attempts
                 .join(format!("{attempt_id}.supervisor-error.json"))
                 .exists()
-            || !verified_live_process(&child_file, &supervisor)
         {
+            return Ok(held("live worker identity or reservation unverified"));
+        }
+        if registered_processes_absent(&child_file, &supervisor) {
+            return Ok(held(
+                "receipt missing; registered processes absent; operator recovery required",
+            ));
+        }
+        if !verified_live_process(&child_file, &supervisor) {
             return Ok(held("live worker identity or reservation unverified"));
         }
         return Ok(Reconciliation::Running);
