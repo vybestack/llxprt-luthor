@@ -272,22 +272,39 @@ impl ProjectReader for GhProjectReader {
 
         let mut items = Vec::new();
         for node in nodes {
-            let item_id = required_string(node, "id", "invalid-project-item")?;
+            let item_id = required_string(node, "id", "invalid-project-item").map_err(|_| {
+                ProjectReadError {
+                    operation: ReadOperation::ProjectPage,
+                    project_id: Some(project_id.to_owned()),
+                    item_id: None,
+                    issue_id: None,
+                    category: ReadCategory::Malformed,
+                    status: None,
+                    code: "invalid-project-item".to_owned(),
+                }
+            })?;
             let content = node
                 .get("content")
-                .ok_or_else(|| format!("project item {item_id} has missing content"))?;
+                .ok_or_else(|| item_error(project_id, &item_id, "missing-project-item-content"))?;
             if content.is_null() {
-                return Err(format!("project item {item_id} has null content").into());
+                return Err(item_error(
+                    project_id,
+                    &item_id,
+                    "null-project-item-content",
+                ));
             }
             let typename = content
                 .get("__typename")
                 .and_then(Value::as_str)
-                .ok_or_else(|| format!("project item {item_id} is missing content typename"))?;
+                .ok_or_else(|| {
+                    item_error(project_id, &item_id, "missing-project-item-content-type")
+                })?;
             if typename != "Issue" {
-                return Err(format!(
-                    "project item {item_id} has unsupported content type {typename}"
-                )
-                .into());
+                return Err(item_error(
+                    project_id,
+                    &item_id,
+                    "unsupported-project-item-content-type",
+                ));
             }
             let issue_node_id = required_string(content, "id", "invalid-project-issue")?;
             let number = content
@@ -480,6 +497,18 @@ impl ProjectReader for GhProjectReader {
             milestone_id,
             observed_at_unix_secs,
         })
+    }
+}
+
+fn item_error(project_id: &str, item_id: &str, code: &str) -> ProjectReadError {
+    ProjectReadError {
+        operation: ReadOperation::ProjectPage,
+        project_id: Some(project_id.to_owned()),
+        item_id: Some(item_id.to_owned()),
+        issue_id: None,
+        category: ReadCategory::Malformed,
+        status: None,
+        code: code.to_owned(),
     }
 }
 

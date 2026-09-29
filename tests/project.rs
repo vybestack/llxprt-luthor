@@ -141,6 +141,9 @@ fn rejects_non_issue_project_items_with_item_identity() {
             error.category,
             luthor::github::project::ReadCategory::Malformed
         );
+        assert_eq!(error.project_id.as_deref(), Some("P"));
+        assert_eq!(error.item_id.as_deref(), Some("PVTI2"));
+        assert_eq!(error.issue_id, None);
     }
 }
 
