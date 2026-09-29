@@ -2,7 +2,7 @@ use crate::{
     config::Marker,
     eligibility::Candidate,
     github::{
-        project::{Issue, ProjectError, ProjectItem, ProjectReader, enumerate},
+        project::{Issue, ProjectError, ProjectItem, ProjectReader},
         pull_request::{LookupError, LookupResult, PullRequestReader, lookup},
     },
     state::{StateError, StateStore},
@@ -66,15 +66,62 @@ fn fresh<R: ProjectReader>(
     reader: &mut R,
     c: &Candidate,
 ) -> Result<(ProjectItem, Issue), ClaimError> {
-    let entries = enumerate(reader, &c.project_id)?;
-    let mut found = entries
-        .into_iter()
-        .filter(|(i, _)| i.item_id == c.item_id && i.issue_node_id == c.issue_node_id);
-    let value = found.next().ok_or(ClaimError::Changed)?;
-    if found.next().is_some() {
+    let mut cursor = None;
+    let mut seen_cursors = std::collections::HashSet::new();
+    let mut seen_items = std::collections::HashSet::new();
+    let item = loop {
+        let page = reader
+            .page(&c.project_id, cursor.as_deref())
+            .map_err(ProjectError::Read)?;
+        let matches = page
+            .items
+            .into_iter()
+            .filter(|item| item.item_id == c.item_id || item.issue_node_id == c.issue_node_id)
+            .collect::<Vec<_>>();
+        for candidate in &matches {
+            if !seen_items.insert(candidate.item_id.clone()) {
+                return Err(ClaimError::Changed);
+            }
+        }
+        if matches.len() > 1 {
+            return Err(ClaimError::Changed);
+        }
+        if let Some(item) = matches.into_iter().next() {
+            if item.item_id != c.item_id
+                || item.issue_node_id != c.issue_node_id
+                || item.repository != c.repository
+                || item.tracker_repo_id != c.tracker_repo_id
+                || item.issue_number != c.issue_number
+            {
+                return Err(ClaimError::Changed);
+            }
+            break item;
+        }
+        if !page.has_next_page {
+            return Err(ClaimError::Changed);
+        }
+        let next = page
+            .end_cursor
+            .filter(|cursor| !cursor.is_empty())
+            .ok_or(ClaimError::Source(ProjectError::MissingCursor))?;
+        if !seen_cursors.insert(next.clone()) {
+            return Err(ClaimError::Source(ProjectError::RepeatedCursor));
+        }
+        cursor = Some(next);
+    };
+    let issue = reader.issue(&item).map_err(ProjectError::IssueRead)?;
+    if issue.node_id != item.issue_node_id
+        || issue.repository != item.repository
+        || issue.tracker_repo_id != item.tracker_repo_id
+        || issue.number != item.issue_number
+        || issue.url
+            != format!(
+                "https://github.com/{}/issues/{}",
+                item.repository, item.issue_number
+            )
+    {
         return Err(ClaimError::Changed);
     }
-    let (item, issue) = value;
     let marker = match &c.marker {
         Marker::Label { name } => issue.labels.iter().any(|x| x == name),
         Marker::ProjectField { name, value } => {
@@ -103,7 +150,10 @@ pub fn claim<P: ProjectReader, Q: PullRequestReader, W: AssignmentWriter>(
     prs: &mut Q,
     writer: &mut W,
 ) -> Result<(), ClaimError> {
-    if principal.trim().is_empty() {
+    let configured_login = store
+        .claim_assignment_login(task_id)?
+        .ok_or(ClaimError::Changed)?;
+    if principal != configured_login || principal.trim().is_empty() {
         return Err(ClaimError::Changed);
     }
     let (item, issue) = fresh(projects, c)?;
@@ -114,21 +164,24 @@ pub fn claim<P: ProjectReader, Q: PullRequestReader, W: AssignmentWriter>(
         return Err(ClaimError::ExistingPr);
     }
     store.record_claim_intent(task_id, principal, &c.repository, c.issue_number)?;
-    if writer
-        .assign(&c.repository, c.issue_number, principal)
-        .is_err()
-    {
+    let result = (|| {
+        writer
+            .assign(&c.repository, c.issue_number, principal)
+            .map_err(|_| ClaimError::Assignment)?;
+        let (after_item, after) = fresh(projects, c).map_err(|_| ClaimError::Verify)?;
+        if after.assignees != [principal] || after_item.item_id != item.item_id {
+            return Err(ClaimError::Verify);
+        }
+        if lookup(prs, &c.mapping.code_repository, &c.issue_url).map_err(|_| ClaimError::Verify)?
+            != LookupResult::Absent
+        {
+            return Err(ClaimError::Verify);
+        }
+        Ok(())
+    })();
+    if let Err(error) = result {
         store.set_task_phase(task_id, "held")?;
-        return Err(ClaimError::Assignment);
-    }
-    let (after_item, after) = fresh(projects, c)?;
-    if after.assignees != [principal] || after_item.item_id != item.item_id {
-        store.set_task_phase(task_id, "held")?;
-        return Err(ClaimError::Verify);
-    }
-    if lookup(prs, &c.mapping.code_repository, &c.issue_url)? != LookupResult::Absent {
-        store.set_task_phase(task_id, "held")?;
-        return Err(ClaimError::Verify);
+        return Err(error);
     }
     store.record_evidence(task_id, None, "claim_verified", principal)?;
     store.set_task_phase(task_id, "claimed")?;

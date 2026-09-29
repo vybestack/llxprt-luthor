@@ -231,6 +231,11 @@ impl StateStore {
         Ok(())
     }
 
+    pub fn claim_assignment_login(&self, task_id: &str) -> Result<Option<String>, StateError> {
+        let evidence = self.selection_evidence(task_id)?;
+        Ok(evidence.map(|evidence| evidence.effective_config.assignment_login))
+    }
+
     pub fn record_claim_intent(
         &mut self,
         task_id: &str,
