@@ -2,6 +2,7 @@ use crate::github::pull_request::ErrorCategory;
 use crate::{
     config::{CommandTemplate, Config, Mapping, Source},
     eligibility::Candidate,
+    pr_evidence::VerifiedOpenPr,
 };
 use fs2::FileExt;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -731,6 +732,92 @@ impl StateStore {
         Ok(self.connection.last_insert_rowid())
     }
 
+    pub fn record_verified_open_pr(
+        &mut self,
+        task_id: &str,
+        attempt_id: &str,
+        proof: &VerifiedOpenPr,
+    ) -> Result<(), StateError> {
+        if !(self.stopped_exit_for_pause(task_id, attempt_id)?
+            || self.natural_exit_for_attention(task_id, attempt_id)?)
+            || proof.id == 0
+            || proof.attempt_id != attempt_id
+            || proof.observed_at == 0
+        {
+            return Err(StateError::LaunchBlocked);
+        }
+        let tx = self.connection.transaction()?;
+        let state: Option<String> = tx
+            .query_row("SELECT state FROM tasks WHERE id=?1", [task_id], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        if state.as_deref() != Some("held") {
+            return Err(StateError::LaunchBlocked);
+        }
+        let selection_payload: String = tx.query_row(
+            "SELECT payload FROM evidence WHERE task_id=?1 AND attempt_id IS NULL AND kind='selection'",
+            [task_id],
+            |row| row.get(0),
+        )?;
+        let selection: SelectionEvidence = serde_json::from_str(&selection_payload)?;
+        let intent_payload: String = tx.query_row(
+            "SELECT detail FROM intents WHERE task_id=?1 AND kind='worktree_create'",
+            [task_id],
+            |row| row.get(0),
+        )?;
+        let intent: WorktreeIntent = serde_json::from_str(&intent_payload)?;
+        let identity_payload: String = tx.query_row(
+            "SELECT payload FROM evidence WHERE task_id=?1 AND attempt_id IS NULL AND kind='worktree_created'",
+            [task_id],
+            |row| row.get(0),
+        )?;
+        let identity: WorktreeIdentity = serde_json::from_str(&identity_payload)?;
+        let mapping = &selection.candidate.mapping;
+        if intent.branch != identity.branch
+            || intent.repository != identity.repository
+            || intent.base != identity.base
+            || identity.branch.is_empty()
+            || identity.head.is_empty()
+            || identity.repository != mapping.code_repository
+            || identity.branch != proof.head_branch
+            || proof.repository_id == 0
+            || proof.repository != mapping.code_repository
+            || proof.base_branch != mapping.base_branch
+            || proof.head_repository != mapping.allowed_pr_head_repository
+            || proof.author != mapping.allowed_pr_author
+            || proof.active_login != mapping.allowed_pr_author
+            || proof.tracker_issue_url != selection.candidate.issue_url
+        {
+            return Err(StateError::LaunchBlocked);
+        }
+        let duplicate: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM evidence WHERE kind='verified_open_pr' AND json_extract(payload,'$.id')=?1",
+            [proof.id],
+            |row| row.get(0),
+        )?;
+        let existing: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM evidence WHERE task_id=?1 AND kind='verified_open_pr'",
+            [task_id],
+            |row| row.get(0),
+        )?;
+        if duplicate != 0 || existing != 0 {
+            return Err(StateError::LaunchBlocked);
+        }
+        tx.execute(
+            "INSERT INTO evidence(task_id,attempt_id,kind,payload) VALUES(?1,?2,'verified_open_pr',?3)",
+            params![task_id, attempt_id, serde_json::to_string(proof)?],
+        )?;
+        tx.execute(
+            "UPDATE tasks SET state='pr_complete' WHERE id=?1 AND state='held'",
+            [task_id],
+        )?;
+        if tx.changes() != 1 {
+            return Err(StateError::LaunchBlocked);
+        }
+        tx.commit()?;
+        Ok(())
+    }
     /// A reserved attempt remains reserved even if the supervisor is unreachable.
     /// Repeated requests reuse the first durable intent rather than adding a new one.
     pub fn record_stop_intent(
