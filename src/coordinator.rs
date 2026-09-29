@@ -261,7 +261,8 @@ fn finish_verified_stopped_attempt_with_pr<Q: PullRequestReader>(
         .selection_evidence(task_id)?
         .ok_or(StateError::InvalidSelection)?;
     let repository = &selection.candidate.mapping.code_repository;
-    let status = exit_lookup_status(prs, repository, &selection.candidate.issue_url);
+    let lookup_result = lookup(prs, repository, &selection.candidate.issue_url);
+    let status = lookup_status(&lookup_result);
     let observed_at_unix_secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| SupervisorError::IdentityUnavailable)?
@@ -272,15 +273,24 @@ fn finish_verified_stopped_attempt_with_pr<Q: PullRequestReader>(
         status,
     };
     store.record_pause_pr_lookup(task_id, attempt_id, &proof)?;
-    let reason = match proof.status {
-        PausePrStatus::Absent => return Ok(result),
-        PausePrStatus::Open => "pause PR present",
-        PausePrStatus::Ambiguous => "pause PR ambiguous",
-        PausePrStatus::Error { .. } => "pause PR read failed",
-    };
-    Ok(supervisor::Reconciliation::Held {
-        reason: reason.into(),
-    })
+    match lookup_result {
+        Ok(LookupResult::Absent) => Ok(result),
+        Ok(LookupResult::OpenPreexisting(pr)) => verify_and_record_open_pr(
+            store,
+            task_id,
+            attempt_id,
+            prs,
+            *pr,
+            observed_at_unix_secs,
+            "exit",
+        ),
+        Ok(LookupResult::Ambiguous(_)) => Ok(supervisor::Reconciliation::Held {
+            reason: "pause PR ambiguous".into(),
+        }),
+        Err(_) => Ok(supervisor::Reconciliation::Held {
+            reason: "pause PR read failed".into(),
+        }),
+    }
 }
 
 fn finish_verified_natural_exit_with_pr<Q: PullRequestReader>(
@@ -355,12 +365,8 @@ fn finish_verified_natural_exit_with_pr<Q: PullRequestReader>(
     }
 }
 
-fn exit_lookup_status<Q: PullRequestReader>(
-    prs: &mut Q,
-    repository: &str,
-    issue_url: &str,
-) -> PausePrStatus {
-    match lookup(prs, repository, issue_url) {
+fn lookup_status(result: &Result<LookupResult, LookupError>) -> PausePrStatus {
+    match result {
         Ok(LookupResult::Absent) => PausePrStatus::Absent,
         Ok(LookupResult::OpenPreexisting(_)) => PausePrStatus::Open,
         Ok(LookupResult::Ambiguous(_)) => PausePrStatus::Ambiguous,
@@ -369,6 +375,39 @@ fn exit_lookup_status<Q: PullRequestReader>(
             code: error.code.to_owned(),
             http_status: error.status,
         },
+    }
+}
+
+fn verify_and_record_open_pr<Q: PullRequestReader>(
+    store: &mut StateStore,
+    task_id: &str,
+    attempt_id: &str,
+    prs: &mut Q,
+    pr: crate::github::pull_request::PullRequestEvidence,
+    observed_at_unix_secs: u64,
+    context: &str,
+) -> Result<supervisor::Reconciliation, SupervisorError> {
+    let verified = (|| {
+        let login = prs
+            .authenticated_identity()
+            .map_err(|_| format!("{context} PR identity unavailable"))?;
+        let expected = expected_for_task(store, task_id, prs, &login)
+            .map_err(|_| format!("{context} PR evidence unavailable"))?;
+        VerifiedOpenPr::from_matching(pr, &expected, &login, attempt_id, observed_at_unix_secs)
+            .map_err(|_| format!("{context} PR verification failed"))
+    })();
+    match verified {
+        Ok(verified) => {
+            store.record_verified_open_pr(task_id, attempt_id, &verified)?;
+            Ok(supervisor::Reconciliation::Completed {
+                exit_code: None,
+                signal: None,
+            })
+        }
+        Err(reason) => {
+            store.record_evidence(task_id, Some(attempt_id), "held_reason", &reason)?;
+            Ok(supervisor::Reconciliation::Held { reason })
+        }
     }
 }
 
