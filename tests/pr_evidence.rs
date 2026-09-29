@@ -1,4 +1,7 @@
-use luthor::pr_evidence::{ExpectedPr, PrIdentityEvidence, Verification, verify};
+use luthor::{
+    github::pull_request::PullRequestEvidence,
+    pr_evidence::{ExpectedPr, PrIdentityEvidence, Verification, VerifiedOpenPr, verify},
+};
 
 fn expected() -> ExpectedPr {
     ExpectedPr {
@@ -31,6 +34,29 @@ fn evidence() -> PrIdentityEvidence {
     }
 }
 
+fn pull_request(body: &str) -> PullRequestEvidence {
+    let pr = evidence();
+    PullRequestEvidence {
+        id: pr.id,
+        number: 4,
+        url: "https://github.com/code/repo/pull/4".into(),
+        repository_id: pr.repository_id,
+        repository: pr.repository,
+        base_repository_id: pr.repository_id,
+        base_repository: "code/repo".into(),
+        base_branch: pr.base_branch,
+        head_repository_id: pr.head_repository_id,
+        head_repository: pr.head_repository,
+        head_branch: pr.head_branch,
+        author: pr.author,
+        draft: pr.draft,
+        tracker_issue_url: "https://github.com/tracker/repo/issues/4".into(),
+        body: body.into(),
+        checks: pr.checks,
+        created_at: "2026-09-29T00:00:00Z".into(),
+        commit_sha: "abc123".into(),
+    }
+}
 #[test]
 fn accepts_open_draft_with_red_checks_as_advisory() {
     assert!(matches!(
@@ -81,5 +107,37 @@ fn rejects_wrong_link_author_head_repository_target_repository_base_and_closed_p
     assert_eq!(
         verify(pr, &expected, body),
         Verification::Mismatch("not_open_or_missing_id")
+    );
+}
+
+#[test]
+fn creates_typed_proof_for_open_draft_with_red_checks() {
+    let proof = VerifiedOpenPr::from_matching(
+        pull_request("Tracker-Issue: https://github.com/tracker/repo/issues/4"),
+        &expected(),
+        "worker",
+        "attempt-1",
+        42,
+    );
+    assert!(proof.is_ok());
+}
+
+#[test]
+fn denies_forged_tracker_body_and_head() {
+    let expected = expected();
+    assert!(
+        VerifiedOpenPr::from_matching(
+            pull_request("Tracker-Issue: https://github.com/tracker/repo/issues/40"),
+            &expected,
+            "worker",
+            "attempt-1",
+            42,
+        )
+        .is_err()
+    );
+    let mut forged_head = pull_request("Tracker-Issue: https://github.com/tracker/repo/issues/4");
+    forged_head.head_branch = "other".into();
+    assert!(
+        VerifiedOpenPr::from_matching(forged_head, &expected, "worker", "attempt-1", 42).is_err()
     );
 }

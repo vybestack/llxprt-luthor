@@ -1,4 +1,5 @@
 use crate::{
+    github::pull_request::PullRequestEvidence,
     github::pull_request::{LookupError, PullRequestReader},
     state::{StateError, StateStore},
 };
@@ -129,4 +130,104 @@ pub fn verify(pr: PrIdentityEvidence, expected: &ExpectedPr, body: &str) -> Veri
         return Verification::Mismatch("author");
     }
     Verification::Matching(pr)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct VerifiedOpenPr {
+    id: u64,
+    number: u64,
+    url: String,
+    repository_id: u64,
+    repository: String,
+    head_repository_id: u64,
+    head_repository: String,
+    base_branch: String,
+    head_branch: String,
+    author: String,
+    active_login: String,
+    tracker_issue_url: String,
+    draft: bool,
+    checks: Vec<String>,
+    created_at: String,
+    head_commit_sha: String,
+    observed_at: u64,
+    attempt_id: String,
+}
+
+impl VerifiedOpenPr {
+    pub fn from_matching(
+        pr: PullRequestEvidence,
+        expected: &ExpectedPr,
+        current_login: &str,
+        attempt_id: &str,
+        observed_at: u64,
+    ) -> Result<Self, &'static str> {
+        let identity = PrIdentityEvidence {
+            id: pr.id,
+            repository_id: pr.repository_id,
+            repository: pr.repository.clone(),
+            base_repository: pr.base_repository.clone(),
+            base_branch: pr.base_branch.clone(),
+            head_repository_id: pr.head_repository_id,
+            head_repository: pr.head_repository.clone(),
+            head_branch: pr.head_branch.clone(),
+            author: pr.author.clone(),
+            open: true,
+            draft: pr.draft,
+            checks: pr.checks.clone(),
+        };
+        if !matches!(
+            verify(identity, expected, &pr.body),
+            Verification::Matching(_)
+        ) {
+            return Err("pull_request_mismatch");
+        }
+        if expected.current_identity != current_login {
+            return Err("current_identity_mismatch");
+        }
+        if expected.issue_url != pr.tracker_issue_url {
+            return Err("tracker_issue_mismatch");
+        }
+        if pr.id == 0
+            || observed_at == 0
+            || current_login.is_empty()
+            || attempt_id.is_empty()
+            || pr.number == 0
+            || [
+                pr.url.as_str(),
+                pr.repository.as_str(),
+                pr.head_repository.as_str(),
+                pr.base_branch.as_str(),
+                pr.head_branch.as_str(),
+                pr.author.as_str(),
+                pr.tracker_issue_url.as_str(),
+                pr.created_at.as_str(),
+                pr.commit_sha.as_str(),
+            ]
+            .iter()
+            .any(|value| value.is_empty())
+        {
+            return Err("incomplete_evidence");
+        }
+        Ok(Self {
+            id: pr.id,
+            number: pr.number,
+            url: pr.url,
+            repository_id: pr.repository_id,
+            repository: pr.repository,
+            head_repository_id: pr.head_repository_id,
+            head_repository: pr.head_repository,
+            base_branch: pr.base_branch,
+            head_branch: pr.head_branch,
+            author: pr.author,
+            active_login: current_login.to_owned(),
+            tracker_issue_url: pr.tracker_issue_url,
+            draft: pr.draft,
+            checks: pr.checks,
+            created_at: pr.created_at,
+            head_commit_sha: pr.commit_sha,
+            observed_at,
+            attempt_id: attempt_id.to_owned(),
+        })
+    }
 }
