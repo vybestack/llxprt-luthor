@@ -69,36 +69,39 @@ pub(crate) fn fresh<R: ProjectReader>(
     let mut cursor = None;
     let mut seen_cursors = std::collections::HashSet::new();
     let mut seen_items = std::collections::HashSet::new();
-    let item = loop {
+    let mut seen_issues = std::collections::HashSet::new();
+    let mut target = None;
+    loop {
         let page = reader
             .page(&c.project_id, cursor.as_deref())
             .map_err(ProjectError::Read)?;
-        let matches = page
-            .items
-            .into_iter()
-            .filter(|item| item.item_id == c.item_id || item.issue_node_id == c.issue_node_id)
-            .collect::<Vec<_>>();
-        for candidate in &matches {
-            if !seen_items.insert(candidate.item_id.clone()) {
+        for item in page.items {
+            if item.item_id.is_empty() || item.issue_node_id.is_empty() {
                 return Err(ClaimError::Changed);
             }
-        }
-        if matches.len() > 1 {
-            return Err(ClaimError::Changed);
-        }
-        if let Some(item) = matches.into_iter().next() {
-            if item.item_id != c.item_id
-                || item.issue_node_id != c.issue_node_id
-                || item.repository != c.repository
-                || item.tracker_repo_id != c.tracker_repo_id
-                || item.issue_number != c.issue_number
+            if !seen_items.insert(item.item_id.clone())
+                || !seen_issues.insert(item.issue_node_id.clone())
             {
                 return Err(ClaimError::Changed);
             }
-            break item;
+            let matches_target = item.item_id == c.item_id
+                || item.issue_node_id == c.issue_node_id
+                || (item.repository == c.repository && item.issue_number == c.issue_number);
+            if matches_target {
+                if target.is_some()
+                    || item.item_id != c.item_id
+                    || item.issue_node_id != c.issue_node_id
+                    || item.repository != c.repository
+                    || item.tracker_repo_id != c.tracker_repo_id
+                    || item.issue_number != c.issue_number
+                {
+                    return Err(ClaimError::Changed);
+                }
+                target = Some(item);
+            }
         }
         if !page.has_next_page {
-            return Err(ClaimError::Changed);
+            break;
         }
         let next = page
             .end_cursor
@@ -108,7 +111,8 @@ pub(crate) fn fresh<R: ProjectReader>(
             return Err(ClaimError::Source(ProjectError::RepeatedCursor));
         }
         cursor = Some(next);
-    };
+    }
+    let item = target.ok_or(ClaimError::Changed)?;
     let issue = reader.issue(&item).map_err(ProjectError::IssueRead)?;
     if issue.node_id != item.issue_node_id
         || issue.repository != item.repository

@@ -197,6 +197,7 @@ fn claim_fixture() -> (
         assignees: Rc::clone(&shared_assignees),
         issue_reads: 0,
         failed_issue_read: None,
+        later_page: None,
         item: ProjectItem {
             item_id: "item-N7".into(),
             issue_node_id: "N7".into(),
@@ -293,6 +294,60 @@ fn verified_claim_assigns_once() {
     assert_eq!(*assignees.borrow(), vec!["bot"]);
     assert_eq!(projects.issue_reads, 2);
     assert_claim_state(&dir, "claimed", true, true);
+}
+
+#[test]
+fn later_project_page_failure_prevents_assignment_and_verification() {
+    let (dir, candidate, mut projects, mut writer, mut store) = claim_fixture();
+    projects.later_page = Some(Err(ProjectReadError {
+        operation: ReadOperation::ProjectPage,
+        project_id: Some(candidate.project_id.clone()),
+        item_id: None,
+        issue_id: None,
+        category: ReadCategory::Transport,
+        status: None,
+        code: "read-failed".into(),
+    }));
+    let mut prs = EmptyPullRequests;
+    assert!(matches!(
+        claim(
+            &mut store,
+            "task",
+            &candidate,
+            "bot",
+            &mut projects,
+            &mut prs,
+            &mut writer
+        ),
+        Err(ClaimError::Source(_))
+    ));
+    assert_eq!(writer.calls, 0);
+    assert_eq!(*projects.assignees.borrow(), Vec::<String>::new());
+    assert_eq!(projects.issue_reads, 0);
+    assert_claim_state(&dir, "preparing", false, false);
+}
+
+#[test]
+fn duplicate_issue_on_later_project_page_prevents_assignment_and_verification() {
+    let (dir, candidate, mut projects, mut writer, mut store) = claim_fixture();
+    projects.later_page = Some(Ok(vec![projects.item.clone()]));
+    let mut prs = EmptyPullRequests;
+    assert!(matches!(
+        claim(
+            &mut store,
+            "task",
+            &candidate,
+            "bot",
+            &mut projects,
+            &mut prs,
+            &mut writer
+        ),
+        Err(ClaimError::Changed)
+    ));
+    assert_eq!(writer.calls, 0);
+    assert_eq!(*projects.assignees.borrow(), Vec::<String>::new());
+    assert_eq!(projects.issue_reads, 0);
+    assert_claim_state(&dir, "preparing", false, false);
 }
 
 #[test]
@@ -399,21 +454,32 @@ struct ClaimProjects {
     assignees: Rc<RefCell<Vec<String>>>,
     issue_reads: usize,
     failed_issue_read: Option<usize>,
+    later_page: Option<Result<Vec<ProjectItem>, ProjectReadError>>,
     item: ProjectItem,
 }
 impl luthor::github::project::ProjectReader for ClaimProjects {
     fn page(
         &mut self,
         _: &str,
-        _: Option<&str>,
+        cursor: Option<&str>,
     ) -> Result<
         luthor::github::project::Page<luthor::github::project::ProjectItem>,
         luthor::github::project::ProjectReadError,
     > {
+        if cursor.is_some() {
+            return match self.later_page.take().expect("later page configured") {
+                Ok(items) => Ok(luthor::github::project::Page {
+                    items,
+                    has_next_page: false,
+                    end_cursor: None,
+                }),
+                Err(error) => Err(error),
+            };
+        }
         Ok(luthor::github::project::Page {
             items: vec![self.item.clone()],
-            has_next_page: false,
-            end_cursor: None,
+            has_next_page: self.later_page.is_some(),
+            end_cursor: self.later_page.as_ref().map(|_| "next".into()),
         })
     }
     fn issue(
