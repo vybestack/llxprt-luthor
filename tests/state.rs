@@ -1,3 +1,42 @@
+use rusqlite::Connection;
+
+#[test]
+fn persisted_capacity_is_authoritative_and_schema_version_is_checked() {
+    let dir = tempfile::tempdir().unwrap();
+    assert!(matches!(
+        StateStore::open(dir.path(), 0),
+        Err(StateError::InvalidCapacity)
+    ));
+    drop(StateStore::open(dir.path(), 1).unwrap());
+    assert!(matches!(
+        StateStore::open(dir.path(), 2),
+        Err(StateError::CapacityMismatch { .. })
+    ));
+    Connection::open(dir.path().join("state.sqlite3"))
+        .unwrap()
+        .pragma_update(None, "user_version", 99)
+        .unwrap();
+    assert!(matches!(
+        StateStore::open(dir.path(), 1),
+        Err(StateError::UnsupportedDatabaseVersion(99))
+    ));
+}
+
+#[test]
+fn failed_attempt_insert_rolls_back_its_reservation() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = StateStore::open(dir.path(), 2).unwrap();
+    store
+        .create_task("t1", "r", "i1", "repo", 1, "rev")
+        .unwrap();
+    store
+        .create_task("t2", "r", "i2", "repo", 2, "rev")
+        .unwrap();
+    store.reserve("t1", "a1").unwrap();
+    assert!(store.reserve("t2", "a1").is_err());
+    assert_eq!(store.reservation_count().unwrap(), 1);
+}
+
 use luthor::state::{StateError, StateStore};
 
 #[test]
@@ -21,9 +60,9 @@ fn persists_identity_evidence_and_reservations_transactionally() {
         store.evidence_kinds("t1").unwrap(),
         vec!["project", "direct_issue"]
     );
-    store.reserve("t1", "a1", 1).unwrap();
+    store.reserve("t1", "a1").unwrap();
     assert!(matches!(
-        store.reserve("t1", "a2", 1),
+        store.reserve("t1", "a2"),
         Err(StateError::Capacity { .. })
     ));
     assert_eq!(store.reservation_count().unwrap(), 1);

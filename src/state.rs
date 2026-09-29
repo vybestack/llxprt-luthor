@@ -16,6 +16,12 @@ pub enum StateError {
     DuplicateTask(String, String),
     #[error("capacity exhausted: {reserved} reservations for capacity {capacity}")]
     Capacity { reserved: usize, capacity: usize },
+    #[error("capacity must be positive")]
+    InvalidCapacity,
+    #[error("configured capacity {configured} does not match persisted capacity {persisted}")]
+    CapacityMismatch { configured: usize, persisted: usize },
+    #[error("unsupported database version {0}")]
+    UnsupportedDatabaseVersion(i32),
 }
 
 pub struct StateStore {
@@ -25,7 +31,10 @@ pub struct StateStore {
 }
 
 impl StateStore {
-    pub fn open(root: impl AsRef<Path>, _capacity: usize) -> Result<Self, StateError> {
+    pub fn open(root: impl AsRef<Path>, capacity: usize) -> Result<Self, StateError> {
+        if capacity == 0 {
+            return Err(StateError::InvalidCapacity);
+        }
         let root = root.as_ref();
         fs::create_dir_all(root)?;
         #[cfg(unix)]
@@ -39,37 +48,42 @@ impl StateStore {
             .write(true)
             .open(root.join("coordinator.lock"))?;
         lock.try_lock_exclusive().map_err(StateError::Io)?;
-        let connection = Connection::open(root.join("state.sqlite3"))?;
+        let mut connection = Connection::open(root.join("state.sqlite3"))?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.pragma_update(None, "foreign_keys", "ON")?;
-        connection.execute_batch("BEGIN IMMEDIATE;
-            CREATE TABLE IF NOT EXISTS tasks (
-                id TEXT PRIMARY KEY, tracker_repo_id TEXT NOT NULL, issue_node_id TEXT NOT NULL,
-                repository TEXT NOT NULL, issue_number INTEGER NOT NULL, state TEXT NOT NULL,
-                config_revision TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(tracker_repo_id, issue_node_id)
-            );
-            CREATE TABLE IF NOT EXISTS attempts (
-                id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id), lifecycle TEXT NOT NULL,
-                outcome TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE TABLE IF NOT EXISTS intents (
-                sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE,
-                task_id TEXT NOT NULL REFERENCES tasks(id), attempt_id TEXT, kind TEXT NOT NULL,
-                detail TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE TABLE IF NOT EXISTS reservations (
-                task_id TEXT PRIMARY KEY REFERENCES tasks(id), attempt_id TEXT NOT NULL UNIQUE,
-                status TEXT NOT NULL CHECK(status IN ('reserved','released')),
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE TABLE IF NOT EXISTS evidence (
-                sequence INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL REFERENCES tasks(id),
-                attempt_id TEXT, kind TEXT NOT NULL, payload TEXT NOT NULL,
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );
-            PRAGMA user_version=1;
-            COMMIT;")?;
+        let version: i32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if version > 2 {
+            return Err(StateError::UnsupportedDatabaseVersion(version));
+        }
+        let tx = connection.transaction()?;
+        if version == 0 {
+            tx.execute_batch("CREATE TABLE tasks (id TEXT PRIMARY KEY, tracker_repo_id TEXT NOT NULL, issue_node_id TEXT NOT NULL, repository TEXT NOT NULL, issue_number INTEGER NOT NULL, state TEXT NOT NULL, config_revision TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(tracker_repo_id, issue_node_id));
+                CREATE TABLE attempts (id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id), lifecycle TEXT NOT NULL, outcome TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+                CREATE TABLE intents (sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, task_id TEXT NOT NULL REFERENCES tasks(id), attempt_id TEXT, kind TEXT NOT NULL, detail TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+                CREATE TABLE reservations (task_id TEXT PRIMARY KEY REFERENCES tasks(id), attempt_id TEXT NOT NULL UNIQUE, status TEXT NOT NULL CHECK(status IN ('reserved','released')), created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+                CREATE TABLE evidence (sequence INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL REFERENCES tasks(id), attempt_id TEXT, kind TEXT NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);")?;
+        }
+        if version < 2 {
+            tx.execute_batch("CREATE TABLE IF NOT EXISTS state_meta (key TEXT PRIMARY KEY, value INTEGER NOT NULL);")?;
+            tx.execute(
+                "INSERT INTO state_meta(key,value) VALUES('capacity',?1)",
+                [capacity as i64],
+            )?;
+            tx.pragma_update(None, "user_version", 2)?;
+        } else {
+            let persisted: i64 = tx.query_row(
+                "SELECT value FROM state_meta WHERE key='capacity'",
+                [],
+                |row| row.get(0),
+            )?;
+            if persisted != capacity as i64 {
+                return Err(StateError::CapacityMismatch {
+                    configured: capacity,
+                    persisted: persisted as usize,
+                });
+            }
+        }
+        tx.commit()?;
         Ok(Self {
             connection,
             _lock: lock,
@@ -138,13 +152,13 @@ impl StateStore {
         Ok(self.connection.last_insert_rowid())
     }
 
-    pub fn reserve(
-        &mut self,
-        task_id: &str,
-        attempt_id: &str,
-        capacity: usize,
-    ) -> Result<(), StateError> {
+    pub fn reserve(&mut self, task_id: &str, attempt_id: &str) -> Result<(), StateError> {
         let tx = self.connection.transaction()?;
+        let capacity: usize = tx.query_row(
+            "SELECT value FROM state_meta WHERE key='capacity'",
+            [],
+            |r| r.get(0),
+        )?;
         let reserved: usize = tx.query_row(
             "SELECT COUNT(*) FROM reservations WHERE status='reserved'",
             [],
