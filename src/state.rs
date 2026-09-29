@@ -52,6 +52,7 @@ impl StateStore {
         }
         let lock = OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(root.join("coordinator.lock"))?;
