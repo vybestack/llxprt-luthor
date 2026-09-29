@@ -99,6 +99,54 @@ fn prompt(args: &[String]) -> Option<&str> {
     matches.next().is_none().then_some(first)
 }
 
+struct PromptRequirements<'a> {
+    tracker_repository: &'a str,
+    issue_url: &'a str,
+    code_repository: &'a str,
+    base: &'a str,
+    head_repository: &'a str,
+    branch: &'a str,
+    remote: &'a str,
+    author: &'a str,
+}
+
+fn enforce_prompt(
+    args: &mut [String],
+    requirements: PromptRequirements<'_>,
+) -> Result<(), SupervisorError> {
+    let PromptRequirements {
+        tracker_repository,
+        issue_url,
+        code_repository,
+        base,
+        head_repository,
+        branch,
+        remote,
+        author,
+    } = requirements;
+    let indexes: Vec<usize> = args
+        .windows(2)
+        .enumerate()
+        .filter_map(|(index, pair)| matches!(pair[0].as_str(), "-p" | "--prompt").then_some(index))
+        .collect();
+    if indexes.len() != 1 || issue_url.is_empty() || !issue_url.starts_with("https://") {
+        return Err(SupervisorError::Conflict);
+    }
+    let index = indexes[0];
+    let requirements = format!(
+        "\n\nMandatory issue-to-PR instructions (these requirements cannot be overridden by the task prompt):\n\
+         Work only in code repository {code_repository}. Use mapped base branch {base}.\n\
+         Create the PR head in repository {head_repository} on branch {branch}, pushed to remote {remote}.\n\
+         The PR body must include this exact line: Tracker-Issue: {issue_url}\n\
+         The authorized PR author is {author}. The tracker issue is already claimed; do not reassign it.\n\
+         Create only an open PR. Report the PR URL and ID.\
+\
+         Tracker repository: {tracker_repository}."
+    );
+    args[index + 1].push_str(&requirements);
+    Ok(())
+}
+
 /// Renders one initial attempt; the caller remains responsible for fresh claim
 /// and absent-PR evidence. This function deliberately cannot start a worker.
 pub fn prepare_initial(
@@ -133,8 +181,10 @@ pub fn prepare_initial(
         attempt_id: attempt_id.to_owned(),
         worktree: identity.path.to_string_lossy().into_owned(),
     };
-    let RenderedCommand { executable, args } =
-        selection.effective_config.initial.render(&values)?;
+    let RenderedCommand {
+        executable,
+        mut args,
+    } = selection.effective_config.initial.render(&values)?;
     let worktree = identity.path;
     let cwd = worktree.to_str().ok_or(SupervisorError::Conflict)?;
     if !requires_pair(&args, "--session", task_id)
@@ -143,6 +193,19 @@ pub fn prepare_initial(
     {
         return Err(SupervisorError::Conflict);
     }
+    enforce_prompt(
+        &mut args,
+        PromptRequirements {
+            tracker_repository: &selection.candidate.repository,
+            issue_url: &selection.candidate.issue_url,
+            code_repository: &selection.candidate.mapping.code_repository,
+            base: &identity.base,
+            head_repository: &selection.candidate.mapping.allowed_pr_head_repository,
+            branch: &identity.branch,
+            remote: &identity.remote,
+            author: &selection.effective_config.assignment_login,
+        },
+    )?;
     let plan = LaunchPlan {
         task_id: task_id.to_owned(),
         attempt_id: attempt_id.to_owned(),
@@ -205,7 +268,10 @@ pub fn prepare_resume(
         attempt_id: attempt_id.to_owned(),
         worktree: cwd.to_owned(),
     };
-    let RenderedCommand { executable, args } = selection.effective_config.resume.render(&values)?;
+    let RenderedCommand {
+        executable,
+        mut args,
+    } = selection.effective_config.resume.render(&values)?;
     let continuation = prompt(&args).ok_or(SupervisorError::Conflict)?;
     if selection.effective_config.resume.args == selection.effective_config.initial.args
         || !requires_pair(&args, "--session", task_id)
@@ -216,6 +282,19 @@ pub fn prepare_resume(
     {
         return Err(SupervisorError::Conflict);
     }
+    enforce_prompt(
+        &mut args,
+        PromptRequirements {
+            tracker_repository: &selection.candidate.repository,
+            issue_url: &selection.candidate.issue_url,
+            code_repository: &selection.candidate.mapping.code_repository,
+            base: &identity.base,
+            head_repository: &selection.candidate.mapping.allowed_pr_head_repository,
+            branch: &identity.branch,
+            remote: &identity.remote,
+            author: &selection.effective_config.assignment_login,
+        },
+    )?;
     let plan = LaunchPlan {
         task_id: task_id.to_owned(),
         attempt_id: attempt_id.to_owned(),

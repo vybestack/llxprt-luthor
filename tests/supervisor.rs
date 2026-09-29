@@ -132,6 +132,26 @@ fn intent_and_slot_survive_restart_and_failed_dispatch_stays_held() {
     let plan = prepare_initial(&mut store, "task", "attempt-1").unwrap();
     assert_eq!(plan.session_id, "task");
     assert!(plan.args.iter().any(|arg| arg.contains("attempt-1")));
+    let initial_prompt = plan.args.windows(2).find(|pair| pair[0] == "-p").unwrap()[1].as_str();
+    for required in [
+        "Work only in code repository org/code",
+        "mapped base branch main",
+        "PR head in repository org/code on branch luthor/task, pushed to remote origin",
+        "Tracker-Issue: https://github.com/org/tracker/issues/7",
+        "authorized PR author is operator",
+        "already claimed; do not reassign it",
+        "Create only an open PR",
+        "Report the PR URL and ID",
+    ] {
+        assert!(initial_prompt.contains(required), "missing {required}");
+    }
+    assert_eq!(
+        plan.args
+            .iter()
+            .filter(|arg| arg.as_str() == "-p" || arg.as_str() == "--prompt")
+            .count(),
+        1
+    );
     assert_eq!(store.reservation_count().unwrap(), 1);
     assert!(execute_with_binary(&mut store, &plan, &dir.path().join("absent-luthor")).is_err());
     assert!(execute_with_binary(&mut store, &plan, &dir.path().join("absent-luthor")).is_err());
@@ -811,11 +831,25 @@ fn paused_attempt_prepares_distinct_continuation_after_reopen() {
     assert_eq!(plan.worktree, initial.worktree);
     assert_eq!(plan.config_revision, initial.config_revision);
     assert_eq!(plan.attempt_id, "attempt-next");
-    assert!(plan.args.windows(2).any(|p| p
-        == [
-            "--prompt",
-            "Continue https://github.com/org/tracker/issues/7 for attempt-next"
-        ]));
+    let resume_prompt = plan
+        .args
+        .windows(2)
+        .find(|pair| pair[0] == "--prompt")
+        .unwrap()[1]
+        .as_str();
+    assert!(
+        resume_prompt
+            .starts_with("Continue https://github.com/org/tracker/issues/7 for attempt-next")
+    );
+    assert!(resume_prompt.contains("Tracker-Issue: https://github.com/org/tracker/issues/7"));
+    assert!(resume_prompt.contains("already claimed; do not reassign it"));
+    assert_eq!(
+        plan.args
+            .iter()
+            .filter(|arg| arg.as_str() == "-p" || arg.as_str() == "--prompt")
+            .count(),
+        1
+    );
     assert_eq!(
         store.latest_attempt("task").unwrap().as_deref(),
         Some("attempt-next")
