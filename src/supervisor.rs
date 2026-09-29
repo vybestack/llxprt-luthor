@@ -1202,8 +1202,10 @@ where
             let bytes = match result {
                 Ok(bytes) => bytes,
                 Err(error) => {
-                    record_log_failure(plan, store_root, stream, &error.to_string())?;
-                    stop_failed_log_child(&mut child, &registered)?;
+                    let evidence = record_log_failure(plan, store_root, stream, &error.to_string());
+                    let stopped = stop_failed_log_child(&mut child, &registered);
+                    stopped?;
+                    evidence?;
                     return Err(SupervisorError::ExecutionUnavailable);
                 }
             };
