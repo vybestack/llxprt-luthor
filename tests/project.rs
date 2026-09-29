@@ -450,3 +450,189 @@ fn direct_issue_errors_keep_context_for_repository_and_issue_responses() {
         assert!(!error.to_string().contains("secret"));
     }
 }
+
+use luthor::github::project::{
+    Issue, Page, ProjectError, ProjectItem, ProjectReadError, ReadCategory, ReadOperation,
+    enumerate_target,
+};
+
+struct FakeTargetReader {
+    pages: Vec<Result<Page<ProjectItem>, ProjectReadError>>,
+    page_cursors: Vec<Option<String>>,
+    issue_calls: Vec<String>,
+}
+
+impl FakeTargetReader {
+    fn new(pages: Vec<Result<Page<ProjectItem>, ProjectReadError>>) -> Self {
+        Self {
+            pages,
+            page_cursors: Vec::new(),
+            issue_calls: Vec::new(),
+        }
+    }
+}
+
+impl ProjectReader for FakeTargetReader {
+    fn page(
+        &mut self,
+        project_id: &str,
+        cursor: Option<&str>,
+    ) -> Result<Page<ProjectItem>, ProjectReadError> {
+        assert_eq!(project_id, "PROJECT");
+        self.page_cursors.push(cursor.map(str::to_owned));
+        self.pages.remove(0)
+    }
+
+    fn issue(&mut self, item: &ProjectItem) -> Result<Issue, ProjectReadError> {
+        self.issue_calls.push(item.item_id.clone());
+        Ok(Issue {
+            node_id: item.issue_node_id.clone(),
+            repository: item.repository.clone(),
+            tracker_repo_id: item.tracker_repo_id.clone(),
+            number: item.issue_number,
+            url: format!(
+                "https://github.com/{}/issues/{}",
+                item.repository, item.issue_number
+            ),
+            state: "open".into(),
+            assignees: vec![],
+            labels: vec![],
+            milestone: None,
+            milestone_id: None,
+            observed_at_unix_secs: 1,
+        })
+    }
+}
+
+fn target_item(index: u64, repository: &str, number: u64) -> ProjectItem {
+    ProjectItem {
+        item_id: format!("ITEM{index}"),
+        issue_node_id: format!("ISSUE{index}"),
+        repository: repository.into(),
+        tracker_repo_id: "REPO1".into(),
+        issue_number: number,
+        fields: vec![],
+        unsupported_fields: vec![],
+    }
+}
+
+fn target_page(items: Vec<ProjectItem>, next: Option<&str>) -> Page<ProjectItem> {
+    Page {
+        items,
+        has_next_page: next.is_some(),
+        end_cursor: next.map(str::to_owned),
+    }
+}
+
+#[test]
+fn target_enumeration_reads_only_target_across_all_pages() {
+    let unrelated = (0..100)
+        .map(|index| target_item(index, "org/tracker", index + 100))
+        .collect();
+    let target = target_item(100, "org/tracker", 7);
+    let mut reader = FakeTargetReader::new(vec![
+        Ok(target_page(unrelated, Some("NEXT"))),
+        Ok(target_page(
+            vec![target_item(101, "other/tracker", 7), target.clone()],
+            None,
+        )),
+    ]);
+    let result = enumerate_target(&mut reader, "PROJECT", "org/tracker", 7).unwrap();
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].0, target);
+    assert_eq!(result[0].1.node_id, "ISSUE100");
+    assert_eq!(reader.issue_calls, ["ITEM100"]);
+    assert_eq!(reader.page_cursors, [None, Some("NEXT".into())]);
+}
+
+#[test]
+fn target_enumeration_reports_missing_and_malformed_pages() {
+    for (category, code) in [
+        (ReadCategory::NotFound, "command-failed"),
+        (ReadCategory::Malformed, "invalid-project-items"),
+    ] {
+        let error = ProjectReadError {
+            operation: ReadOperation::ProjectPage,
+            project_id: Some("PROJECT".into()),
+            item_id: None,
+            issue_id: None,
+            category,
+            status: None,
+            code: code.into(),
+        };
+        let mut reader = FakeTargetReader::new(vec![
+            Ok(target_page(
+                vec![target_item(0, "org/tracker", 7)],
+                Some("NEXT"),
+            )),
+            Err(error.clone()),
+        ]);
+        assert_eq!(
+            enumerate_target(&mut reader, "PROJECT", "org/tracker", 7),
+            Err(ProjectError::Read(error))
+        );
+        assert_eq!(reader.page_cursors, [None, Some("NEXT".into())]);
+        assert_eq!(reader.issue_calls, ["ITEM0"]);
+    }
+}
+
+#[test]
+fn target_enumeration_validates_unrelated_items_and_pagination() {
+    let mut invalid = target_item(0, "other/tracker", 8);
+    invalid.issue_node_id.clear();
+    let mut reader = FakeTargetReader::new(vec![Ok(target_page(vec![invalid], None))]);
+    assert_eq!(
+        enumerate_target(&mut reader, "PROJECT", "org/tracker", 7),
+        Err(ProjectError::InvalidItem("ITEM0".into()))
+    );
+    assert!(reader.issue_calls.is_empty());
+
+    let mut reader = FakeTargetReader::new(vec![Ok(Page {
+        items: vec![target_item(0, "other/tracker", 8)],
+        has_next_page: true,
+        end_cursor: None,
+    })]);
+    assert_eq!(
+        enumerate_target(&mut reader, "PROJECT", "org/tracker", 7),
+        Err(ProjectError::MissingCursor)
+    );
+    assert!(reader.issue_calls.is_empty());
+}
+
+#[test]
+fn target_enumeration_rejects_duplicates_and_repeated_cursors_without_direct_reads() {
+    let first = target_item(0, "other/tracker", 8);
+    let mut duplicate_issue = target_item(1, "other/tracker", 9);
+    duplicate_issue.issue_node_id = first.issue_node_id.clone();
+    let mut reader = FakeTargetReader::new(vec![Ok(target_page(
+        vec![first.clone(), duplicate_issue],
+        None,
+    ))]);
+    assert_eq!(
+        enumerate_target(&mut reader, "PROJECT", "org/tracker", 7),
+        Err(ProjectError::Duplicate(first.issue_node_id.clone()))
+    );
+    assert!(reader.issue_calls.is_empty());
+
+    let mut reader = FakeTargetReader::new(vec![
+        Ok(target_page(vec![first], Some("NEXT"))),
+        Ok(target_page(vec![], Some("NEXT"))),
+    ]);
+    assert_eq!(
+        enumerate_target(&mut reader, "PROJECT", "org/tracker", 7),
+        Err(ProjectError::RepeatedCursor)
+    );
+    assert_eq!(reader.page_cursors, [None, Some("NEXT".into())]);
+    assert!(reader.issue_calls.is_empty());
+}
+
+#[test]
+fn target_enumeration_propagates_malformed_unrelated_gh_page() {
+    let json = response(r#"{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}"#)
+        .replace(r#""number":7"#, r#""number":null"#);
+    let (_dir, mut reader) = reader(&json);
+    let error = enumerate_target(&mut reader, "PROJECT", "other/tracker", 9).unwrap_err();
+    assert!(
+        matches!(error, ProjectError::Read(ref read) if read.category == ReadCategory::Malformed)
+    );
+}
