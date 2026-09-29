@@ -1,8 +1,16 @@
-use luthor::github::pull_request::{
-    ErrorCategory, LookupError, LookupResult, PullRequestReader, lookup,
+use luthor::{
+    claim::{AssignmentError, ClaimError, claim},
+    config::{CommandTemplate, Config, Mapping, Marker, Source},
+    eligibility::Candidate,
+    github::{
+        project::{ProjectItem, ProjectReadError, ReadCategory, ReadOperation},
+        pull_request::{ErrorCategory, LookupError, LookupResult, PullRequestReader, lookup},
+    },
+    state::StateStore,
 };
+use rusqlite::Connection;
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 const REPO: &str = "code/project";
 const ISSUE: &str = "https://github.com/tracker/issues/7";
@@ -124,18 +132,13 @@ fn failed_later_page_is_not_reported_as_absent() {
         .insert(1, (0..100).map(|n| item(n, "unrelated")).collect());
     assert!(lookup(&mut fake, REPO, ISSUE).is_err());
 }
-#[test]
-fn verified_claim_assigns_once() {
-    use luthor::{
-        claim::claim,
-        config::{CommandTemplate, Config, Mapping, Marker, Source},
-        eligibility::Candidate,
-        github::project::ProjectItem,
-        state::StateStore,
-    };
-    use rusqlite::Connection;
-    use std::{cell::RefCell, rc::Rc};
-
+fn claim_fixture() -> (
+    tempfile::TempDir,
+    Candidate,
+    ClaimProjects,
+    ClaimWriter,
+    StateStore,
+) {
     let dir = tempfile::tempdir().unwrap();
     let config = Config {
         state_root: dir.path().into(),
@@ -190,9 +193,10 @@ fn verified_claim_assigns_once() {
         source: config.sources[0].clone(),
     };
     let shared_assignees = Rc::new(RefCell::new(Vec::<String>::new()));
-    let mut projects = ClaimProjects {
+    let projects = ClaimProjects {
         assignees: Rc::clone(&shared_assignees),
         issue_reads: 0,
+        failed_issue_read: None,
         item: ProjectItem {
             item_id: "item-N7".into(),
             issue_node_id: "N7".into(),
@@ -203,16 +207,78 @@ fn verified_claim_assigns_once() {
             unsupported_fields: vec![],
         },
     };
-    let mut prs = EmptyPullRequests;
-    let mut writer = ClaimWriter {
+    let writer = ClaimWriter {
         assignees: Rc::clone(&shared_assignees),
         calls: 0,
+        fail: false,
     };
     let mut store = StateStore::open(dir.path(), 1).unwrap();
     store
         .create_task("task", &candidate, "rev", &config)
         .unwrap();
+    (dir, candidate, projects, writer, store)
+}
 
+fn assert_claim_state(dir: &tempfile::TempDir, phase: &str, intent: bool, verified: bool) {
+    let db = Connection::open(dir.path().join("state.sqlite3")).unwrap();
+    let actual_phase: String = db
+        .query_row("SELECT state FROM tasks WHERE id='task'", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(actual_phase, phase);
+    let intents: Vec<(String, String, Value)> = db
+        .prepare("SELECT id, kind, detail FROM intents WHERE task_id='task' ORDER BY sequence")
+        .unwrap()
+        .query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get::<_, String>(2)?))
+        })
+        .unwrap()
+        .map(|row| {
+            let (id, kind, detail) = row.unwrap();
+            (id, kind, serde_json::from_str(&detail).unwrap())
+        })
+        .collect();
+    assert_eq!(
+        intents,
+        if intent {
+            vec![(
+                "claim-task".into(),
+                "claim_assignment".into(),
+                json!({"principal":"bot","repository":"org/tracker","number":7}),
+            )]
+        } else {
+            vec![]
+        }
+    );
+    let evidence: Vec<(String, String)> = db
+        .prepare("SELECT kind, payload FROM evidence WHERE task_id='task' ORDER BY sequence")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        evidence
+            .iter()
+            .map(|(kind, _)| kind.as_str())
+            .collect::<Vec<_>>(),
+        if verified {
+            vec!["selection", "claim_verified"]
+        } else {
+            vec!["selection"]
+        }
+    );
+    if verified {
+        assert_eq!(evidence[1].1, "bot");
+    }
+}
+
+#[test]
+fn verified_claim_assigns_once() {
+    let (dir, candidate, mut projects, mut writer, mut store) = claim_fixture();
+    let assignees = Rc::clone(&projects.assignees);
+    let mut prs = EmptyPullRequests;
     claim(
         &mut store,
         "task",
@@ -223,24 +289,117 @@ fn verified_claim_assigns_once() {
         &mut writer,
     )
     .unwrap();
-
     assert_eq!(writer.calls, 1);
-    assert_eq!(*shared_assignees.borrow(), vec!["bot"]);
+    assert_eq!(*assignees.borrow(), vec!["bot"]);
     assert_eq!(projects.issue_reads, 2);
+    assert_claim_state(&dir, "claimed", true, true);
+}
+
+#[test]
+fn held_on_ambiguous_assignment_never_reissues_write() {
+    let (dir, candidate, mut projects, mut writer, mut store) = claim_fixture();
+    writer.fail = true;
+    let mut prs = EmptyPullRequests;
+    assert!(matches!(
+        claim(
+            &mut store,
+            "task",
+            &candidate,
+            "bot",
+            &mut projects,
+            &mut prs,
+            &mut writer
+        ),
+        Err(ClaimError::Assignment)
+    ));
+    assert_eq!(writer.calls, 1);
+    assert_eq!(*projects.assignees.borrow(), vec!["bot"]);
+    assert_claim_state(&dir, "held", true, false);
     drop(store);
-    let db = Connection::open(dir.path().join("state.sqlite3")).unwrap();
-    let phase: String = db
-        .query_row("SELECT state FROM tasks WHERE id='task'", [], |row| {
-            row.get(0)
-        })
-        .unwrap();
-    assert_eq!(phase, "claimed");
+
+    // The write could have succeeded despite the failed response; even a fresh read with
+    // no assignee must not trigger a second assignment after restart.
+    projects.assignees.borrow_mut().clear();
+    writer.fail = false;
+    let mut reopened = StateStore::open(dir.path(), 1).unwrap();
+    assert!(matches!(
+        claim(
+            &mut reopened,
+            "task",
+            &candidate,
+            "bot",
+            &mut projects,
+            &mut prs,
+            &mut writer
+        ),
+        Err(ClaimError::State(
+            luthor::state::StateError::InvalidSelection
+        ))
+    ));
+    assert_eq!(projects.issue_reads, 2);
+    assert_eq!(writer.calls, 1);
+    assert_claim_state(&dir, "held", true, false);
+}
+
+#[test]
+fn preexisting_linked_pr_prevents_claim() {
+    let (dir, candidate, mut projects, mut writer, mut store) = claim_fixture();
+    let body = format!("Tracker-Issue: {}", candidate.issue_url);
+    let mut prs = Fake::default();
+    prs.pages.insert(1, vec![item(9, &body)]);
+    let mut linked = detail(9, &body);
+    linked["html_url"] = json!("https://github.com/org/code/pull/9");
+    linked["base"]["repo"]["full_name"] = json!("org/code");
+    prs.details.insert(9, linked);
+    assert!(matches!(
+        claim(
+            &mut store,
+            "task",
+            &candidate,
+            "bot",
+            &mut projects,
+            &mut prs,
+            &mut writer
+        ),
+        Err(ClaimError::ExistingPr)
+    ));
+    assert_eq!(writer.calls, 0);
+    assert_eq!(projects.issue_reads, 1);
+    assert_claim_state(&dir, "preparing", false, false);
+}
+
+#[test]
+fn postwrite_project_error_holds_intent() {
+    let (dir, candidate, mut projects, mut writer, mut store) = claim_fixture();
+    projects.failed_issue_read = Some(2);
+    let mut prs = EmptyPullRequests;
+    assert!(matches!(
+        claim(
+            &mut store,
+            "task",
+            &candidate,
+            "bot",
+            &mut projects,
+            &mut prs,
+            &mut writer
+        ),
+        Err(ClaimError::Verify)
+    ));
+    assert_eq!(writer.calls, 1);
+    assert_eq!(projects.issue_reads, 2);
+    assert_eq!(*projects.assignees.borrow(), vec!["bot"]);
+    assert_claim_state(&dir, "held", true, false);
+    drop(store);
+    let reopened = StateStore::open(dir.path(), 1).unwrap();
+    assert_eq!(reopened.evidence_kinds("task").unwrap(), vec!["selection"]);
+    assert_claim_state(&dir, "held", true, false);
 }
 
 struct ClaimProjects {
-    assignees: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+    assignees: Rc<RefCell<Vec<String>>>,
     issue_reads: usize,
-    item: luthor::github::project::ProjectItem,
+    failed_issue_read: Option<usize>,
+    item: ProjectItem,
 }
 impl luthor::github::project::ProjectReader for ClaimProjects {
     fn page(
@@ -262,6 +421,17 @@ impl luthor::github::project::ProjectReader for ClaimProjects {
         _: &luthor::github::project::ProjectItem,
     ) -> Result<luthor::github::project::Issue, luthor::github::project::ProjectReadError> {
         self.issue_reads += 1;
+        if self.failed_issue_read == Some(self.issue_reads) {
+            return Err(ProjectReadError {
+                operation: ReadOperation::DirectIssue,
+                project_id: None,
+                item_id: Some(self.item.item_id.clone()),
+                issue_id: Some(self.item.issue_node_id.clone()),
+                category: ReadCategory::Transport,
+                status: None,
+                code: "read-failed".into(),
+            });
+        }
         Ok(luthor::github::project::Issue {
             node_id: "N7".into(),
             repository: "org/tracker".into(),
@@ -289,8 +459,9 @@ impl luthor::github::pull_request::PullRequestReader for EmptyPullRequests {
 }
 
 struct ClaimWriter {
-    assignees: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+    assignees: Rc<RefCell<Vec<String>>>,
     calls: usize,
+    fail: bool,
 }
 impl luthor::claim::AssignmentWriter for ClaimWriter {
     fn assign(
@@ -301,6 +472,9 @@ impl luthor::claim::AssignmentWriter for ClaimWriter {
     ) -> Result<(), luthor::claim::AssignmentError> {
         self.calls += 1;
         self.assignees.borrow_mut().push(principal.into());
+        if self.fail {
+            return Err(AssignmentError { ambiguous: true });
+        }
         Ok(())
     }
 }
