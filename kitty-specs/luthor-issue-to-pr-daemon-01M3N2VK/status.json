@@ -50,7 +50,7 @@
     },
     "WP02": {
       "actor": "user",
-      "agent": "deep-bug-investigator",
+      "agent": null,
       "agent_profile": "__resolved_profile_absent__",
       "agent_profile_version": "__resolved_profile_version_absent__",
       "force_count": 6,
@@ -58,6 +58,9 @@
       "last_event_id": "01M3P4YQGMAH3CJPPRTMZYP3WX",
       "last_transition_at": "2026-09-29T08:36:59.540285+00:00",
       "model": "__resolved_model_absent__",
+      "notes": [
+        "Date GraphQL selection omits date scalar needed by the parser; unrelated Date blocks eligible Status discovery"
+      ],
       "provider": "__resolved_provider_absent__",
       "review": null,
       "review_result": {
@@ -67,12 +70,12 @@
         "verdict": "changes_requested"
       },
       "role": "reviewer",
-      "shell_pid": 4147,
-      "shell_pid_created_at": "1790670872.536664",
+      "shell_pid": null,
+      "shell_pid_created_at": null,
       "subtasks": {
-        "T003": "done",
-        "T004": "done",
-        "T005": "done"
+        "T003": "planned",
+        "T004": "planned",
+        "T005": "planned"
       }
     },
     "WP03": {
