@@ -1,4 +1,4 @@
-use luthor::{config::Config, eligibility, github::project::GhProjectReader, state::StateStore};
+use luthor::{config::Config, eligibility, github::project::GhProjectReader};
 use serde_json::json;
 use std::{env, fs, path::PathBuf, process::ExitCode};
 
@@ -36,7 +36,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let config = Config::from_json(&fs::read_to_string(path)?)?;
-    let _state = StateStore::open(&config.state_root, config.capacity)?;
     let mut reader = GhProjectReader::new(PathBuf::from("gh"));
     let candidates = eligibility::select(&mut reader, &config.sources, &config.mappings)?;
     let sources: std::collections::HashMap<_, _> = config
@@ -44,6 +43,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .iter()
         .map(|source| (source.project_id.as_str(), source))
         .collect();
+    let mut output_lines = Vec::with_capacity(candidates.len());
     for candidate in candidates {
         let source = sources[candidate.project_id.as_str()];
         let output = json!({
@@ -66,7 +66,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 "eligibility": "selected",
             }
         });
-        println!("{}", serde_json::to_string(&output)?);
+        output_lines.push(serde_json::to_string(&output)?);
+    }
+    for line in output_lines {
+        println!("{line}");
     }
     Ok(())
 }

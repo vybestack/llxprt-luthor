@@ -2,7 +2,7 @@
 
 ## Purpose and boundary
 
-Luthor is a small Rust daemon that discovers eligible GitHub issues, assigns them, creates daemon-owned worktrees, and runs a configured headless CLI agent until it can verify an open pull request (PR). The first agent target is `llxprt-code-rs`. The agent does the software work; Luthor owns selection, local supervision, evidence, and operator controls. Luthor does not reuse Luther or llxprt-jefe state or directories.
+Luthor is a small Rust daemon that discovers eligible GitHub issues, assigns them, creates daemon-owned worktrees, and runs a configured headless CLI agent until it can verify an open pull request (PR). The `discover` CLI command is read-only with respect to both local state and GitHub: it validates configuration, reads Project and issue data, and emits candidates without opening the state store or writing to GitHub. The first agent target is `llxprt-code-rs`. The agent does the software work; Luthor owns selection, local supervision, evidence, and operator controls. Luthor does not reuse Luther or llxprt-jefe state or directories.
 
 V1 stops at a verified open PR. Draft PRs and failing or pending checks count; show checks without using them as a completion gate. A successful agent exit alone never completes a task. There are no automatic retries, code reviews, repairs, feedback loops, merges, or unassignments. A stopped or failed attempt with no verified PR waits for an explicit operator decision. Luthor must not automatically select another eligible issue as a replacement for a held task beyond the configured capacity and source rules.
 

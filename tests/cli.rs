@@ -4,26 +4,31 @@ use tempfile::tempdir;
 
 fn run(fake_response: &str) -> std::process::Output {
     let dir = tempdir().unwrap();
-    let bin = dir.path().join("gh");
+    run_in(dir.path(), fake_response, 1)
+}
+
+fn run_in(dir: &std::path::Path, fake_response: &str, capacity: usize) -> std::process::Output {
+    let bin = dir.join("gh");
     let response = fake_response.replace('\'', "'\\''");
     let script = format!(
         "#!/bin/sh\ncase \"$2\" in graphql) printf '%s\\n' '{response}' ;; repos/org/tracker) printf '%s\\n' '{{\"node_id\":\"REPO_NODE\"}}' ;; repos/org/tracker/issues/7?per_page=100) printf '%s\\n' '{{\"node_id\":\"ISSUE_NODE\",\"repository_url\":\"https://api.github.com/repos/org/tracker\",\"html_url\":\"https://github.com/org/tracker/issues/7\",\"number\":7,\"state\":\"open\",\"assignees\":[],\"labels\":[{{\"name\":\"ready\"}}],\"milestone\":null}}' ;; *) printf '%s\\n' '{{}}' ;; esac\n"
     );
     fs::write(&bin, script).unwrap();
     fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
-    let config = dir.path().join("config.json");
+    let config = dir.join("config.json");
     fs::write(
         &config,
         format!(
-            r#"{{"state_root":"{}","worktree_root":"{}","capacity":1,"sources":[{{"project_id":"PROJECT","repositories":["org/tracker"],"ready_marker":{{"kind":"label","name":"ready"}},"milestone":null}}],"mappings":[{{"tracker_repository":"org/tracker","code_repository":"org/code","checkout":"/tmp/code","base_branch":"main","push_remote":"origin","allowed_pr_head_repository":"org/head","allowed_pr_author":"agent"}}],"initial":{{"executable":"agent","args":[]}},"resume":{{"executable":"agent","args":[]}}}}"#,
-            dir.path().join("state").display(),
-            dir.path().display()
+            r#"{{"state_root":"{}","worktree_root":"{}","capacity":{},"sources":[{{"project_id":"PROJECT","repositories":["org/tracker"],"ready_marker":{{"kind":"label","name":"ready"}},"milestone":null}}],"mappings":[{{"tracker_repository":"org/tracker","code_repository":"org/code","checkout":"/tmp/code","base_branch":"main","push_remote":"origin","allowed_pr_head_repository":"org/head","allowed_pr_author":"agent"}}],"initial":{{"executable":"agent","args":[]}},"resume":{{"executable":"agent","args":[]}}}}"#,
+            dir.join("state").display(),
+            dir.display(),
+            capacity
         ),
     )
     .unwrap();
     Command::new(env!("CARGO_BIN_EXE_luthor"))
         .args(["discover", "--config", config.to_str().unwrap()])
-        .env("PATH", format!("{}:/usr/bin:/bin", dir.path().display()))
+        .env("PATH", format!("{}:/usr/bin:/bin", dir.display()))
         .output()
         .unwrap()
 }
@@ -99,4 +104,44 @@ fn discover_fails_closed_for_malformed_or_non_issue_project() {
     let non_issue = run(&project(r#"{"__typename":"DraftIssue","title":"draft"}"#));
     assert!(!non_issue.status.success());
     assert!(non_issue.stdout.is_empty());
+}
+
+#[test]
+fn discover_does_not_create_state_after_success_or_failure() {
+    let dir = tempdir().unwrap();
+    let state = dir.path().join("state");
+    let success = run_in(
+        dir.path(),
+        &project(
+            r#"{"__typename":"Issue","id":"ISSUE_NODE","number":7,"repository":{"id":"REPO_NODE","nameWithOwner":"org/tracker"}}"#,
+        ),
+        1,
+    );
+    assert!(success.status.success());
+    assert!(!state.exists());
+
+    let failure = run_in(dir.path(), r#"{"data":{"node":{"items":null}}}"#, 1);
+    assert!(!failure.status.success());
+    assert!(failure.stdout.is_empty());
+    assert!(!state.exists());
+}
+
+#[test]
+fn discover_ignores_live_state_lock_and_capacity_mismatch() {
+    let dir = tempdir().unwrap();
+    let state = dir.path().join("state");
+    let _store = luthor::state::StateStore::open(&state, 1).unwrap();
+    let output = run_in(
+        dir.path(),
+        &project(
+            r#"{"__typename":"Issue","id":"ISSUE_NODE","number":7,"repository":{"id":"REPO_NODE","nameWithOwner":"org/tracker"}}"#,
+        ),
+        2,
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8(output.stdout).unwrap().lines().count(), 1);
 }
