@@ -1,7 +1,7 @@
 {
-  "event_count": 114,
-  "last_event_id": "01M3Q5BC1E9Q1V4FY5EXNEJWPQ",
-  "materialized_at": "2026-09-29T18:03:08.206716+00:00",
+  "event_count": 115,
+  "last_event_id": "01M3Q5NHGA2JSNC8VA5PH2JMVJ",
+  "materialized_at": "2026-09-29T18:08:41.482600+00:00",
   "mission_number": "",
   "mission_slug": "luthor-issue-to-pr-daemon-01M3N2VK",
   "mission_type": "software-dev",
@@ -13,8 +13,8 @@
     "done": 0,
     "for_review": 0,
     "in_progress": 0,
-    "in_review": 1,
-    "planned": 2
+    "in_review": 0,
+    "planned": 3
   },
   "work_packages": {
     "WP01": {
@@ -81,14 +81,14 @@
       }
     },
     "WP03": {
-      "actor": "independent-wp03-reviewer",
+      "actor": "user",
       "agent": "independent-wp03-reviewer",
       "agent_profile": "__resolved_profile_absent__",
       "agent_profile_version": "__resolved_profile_version_absent__",
-      "force_count": 11,
-      "lane": "in_review",
-      "last_event_id": "01M3Q5BC1E9Q1V4FY5EXNEJWPQ",
-      "last_transition_at": "2026-09-29T18:03:08.206716+00:00",
+      "force_count": 12,
+      "lane": "planned",
+      "last_event_id": "01M3Q5NHGA2JSNC8VA5PH2JMVJ",
+      "last_transition_at": "2026-09-29T18:08:41.482600+00:00",
       "model": "__resolved_model_absent__",
       "notes": [
         "WP03 fix integrated; root fmt, locked offline all-target tests, and strict Clippy passed.",
@@ -100,9 +100,9 @@
       "provider": "__resolved_provider_absent__",
       "review": null,
       "review_result": {
-        "feedback_path": "/Volumes/XS1000/acoliver/projects/llxprt-luthor/branch-1/kitty-specs/luthor-issue-to-pr-daemon-01M3N2VK/tasks/WP03-claim-worktree-agent/review-cycle-12.md",
-        "reference": "review-cycle://luthor-issue-to-pr-daemon-01M3N2VK/WP03-claim-worktree-agent/review-cycle-12.md",
-        "reviewer": "deepthinker",
+        "feedback_path": "/Volumes/XS1000/acoliver/projects/llxprt-luthor/branch-1/kitty-specs/luthor-issue-to-pr-daemon-01M3N2VK/tasks/WP03-claim-worktree-agent/review-cycle-13.md",
+        "reference": "review-cycle://luthor-issue-to-pr-daemon-01M3N2VK/WP03-claim-worktree-agent/review-cycle-13.md",
+        "reviewer": "user",
         "verdict": "changes_requested"
       },
       "role": "reviewer",
