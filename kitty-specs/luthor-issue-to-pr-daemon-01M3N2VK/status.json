@@ -92,7 +92,8 @@
       "model": "__resolved_model_absent__",
       "notes": [
         "WP03 fix integrated; root fmt, locked offline all-target tests, and strict Clippy passed.",
-        "Review passed: verified claim and optional milestone identity, exhaustive PR preflight, worktree and session identity, gated supervision, conservative restart capacity, operator controls and root checks. Shared state and coordinator ownership is recorded in WP03."
+        "Review passed: verified claim and optional milestone identity, exhaustive PR preflight, worktree and session identity, gated supervision, conservative restart capacity, operator controls and root checks. Shared state and coordinator ownership is recorded in WP03.",
+        "Documented command JSON now parses and renders initial/resume argv with task-scoped session and distinct attempt prompt; root checks passed."
       ],
       "provider": "__resolved_provider_absent__",
       "review": null,
