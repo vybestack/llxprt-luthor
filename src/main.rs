@@ -1,7 +1,9 @@
 use luthor::{
     claim::GhAssignmentWriter,
     config::Config,
-    coordinator::{DispatchDependencies, ProductionLauncher, dispatch_one},
+    coordinator::{
+        DispatchDependencies, ProductionLauncher, ResumeDependencies, dispatch_one, resume_one,
+    },
     eligibility,
     github::{project::GhProjectReader, pull_request::GhPullRequestReader},
     state::StateStore,
@@ -35,13 +37,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         Some(command @ ("pause" | "reconcile")) => mutate(command, args.collect()),
         Some("discover") => discover(args.collect()),
         Some("dispatch") => dispatch(args.collect()),
+        Some("resume") => resume(args.collect()),
         Some("--help" | "-h") => {
             println!(
-                "Usage: luthor discover --config <path>\n       luthor dispatch --config <path> --repository owner/repo --issue N --config-revision REV [--execute]\n       luthor status --config <path>\n       luthor show TASK --config <path>\n       luthor logs TASK [--attempt ATTEMPT] --config <path>"
+                "Usage: luthor discover --config <path>\n       luthor dispatch --config <path> --repository owner/repo --issue N --config-revision REV [--execute]\n       luthor resume TASK --config <path> --execute\n       luthor status --config <path>\n       luthor show TASK --config <path>\n       luthor logs TASK [--attempt ATTEMPT] --config <path>"
             );
             Ok(())
         }
-        _ => Err("expected `discover` or `dispatch`".into()),
+        _ => Err("expected `discover`, `dispatch`, or `resume`".into()),
     }
 }
 
@@ -253,4 +256,59 @@ fn random_id() -> Result<String, std::io::Error> {
     let mut bytes = [0u8; 16];
     fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+fn resume(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
+    if !(args.len() == 3 || args.len() == 4)
+        || args[1] != "--config"
+        || args[2].starts_with('-')
+        || (args.len() == 4 && args[3] != "--execute")
+    {
+        return Err("expected TASK --config PATH [--execute]".into());
+    }
+    let task_id = &args[0];
+    let path = &args[2];
+    if args.len() == 3 {
+        return Err("resume held: pass --execute to authorize worker launch".into());
+    }
+    if task_id.is_empty() || task_id.starts_with('-') {
+        return Err("invalid task id".into());
+    }
+    let config = Config::from_json(&fs::read_to_string(path)?)?;
+    let attempt_id = random_id()?;
+    let mut store = StateStore::open(&config.state_root, config.capacity)?;
+    if store.task_phase(task_id)?.is_none() {
+        return Err("task not found".into());
+    }
+    let mut projects = GhProjectReader::new(PathBuf::from("gh"));
+    let mut prs = GhPullRequestReader::new(PathBuf::from("gh"));
+    let mut launcher = ProductionLauncher;
+    match resume_one(
+        &mut store,
+        ResumeDependencies {
+            task_id,
+            attempt_id: &attempt_id,
+            projects: &mut projects,
+            prs: &mut prs,
+            launcher: &mut launcher,
+        },
+    ) {
+        Ok(_) => println!(
+            "{}",
+            json!({"task_id":task_id,"attempt_id":attempt_id,"status":"resumed"})
+        ),
+        Err(error) => {
+            let status = if store.task_phase(task_id)?.as_deref() == Some("held") {
+                "held"
+            } else {
+                "failed"
+            };
+            println!(
+                "{}",
+                json!({"task_id":task_id,"attempt_id":attempt_id,"status":status})
+            );
+            return Err(format!("resume {status}: {}", safe_error_stage(&error)).into());
+        }
+    }
+    Ok(())
 }
