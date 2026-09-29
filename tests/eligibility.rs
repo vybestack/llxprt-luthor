@@ -61,6 +61,7 @@ fn issue(state: &str, labels: Vec<&str>, assignees: Vec<&str>, milestone: Option
         repository: "org/tracker".into(),
         tracker_repo_id: "R1".into(),
         number: 7,
+        url: "https://github.com/org/tracker/issues/7".into(),
         state: state.into(),
         assignees: assignees.into_iter().map(str::to_string).collect(),
         labels: labels.into_iter().map(str::to_string).collect(),
@@ -114,6 +115,10 @@ fn requires_membership_direct_open_unassigned_exact_label_and_milestone() {
     )
     .unwrap();
     assert_eq!(candidates.len(), 1);
+    assert_eq!(
+        candidates[0].issue_url,
+        "https://github.com/org/tracker/issues/7"
+    );
     let mut wrong = Fake {
         issues: vec![issue("open", vec!["OK for Luther"], vec![], Some("0.12.0"))],
         calls: 0,
@@ -136,7 +141,7 @@ fn requires_membership_direct_open_unassigned_exact_label_and_milestone() {
 }
 
 #[test]
-fn direct_issue_repository_id_must_match_project_item() {
+fn direct_issue_url_must_match_project_item() {
     let mut fake = Fake {
         pages: vec![Page {
             items: vec![item("I1", "N7", vec![])],
@@ -147,6 +152,21 @@ fn direct_issue_repository_id_must_match_project_item() {
         calls: 0,
         fail_page: false,
     };
+    fake.issues[0].url = "https://github.com/org/tracker/issues/8".into();
+    assert!(
+        select(
+            &mut fake,
+            &[source(
+                Marker::Label {
+                    name: "ready".into()
+                },
+                None
+            )],
+            &[mapping()],
+        )
+        .is_err()
+    );
+    fake.issues[0].url = "https://github.com/org/tracker/issues/7".into();
     fake.issues[0].tracker_repo_id = "different-repository-id".into();
     assert!(
         select(

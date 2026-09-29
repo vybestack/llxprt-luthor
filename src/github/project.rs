@@ -23,6 +23,7 @@ pub struct Issue {
     pub repository: String,
     pub tracker_repo_id: String,
     pub number: u64,
+    pub url: String,
     pub state: String,
     pub assignees: Vec<String>,
     pub labels: Vec<String>,
@@ -415,6 +416,14 @@ impl ProjectReader for GhProjectReader {
         if number != item.issue_number {
             return Err("issue-number-mismatch".to_owned().into());
         }
+        let url = required_string(&value, "html_url", "invalid-issue")?;
+        let expected_url = format!(
+            "https://github.com/{}/issues/{}",
+            item.repository, item.issue_number
+        );
+        if url != expected_url {
+            return Err("issue-url-mismatch".to_owned().into());
+        }
         let state = required_string(&value, "state", "invalid-issue")?;
         let assignees = value
             .get("assignees")
@@ -449,6 +458,7 @@ impl ProjectReader for GhProjectReader {
             repository: repository.to_owned(),
             tracker_repo_id: repository_id,
             number,
+            url,
             state,
             assignees,
             labels,
@@ -491,6 +501,11 @@ pub fn enumerate<R: ProjectReader>(
                 || issue.repository != item.repository
                 || issue.tracker_repo_id != item.tracker_repo_id
                 || issue.number != item.issue_number
+                || issue.url
+                    != format!(
+                        "https://github.com/{}/issues/{}",
+                        item.repository, item.issue_number
+                    )
             {
                 return Err(ProjectError::Inconsistent {
                     item_id: item.item_id,
