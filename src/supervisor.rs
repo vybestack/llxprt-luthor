@@ -81,6 +81,40 @@ pub fn inspect_recovery_quiescence(
         return Ok(RecoveryInspection::Held("attempt exit receipt exists"));
     }
 
+    let held = |reason| Ok(RecoveryInspection::Held(reason));
+    let attempts = store.root().join("attempts");
+    use std::os::unix::fs::PermissionsExt;
+    let Ok(dir) = fs::symlink_metadata(&attempts) else {
+        return held("missing attempts directory");
+    };
+    if !dir.file_type().is_dir() || dir.permissions().mode() & 0o777 != 0o700 {
+        return held("unsafe attempts directory");
+    }
+    let Some(plan) = private_bytes(&attempts.join(format!("{attempt_id}.plan.json")))
+        .and_then(|bytes| serde_json::from_slice::<LaunchPlan>(&bytes).ok())
+    else {
+        return held("missing or invalid plan");
+    };
+    if plan.task_id != task_id
+        || plan.attempt_id != attempt_id
+        || plan.session_id != task_id
+        || plan.config_revision.is_empty()
+    {
+        return held("plan identity mismatch");
+    }
+    let Some(launch) = store.intent_payload(task_id, attempt_id, "launch")? else {
+        return held("missing launch intent");
+    };
+    if serde_json::from_str::<LaunchPlan>(&launch).ok().as_ref() != Some(&plan) {
+        return held("launch intent mismatch");
+    }
+    let Some(dispatch) = store.intent_payload(task_id, attempt_id, "supervisor_dispatch")? else {
+        return held("missing dispatch intent");
+    };
+    if serde_json::from_str::<LaunchPlan>(&dispatch).ok().as_ref() != Some(&plan) {
+        return held("dispatch plan mismatch");
+    }
+
     // This subset does not establish the complete filesystem and process identity
     // chain. Keep recovery held rather than infer absence from incomplete evidence.
     Ok(RecoveryInspection::Held(
