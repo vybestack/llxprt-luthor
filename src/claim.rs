@@ -62,7 +62,7 @@ pub enum ClaimError {
     #[error("post-assignment verification failed; task held")]
     Verify,
 }
-fn fresh<R: ProjectReader>(
+pub(crate) fn fresh<R: ProjectReader>(
     reader: &mut R,
     c: &Candidate,
 ) -> Result<(ProjectItem, Issue), ClaimError> {
@@ -125,6 +125,9 @@ fn fresh<R: ProjectReader>(
     let marker = match &c.marker {
         Marker::Label { name } => issue.labels.iter().any(|x| x == name),
         Marker::ProjectField { name, value } => {
+            if item.unsupported_fields.iter().any(|field| field == name) {
+                return Err(ClaimError::Changed);
+            }
             item.fields.iter().any(|(n, v)| n == name && v == value)
         }
     };
@@ -135,6 +138,7 @@ fn fresh<R: ProjectReader>(
         || issue.state != "open"
         || !marker
         || issue.milestone != c.source.milestone
+        || issue.milestone_id != c.milestone_id
         || item.item_id != c.item_id
     {
         return Err(ClaimError::Changed);

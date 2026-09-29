@@ -395,6 +395,65 @@ impl StateStore {
         Ok(())
     }
 
+    /// A selected task occupies a scheduling slot even if it is held before launch.
+    /// An unresolved reservation occupies a slot regardless of its task phase.
+    pub fn ensure_dispatch_capacity(&self) -> Result<(), StateError> {
+        let capacity: usize = self.connection.query_row(
+            "SELECT value FROM state_meta WHERE key='capacity'",
+            [],
+            |row| row.get(0),
+        )?;
+        let reserved: usize = self.connection.query_row(
+            "SELECT COUNT(DISTINCT task_id) FROM reservations WHERE status='reserved'",
+            [],
+            |row| row.get(0),
+        )?;
+        let held_without_reservation: usize = self.connection.query_row(
+            "SELECT COUNT(*) FROM tasks t WHERE t.state IN ('preparing','claimed','held')
+             AND NOT EXISTS (SELECT 1 FROM reservations r WHERE r.task_id=t.id AND r.status='reserved')",
+            [], |row| row.get(0),
+        )?;
+        let occupied = reserved + held_without_reservation;
+        if occupied >= capacity {
+            return Err(StateError::Capacity {
+                reserved: occupied,
+                capacity,
+            });
+        }
+        Ok(())
+    }
+
+    /// Record a non-retriable failure without releasing any launch reservation.
+    pub fn hold_task(&mut self, task_id: &str, reason: &str) -> Result<(), StateError> {
+        let tx = self.connection.transaction()?;
+        let changed = tx.execute("UPDATE tasks SET state='held' WHERE id=?1", [task_id])?;
+        if changed != 1 {
+            return Err(StateError::InvalidSelection);
+        }
+        tx.execute(
+            "INSERT INTO evidence(task_id,attempt_id,kind,payload) VALUES(?1,NULL,'held_reason',?2)",
+            params![task_id, reason],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn task_phase(&self, task_id: &str) -> Result<Option<String>, StateError> {
+        self.connection
+            .query_row("SELECT state FROM tasks WHERE id=?1", [task_id], |row| {
+                row.get(0)
+            })
+            .optional()
+            .map_err(StateError::from)
+    }
+
+    pub fn held_reason(&self, task_id: &str) -> Result<Option<String>, StateError> {
+        self.connection.query_row(
+            "SELECT payload FROM evidence WHERE task_id=?1 AND kind='held_reason' ORDER BY sequence DESC LIMIT 1",
+            [task_id], |row| row.get(0),
+        ).optional().map_err(StateError::from)
+    }
+
     pub fn claim_assignment_login(&self, task_id: &str) -> Result<Option<String>, StateError> {
         let evidence = self.selection_evidence(task_id)?;
         Ok(evidence.map(|evidence| evidence.effective_config.assignment_login))

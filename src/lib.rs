@@ -1,5 +1,6 @@
 pub mod claim;
 pub mod config;
+pub mod coordinator;
 pub mod eligibility;
 pub mod github {
     pub mod project;
