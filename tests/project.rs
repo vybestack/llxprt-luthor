@@ -1,4 +1,37 @@
 #[test]
+fn direct_issue_requires_stable_id_for_present_milestone() {
+    use luthor::github::project::{ProjectItem, ReadCategory};
+    for milestone in [
+        r#"{"title":"0.12.0"}"#,
+        r#"{"title":"0.12.0","node_id":""}"#,
+    ] {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("gh");
+        let issue = format!(
+            r#"{{"node_id":"ISSUE1","repository_url":"https://api.github.com/repos/org/tracker","number":7,"html_url":"https://github.com/org/tracker/issues/7","state":"open","assignees":[],"labels":[],"milestone":{milestone}}}"#
+        );
+        let script = "#!/bin/sh\ncase \"$*\" in *issues/7*) printf '%s' 'ISSUE_JSON' ;; *) printf '%s' 'REPO_JSON' ;; esac\n"
+            .replace("ISSUE_JSON", &issue)
+            .replace("REPO_JSON", r#"{"node_id":"REPO1"}"#);
+        fs::write(&path, script).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        let mut reader = GhProjectReader::new(path);
+        let item = ProjectItem {
+            item_id: "PVTI1".into(),
+            issue_node_id: "ISSUE1".into(),
+            repository: "org/tracker".into(),
+            tracker_repo_id: "REPO1".into(),
+            issue_number: 7,
+            fields: vec![],
+        };
+        assert_eq!(
+            reader.issue(&item).unwrap_err().category,
+            ReadCategory::Malformed
+        );
+    }
+}
+
+#[test]
 fn fake_gh_paginates_two_pages_and_preserves_requested_fields() {
     let first = r#"{"data":{"node":{"items":{"nodes":[{"id":"PVTI1","content":{"__typename":"Issue","id":"ISSUE1","number":7,"repository":{"id":"REPO1","nameWithOwner":"org/tracker"}},"fieldValues":{"nodes":[{"__typename":"ProjectV2ItemFieldSingleSelectValue","name":"Ready","field":{"name":"Status"}},{"__typename":"ProjectV2ItemFieldDateValue","name":"Due","date":"2026-01-01"}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}],"pageInfo":{"hasNextPage":true,"endCursor":"CURSOR1"}}}}}"#;
     let second = r#"{"data":{"node":{"items":{"nodes":[{"id":"PVTI2","content":{"__typename":"Issue","id":"ISSUE2","number":8,"repository":{"id":"REPO1","nameWithOwner":"org/tracker"}},"fieldValues":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}"#;

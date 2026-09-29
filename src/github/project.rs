@@ -28,6 +28,7 @@ pub struct Issue {
     pub assignees: Vec<String>,
     pub labels: Vec<String>,
     pub milestone: Option<String>,
+    pub milestone_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -444,13 +445,20 @@ impl ProjectReader for GhProjectReader {
             .iter()
             .map(|label| required_string(label, "name", "invalid-issue-labels"))
             .collect::<Result<Vec<_>, _>>()?;
-        let milestone = match value.get("milestone") {
-            Some(Value::Null) => None,
-            Some(milestone) => Some(required_string(
-                milestone,
-                "title",
-                "invalid-issue-milestone",
-            )?),
+        let (milestone, milestone_id) = match value.get("milestone") {
+            Some(Value::Null) => (None, None),
+            Some(milestone) => (
+                Some(required_string(
+                    milestone,
+                    "title",
+                    "invalid-issue-milestone",
+                )?),
+                Some(required_string(
+                    milestone,
+                    "node_id",
+                    "invalid-issue-milestone",
+                )?),
+            ),
             None => return Err("invalid-issue-milestone".to_owned().into()),
         };
         Ok(Issue {
@@ -463,6 +471,7 @@ impl ProjectReader for GhProjectReader {
             assignees,
             labels,
             milestone,
+            milestone_id,
         })
     }
 }

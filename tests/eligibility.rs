@@ -66,6 +66,7 @@ fn issue(state: &str, labels: Vec<&str>, assignees: Vec<&str>, milestone: Option
         assignees: assignees.into_iter().map(str::to_string).collect(),
         labels: labels.into_iter().map(str::to_string).collect(),
         milestone: milestone.map(str::to_string),
+        milestone_id: milestone.map(|_| "MILESTONE1".to_string()),
     }
 }
 fn source(marker: Marker, milestone: Option<&str>) -> Source {
@@ -119,6 +120,7 @@ fn requires_membership_direct_open_unassigned_exact_label_and_milestone() {
         candidates[0].issue_url,
         "https://github.com/org/tracker/issues/7"
     );
+    assert_eq!(candidates[0].milestone_id.as_deref(), Some("MILESTONE1"));
     let mut wrong = Fake {
         issues: vec![issue("open", vec!["OK for Luther"], vec![], Some("0.12.0"))],
         calls: 0,

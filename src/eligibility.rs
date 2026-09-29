@@ -13,6 +13,7 @@ pub struct Candidate {
     pub issue_node_id: String,
     pub issue_number: u64,
     pub issue_url: String,
+    pub milestone_id: Option<String>,
     pub mapping: Mapping,
     pub source: Source,
 }
@@ -67,6 +68,7 @@ pub fn select<R: ProjectReader>(
                 issue_node_id: issue.node_id.clone(),
                 issue_number: issue.number,
                 issue_url: issue.url.clone(),
+                milestone_id: issue.milestone_id.clone(),
                 mapping: (*mapping).clone(),
                 source: source.clone(),
             };
