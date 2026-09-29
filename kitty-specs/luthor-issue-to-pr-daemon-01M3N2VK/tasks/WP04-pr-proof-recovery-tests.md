@@ -30,6 +30,8 @@ create_intent:
 - tests/pr_evidence.rs
 - tests/recovery.rs
 - tests/fault_injection.rs
+- src/cli.rs
+- tests/cli.rs
 - tests/state.rs
 - tests/claim.rs
 - tests/coordinator.rs
@@ -48,6 +50,8 @@ owned_files:
 - tests/pr_evidence.rs
 - tests/recovery.rs
 - tests/fault_injection.rs
+- src/cli.rs
+- tests/cli.rs
 tags: []
 tracker_refs: []
 ---

@@ -607,6 +607,7 @@ fn events(conn: &Connection, table: &str, task: &str) -> Result<Vec<Value>, CliE
             ("evidence", "attempt_exit") => serde_json::from_str::<ExitReceipt>(&payload)
                 .ok()
                 .map(|receipt| receipt_summary(&receipt)),
+            ("evidence", "verified_open_pr") => serde_json::from_str::<Value>(&payload).ok(),
             _ => None,
         };
         Ok(
@@ -714,6 +715,50 @@ fn show(conn: &Connection, root: &Path, task: &str) -> Result<Value, CliError> {
         .last()
         .and_then(|a| a["outcome"].as_str())
         .map(str::to_owned);
+    let verified_pr = if phase == "pr_complete" {
+        let proofs: Vec<&Value> = evidence
+            .iter()
+            .filter(|item| item["kind"] == "verified_open_pr")
+            .collect();
+        let [proof] = proofs.as_slice() else {
+            return Err(CliError::Database);
+        };
+        let detail = proof.get("detail").ok_or(CliError::Database)?;
+        let id = detail["id"]
+            .as_u64()
+            .filter(|id| *id > 0)
+            .ok_or(CliError::Database)?;
+        let url = detail["url"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .ok_or(CliError::Database)?;
+        let repository = detail["repository"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .ok_or(CliError::Database)?;
+        let head_repository = detail["head_repository"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .ok_or(CliError::Database)?;
+        let draft = detail["draft"].as_bool().ok_or(CliError::Database)?;
+        let checks = detail["checks"]
+            .as_array()
+            .filter(|checks| checks.iter().all(Value::is_string))
+            .ok_or(CliError::Database)?;
+        let observed_at = detail["observed_at"]
+            .as_u64()
+            .filter(|value| *value > 0)
+            .ok_or(CliError::Database)?;
+        let attempt_id = detail["attempt_id"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .ok_or(CliError::Database)?;
+        Some(
+            json!({"id":id,"url":url,"repository":repository,"head_repository":head_repository,"draft":draft,"checks":checks,"observed_at":observed_at,"attempt_id":attempt_id}),
+        )
+    } else {
+        None
+    };
     let output_silence_warning =
         last_output_age_seconds.is_some_and(|age| age >= SILENCE_WARNING_THRESHOLD_SECONDS);
     let ObservationSummaries {
@@ -766,8 +811,10 @@ fn show(conn: &Connection, root: &Path, task: &str) -> Result<Value, CliError> {
         "latest_attempt_id":latest_attempt_id,
         "latest_attempt_outcome":latest_attempt_outcome,
         "latest_attempt_outcome_unavailable_reason":if latest_attempt_outcome.is_none(){Some("attempt has no verified exit outcome")}else{None},
-        "pr_state":"unavailable",
-        "pr_unavailable_reason":"show does not perform a fresh exhaustive PR read",
+        "pr_state":if verified_pr.is_some(){"open_at_last_verification"}else{"unavailable"},
+        "pr_unavailable_reason":if verified_pr.is_none(){Some("show does not perform a fresh exhaustive PR read")}else{None},
+        "verified_pr":verified_pr,
+        "last_pr_verification_at_unix_secs":if phase == "pr_complete" { evidence.iter().find(|item| item["kind"] == "verified_open_pr").and_then(|item| item["detail"]["observed_at"].as_u64()) } else { None },
         "last_observed_pr":last_observed_pr,
         "last_observed_source":last_observed_source,
         "last_observation":last_observation,

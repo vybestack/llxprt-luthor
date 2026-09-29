@@ -200,6 +200,62 @@ fn show_reports_events_issue_mapping_session_and_receipt_without_secrets() {
 }
 
 #[test]
+fn show_reports_verified_pr_as_cached_and_rejects_malformed_or_duplicate_proof() {
+    let f = Fixture::new();
+    f.task("task");
+    f.db()
+        .execute("UPDATE tasks SET state='pr_complete' WHERE id='task'", [])
+        .unwrap();
+    let proof = json!({"id":123,"url":"https://github.com/org/code/pull/9",
+        "repository":"org/code","head_repository":"org/fork","draft":true,
+        "checks":["failure","pending"],"observed_at":1700000000,"attempt_id":"attempt"});
+    f.evidence(
+        "task",
+        Some("attempt"),
+        "verified_open_pr",
+        &proof.to_string(),
+    );
+    let shown = f.run(&["show", "task"]).unwrap();
+    assert_eq!(shown["verified_pr"]["id"], 123);
+    assert_eq!(shown["verified_pr"]["url"], proof["url"]);
+    assert_eq!(shown["verified_pr"]["checks"], proof["checks"]);
+    assert_eq!(shown["verified_pr"]["repository"], "org/code");
+    assert_eq!(shown["verified_pr"]["head_repository"], "org/fork");
+    assert_eq!(shown["verified_pr"]["observed_at"], 1700000000);
+    assert_eq!(shown["last_pr_verification_at_unix_secs"], 1700000000);
+    assert_eq!(shown["pr_state"], "open_at_last_verification");
+    assert!(shown["pr_unavailable_reason"].is_null());
+    assert_eq!(
+        f.db()
+            .query_row(
+                "SELECT COUNT(*) FROM evidence WHERE kind='verified_open_pr'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+        1
+    );
+
+    f.evidence(
+        "task",
+        Some("attempt"),
+        "verified_open_pr",
+        &proof.to_string(),
+    );
+    assert_eq!(f.run(&["show", "task"]), Err(CliError::Database));
+    f.db()
+        .execute("DELETE FROM evidence WHERE sequence=(SELECT MAX(sequence) FROM evidence WHERE kind='verified_open_pr')", [])
+        .unwrap();
+    f.db()
+        .execute(
+            "UPDATE evidence SET payload='not-json' WHERE kind='verified_open_pr'",
+            [],
+        )
+        .unwrap();
+    assert_eq!(f.run(&["show", "task"]), Err(CliError::Database));
+}
+
+#[test]
 fn status_and_show_report_missing_or_unsafe_active_logs_as_unavailable() {
     let f = Fixture::new();
     f.task("task");
