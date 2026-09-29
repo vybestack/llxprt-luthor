@@ -41,6 +41,7 @@ create_intent:
 execution_mode: code_change
 owned_files:
 - src/main.rs
+- src/daemon.rs
 - src/lib.rs
 - src/claim.rs
 - src/state.rs
@@ -54,6 +55,7 @@ owned_files:
 - tests/supervisor.rs
 - tests/coordinator.rs
 - tests/cli.rs
+- tests/daemon.rs
 tags: []
 tracker_refs: []
 ---

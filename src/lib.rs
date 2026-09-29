@@ -2,6 +2,7 @@ pub mod claim;
 pub mod cli;
 pub mod config;
 pub mod coordinator;
+pub mod daemon;
 pub mod eligibility;
 pub mod github {
     pub mod identity;

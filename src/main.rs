@@ -39,15 +39,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         Some("status" | "show" | "logs") => operator(args),
         Some(command @ ("pause" | "reconcile")) => mutate(command, args.collect()),
         Some("discover") => discover(args.collect()),
+        Some("daemon") => luthor::daemon::run(&args.collect::<Vec<_>>()),
         Some("dispatch") => dispatch(args.collect()),
         Some("resume") => resume(args.collect()),
         Some("--help" | "-h") => {
             println!(
-                "Usage: luthor discover --config <path>\n       luthor dispatch --config <path> --repository owner/repo --issue N --config-revision REV [--execute]\n       luthor resume TASK --config <path> --execute\n       luthor status --config <path>\n       luthor show TASK --config <path>\n       luthor logs TASK [--attempt ATTEMPT] --config <path>"
+                "Usage: luthor discover --config <path>\n       luthor daemon --config PATH --config-revision REV [--repository owner/repo --issues N,N,...] [--once] [--execute]\n       luthor dispatch --config <path> --repository owner/repo --issue N --config-revision REV [--execute]\n       luthor resume TASK --config <path> --execute\n       luthor status --config <path>\n       luthor show TASK --config <path>\n       luthor logs TASK [--attempt ATTEMPT] --config <path>"
             );
             Ok(())
         }
-        _ => Err("expected `discover`, `dispatch`, or `resume`".into()),
+        _ => Err("expected `discover`, `daemon`, `dispatch`, or `resume`".into()),
     }
 }
 
