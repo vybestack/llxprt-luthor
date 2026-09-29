@@ -247,6 +247,13 @@ fn fake_plan(root: &Path, attempt: &str, code: i32) -> luthor::supervisor::Launc
         executable,
         args: vec![],
         config_revision: "rev".into(),
+        session_environment: luthor::supervisor::SessionEnvironment {
+            home: root.into(),
+            xdg_config_home: None,
+            xdg_data_home: None,
+            xdg_state_home: None,
+            llxprt_config_home: None,
+        },
     }
 }
 
@@ -271,6 +278,13 @@ fn gate_eof_never_spawns_and_does_not_write_receipt() {
         executable,
         args: vec![],
         config_revision: "rev".into(),
+        session_environment: luthor::supervisor::SessionEnvironment {
+            home: dir.path().into(),
+            xdg_config_home: None,
+            xdg_data_home: None,
+            xdg_state_home: None,
+            llxprt_config_home: None,
+        },
     };
     assert!(matches!(
         run_gated_child(&plan, Cursor::new(Vec::<u8>::new()), dir.path()),

@@ -58,6 +58,13 @@ impl Fixture {
             executable: PathBuf::from("/bin/worker"),
             args: vec!["--secret-prompt".into()],
             config_revision: "rev".into(),
+            session_environment: luthor::supervisor::SessionEnvironment {
+                home: PathBuf::from("/"),
+                xdg_config_home: None,
+                xdg_data_home: None,
+                xdg_state_home: None,
+                llxprt_config_home: None,
+            },
         };
         db.execute(
             "INSERT INTO intents(id,task_id,attempt_id,kind,detail) VALUES(?1,?2,?3,'launch',?4)",

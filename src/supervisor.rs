@@ -46,6 +46,45 @@ pub enum SupervisorError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionEnvironment {
+    pub home: PathBuf,
+    pub xdg_config_home: Option<PathBuf>,
+    pub xdg_data_home: Option<PathBuf>,
+    pub xdg_state_home: Option<PathBuf>,
+    pub llxprt_config_home: Option<PathBuf>,
+}
+
+impl SessionEnvironment {
+    pub fn capture() -> Result<Self, SupervisorError> {
+        let home = env::var_os("HOME")
+            .map(PathBuf::from)
+            .ok_or(SupervisorError::Conflict)?;
+        if !home.is_absolute() {
+            return Err(SupervisorError::Conflict);
+        }
+        let home = fs::canonicalize(home)?;
+        fn absolute_override(name: &str) -> Result<Option<PathBuf>, SupervisorError> {
+            match env::var_os(name).map(PathBuf::from) {
+                None => Ok(None),
+                Some(path) if path.is_absolute() => Ok(Some(path)),
+                Some(_) => Err(SupervisorError::Conflict),
+            }
+        }
+        Ok(Self {
+            home,
+            xdg_config_home: absolute_override("XDG_CONFIG_HOME")?,
+            xdg_data_home: absolute_override("XDG_DATA_HOME")?,
+            xdg_state_home: absolute_override("XDG_STATE_HOME")?,
+            llxprt_config_home: absolute_override("LLXPRT_CONFIG_HOME")?,
+        })
+    }
+
+    pub fn matches_current(&self) -> Result<bool, SupervisorError> {
+        Ok(*self == Self::capture()?)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LaunchPlan {
     pub task_id: String,
     pub attempt_id: String,
@@ -54,6 +93,7 @@ pub struct LaunchPlan {
     pub executable: PathBuf,
     pub args: Vec<String>,
     pub config_revision: String,
+    pub session_environment: SessionEnvironment,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -206,6 +246,7 @@ pub fn prepare_initial(
             author: &selection.effective_config.assignment_login,
         },
     )?;
+    let session_environment = SessionEnvironment::capture()?;
     let plan = LaunchPlan {
         task_id: task_id.to_owned(),
         attempt_id: attempt_id.to_owned(),
@@ -214,6 +255,7 @@ pub fn prepare_initial(
         executable,
         args,
         config_revision: selection.config_revision,
+        session_environment,
     };
     store.hold_launch_intent(task_id, attempt_id, &serde_json::to_string(&plan)?)?;
     Ok(plan)
@@ -229,6 +271,9 @@ pub fn prepare_resume(
     let (first, latest, _) = store.resume_context(task_id)?;
     let first: LaunchPlan = serde_json::from_str(&first)?;
     let latest: LaunchPlan = serde_json::from_str(&latest)?;
+    if !first.session_environment.matches_current()? {
+        return Err(SupervisorError::Conflict);
+    }
     let selection = store
         .selection_evidence(task_id)?
         .ok_or(SupervisorError::Conflict)?;
@@ -303,6 +348,7 @@ pub fn prepare_resume(
         executable,
         args,
         config_revision: selection.config_revision,
+        session_environment: first.session_environment.clone(),
     };
     store.hold_launch_intent(task_id, attempt_id, &serde_json::to_string(&plan)?)?;
     Ok(plan)
@@ -573,10 +619,26 @@ fn run_gated_child_control<R: Read>(
     let stderr_file = private_file(&stderr_path)?;
     let mut command = Command::new(&plan.executable);
     command
+        .env("HOME", &plan.session_environment.home)
         .args(&plan.args)
         .current_dir(&plan.worktree)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    for (name, value) in [
+        ("XDG_CONFIG_HOME", &plan.session_environment.xdg_config_home),
+        ("XDG_DATA_HOME", &plan.session_environment.xdg_data_home),
+        ("XDG_STATE_HOME", &plan.session_environment.xdg_state_home),
+        (
+            "LLXPRT_CONFIG_HOME",
+            &plan.session_environment.llxprt_config_home,
+        ),
+    ] {
+        if let Some(value) = value {
+            command.env(name, value);
+        } else {
+            command.env_remove(name);
+        }
+    }
     // Unix-only: a dedicated process group is required for independent reconciliation.
     use std::os::unix::process::CommandExt;
     command.process_group(0);
