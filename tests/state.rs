@@ -122,7 +122,7 @@ fn failed_v1_migration_rolls_back_schema_and_version() {
 }
 
 use luthor::{
-    config::{Mapping, Marker, Source},
+    config::{CommandTemplate, Config, Mapping, Marker, Source},
     eligibility::Candidate,
 };
 use rusqlite::Connection;
@@ -162,6 +162,39 @@ fn candidate(repo_id: &str, issue_id: &str, repository: &str, number: u64) -> Ca
     }
 }
 
+fn config() -> Config {
+    Config {
+        state_root: "/state".into(),
+        worktree_root: "/worktrees".into(),
+        capacity: 1,
+        sources: vec![Source {
+            project_id: "project-1".into(),
+            repositories: vec!["org/tracker".into()],
+            ready_marker: Marker::Label {
+                name: "ready".into(),
+            },
+            milestone: None,
+        }],
+        mappings: vec![Mapping {
+            tracker_repository: "org/tracker".into(),
+            code_repository: "org/code".into(),
+            checkout: "/checkout".into(),
+            base_branch: "main".into(),
+            push_remote: "origin".into(),
+            allowed_pr_head_repository: "bot/fork".into(),
+            allowed_pr_author: "bot".into(),
+        }],
+        initial: CommandTemplate {
+            executable: "/bin/worker".into(),
+            args: vec!["start".into(), "{task.id}".into()],
+        },
+        resume: CommandTemplate {
+            executable: "/bin/worker".into(),
+            args: vec!["resume".into(), "{task.id}".into()],
+        },
+    }
+}
+
 #[test]
 fn persisted_capacity_is_authoritative_and_schema_version_is_checked() {
     let dir = tempfile::tempdir().unwrap();
@@ -189,14 +222,28 @@ fn persisted_capacity_is_authoritative_and_schema_version_is_checked() {
 }
 
 #[test]
+fn invalid_config_does_not_create_task_or_selection_evidence() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = StateStore::open(dir.path(), 1).unwrap();
+    let mut invalid = config();
+    invalid.capacity = 0;
+    let error = store
+        .create_task("t1", &candidate("r", "i1", "repo", 1), "rev", &invalid)
+        .unwrap_err();
+    assert_eq!(error.to_string(), "invalid configuration");
+    assert_eq!(store.task_count().unwrap(), 0);
+    assert_eq!(store.selection_evidence("t1").unwrap(), None);
+}
+
+#[test]
 fn failed_attempt_insert_rolls_back_its_reservation() {
     let dir = tempfile::tempdir().unwrap();
     let mut store = StateStore::open(dir.path(), 2).unwrap();
     store
-        .create_task("t1", &candidate("r", "i1", "repo", 1), "rev")
+        .create_task("t1", &candidate("r", "i1", "repo", 1), "rev", &config())
         .unwrap();
     store
-        .create_task("t2", &candidate("r", "i2", "repo", 2), "rev")
+        .create_task("t2", &candidate("r", "i2", "repo", 2), "rev", &config())
         .unwrap();
     store.reserve("t1", "a1").unwrap();
     assert!(store.reserve("t2", "a1").is_err());
@@ -210,10 +257,20 @@ fn persists_identity_evidence_and_reservations_transactionally() {
     let dir = tempfile::tempdir().unwrap();
     let mut store = StateStore::open(dir.path(), 1).unwrap();
     store
-        .create_task("t1", &candidate("100", "ISSUE1", "org/tracker", 1), "rev")
+        .create_task(
+            "t1",
+            &candidate("100", "ISSUE1", "org/tracker", 1),
+            "rev",
+            &config(),
+        )
         .unwrap();
     assert!(matches!(
-        store.create_task("t2", &candidate("100", "ISSUE1", "org/tracker", 1), "rev"),
+        store.create_task(
+            "t2",
+            &candidate("100", "ISSUE1", "org/tracker", 1),
+            "rev",
+            &config()
+        ),
         Err(StateError::DuplicateTask(_, _))
     ));
     store
@@ -239,8 +296,26 @@ fn persists_identity_evidence_and_reservations_transactionally() {
     assert_eq!(selection.candidate.mapping.code_repository, "org/code");
     assert_eq!(selection.candidate.observed_at_unix_secs, 123);
     assert_eq!(selection.config_revision, "rev");
+    assert_eq!(selection.effective_config.capacity, 1);
+    assert_eq!(
+        selection.effective_config.worktree_root,
+        std::path::PathBuf::from("/worktrees")
+    );
+    assert_eq!(
+        selection.effective_config.initial.args,
+        vec!["start", "{task.id}"]
+    );
+    assert_eq!(
+        selection.effective_config.mappings[0].code_repository,
+        "org/code"
+    );
     assert!(matches!(
-        store.create_task("t2", &candidate("100", "ISSUE1", "org/tracker", 1), "rev"),
+        store.create_task(
+            "t2",
+            &candidate("100", "ISSUE1", "org/tracker", 1),
+            "rev",
+            &config()
+        ),
         Err(StateError::DuplicateTask(_, _))
     ));
     assert_eq!(store.task_count().unwrap(), 1);
@@ -294,9 +369,19 @@ fn duplicate_identity_does_not_leave_partial_task() {
     let dir = tempfile::tempdir().unwrap();
     let mut store = StateStore::open(dir.path(), 1).unwrap();
     store
-        .create_task("t1", &candidate("100", "ISSUE1", "org/tracker", 1), "rev")
+        .create_task(
+            "t1",
+            &candidate("100", "ISSUE1", "org/tracker", 1),
+            "rev",
+            &config(),
+        )
         .unwrap();
-    let _ = store.create_task("t2", &candidate("100", "ISSUE1", "org/tracker", 1), "rev");
+    let _ = store.create_task(
+        "t2",
+        &candidate("100", "ISSUE1", "org/tracker", 1),
+        "rev",
+        &config(),
+    );
     assert_eq!(store.task_count().unwrap(), 1);
 }
 
@@ -305,7 +390,12 @@ fn reservation_history_allows_a_new_attempt_after_reopen() {
     let dir = tempfile::tempdir().unwrap();
     let mut store = StateStore::open(dir.path(), 1).unwrap();
     store
-        .create_task("task", &candidate("repo", "issue", "org/repo", 1), "rev")
+        .create_task(
+            "task",
+            &candidate("repo", "issue", "org/repo", 1),
+            "rev",
+            &config(),
+        )
         .unwrap();
     store
         .record_evidence("task", Some("first"), "result", "prior evidence")
@@ -338,6 +428,19 @@ fn reservation_history_allows_a_new_attempt_after_reopen() {
     assert_eq!(selection.candidate.mapping.code_repository, "org/code");
     assert_eq!(selection.candidate.observed_at_unix_secs, 123);
     assert_eq!(selection.config_revision, "rev");
+    assert_eq!(selection.effective_config.capacity, 1);
+    assert_eq!(
+        selection.effective_config.worktree_root,
+        std::path::PathBuf::from("/worktrees")
+    );
+    assert_eq!(
+        selection.effective_config.initial.args,
+        vec!["start", "{task.id}"]
+    );
+    assert_eq!(
+        selection.effective_config.mappings[0].code_repository,
+        "org/code"
+    );
     let connection = Connection::open(dir.path().join("state.sqlite3")).unwrap();
     let rows: Vec<(String, String)> = connection
         .prepare("SELECT attempt_id,status FROM reservations ORDER BY attempt_id")

@@ -10,7 +10,7 @@ pub enum ConfigError {
     Invalid(String),
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub state_root: PathBuf,
@@ -50,7 +50,7 @@ pub struct Mapping {
     pub allowed_pr_author: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CommandTemplate {
     pub executable: PathBuf,
@@ -150,17 +150,14 @@ impl Config {
                 ));
             }
             if !project_ids.insert(&source.project_id) {
-                return Err(ConfigError::Invalid(format!(
-                    "duplicate source project_id: {}",
-                    source.project_id
-                )));
+                return Err(ConfigError::Invalid("duplicate source project_id".into()));
             }
             for repository in &source.repositories {
                 validate_repository(repository)?;
                 if !mapping_repositories.contains(repository.as_str()) {
-                    return Err(ConfigError::Invalid(format!(
-                        "source repository has no mapping: {repository}"
-                    )));
+                    return Err(ConfigError::Invalid(
+                        "source repository has no mapping".into(),
+                    ));
                 }
             }
             match &source.ready_marker {
@@ -190,16 +187,12 @@ impl Config {
             validate_repository(&mapping.tracker_repository)?;
             validate_repository(&mapping.code_repository)?;
             if !trackers.insert(&mapping.tracker_repository) {
-                return Err(ConfigError::Invalid(format!(
-                    "duplicate mapping for {}",
-                    mapping.tracker_repository
-                )));
+                return Err(ConfigError::Invalid("duplicate mapping".into()));
             }
             if !code_repositories.insert(&mapping.code_repository) {
-                return Err(ConfigError::Invalid(format!(
-                    "duplicate code repository mapping: {}",
-                    mapping.code_repository
-                )));
+                return Err(ConfigError::Invalid(
+                    "duplicate code repository mapping".into(),
+                ));
             }
             if mapping.checkout.as_os_str().is_empty() || mapping.base_branch.trim().is_empty() {
                 return Err(ConfigError::Invalid(
@@ -288,9 +281,7 @@ fn validate_repository(value: &str) -> Result<(), ConfigError> {
                     .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
         })
     {
-        return Err(ConfigError::Invalid(format!(
-            "invalid repository name: {value}"
-        )));
+        return Err(ConfigError::Invalid("invalid repository name".into()));
     }
     Ok(())
 }

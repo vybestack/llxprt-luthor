@@ -1,4 +1,7 @@
-use crate::eligibility::Candidate;
+use crate::{
+    config::{CommandTemplate, Config, Mapping, Source},
+    eligibility::Candidate,
+};
 use fs2::FileExt;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
@@ -22,6 +25,8 @@ pub enum StateError {
     Capacity { reserved: usize, capacity: usize },
     #[error("capacity must be positive")]
     InvalidCapacity,
+    #[error("invalid configuration")]
+    InvalidConfig,
     #[error("configured capacity {configured} does not match persisted capacity {persisted}")]
     CapacityMismatch { configured: usize, persisted: usize },
     #[error("unsupported database version {0}")]
@@ -43,9 +48,35 @@ pub struct StateStore {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct EffectiveConfigSnapshot {
+    pub state_root: PathBuf,
+    pub worktree_root: PathBuf,
+    pub capacity: usize,
+    pub sources: Vec<Source>,
+    pub mappings: Vec<Mapping>,
+    pub initial: CommandTemplate,
+    pub resume: CommandTemplate,
+}
+
+impl From<&Config> for EffectiveConfigSnapshot {
+    fn from(config: &Config) -> Self {
+        Self {
+            state_root: config.state_root.clone(),
+            worktree_root: config.worktree_root.clone(),
+            capacity: config.capacity,
+            sources: config.sources.clone(),
+            mappings: config.mappings.clone(),
+            initial: config.initial.clone(),
+            resume: config.resume.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct SelectionEvidence {
     pub candidate: Candidate,
     pub config_revision: String,
+    pub effective_config: EffectiveConfigSnapshot,
 }
 
 impl StateStore {
@@ -128,7 +159,9 @@ impl StateStore {
         id: &str,
         candidate: &Candidate,
         config_revision: &str,
+        config: &Config,
     ) -> Result<(), StateError> {
+        config.validate().map_err(|_| StateError::InvalidConfig)?;
         let repo_id = &candidate.tracker_repo_id;
         let issue_node_id = &candidate.issue_node_id;
         let tx = self.connection.transaction()?;
@@ -149,6 +182,7 @@ impl StateStore {
         let evidence = SelectionEvidence {
             candidate: candidate.clone(),
             config_revision: config_revision.to_owned(),
+            effective_config: EffectiveConfigSnapshot::from(config),
         };
         let payload = serde_json::to_string(&evidence)?;
         tx.execute(
