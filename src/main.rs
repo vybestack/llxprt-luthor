@@ -3,6 +3,7 @@ use luthor::{
     config::Config,
     coordinator::{
         DispatchDependencies, ProductionLauncher, ResumeDependencies, dispatch_one, resume_one,
+        startup_reconcile_all,
     },
     eligibility,
     github::{
@@ -201,6 +202,18 @@ fn dispatch(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         return Err("invalid config revision".into());
     }
     let config = Config::from_json(&fs::read_to_string(path)?)?;
+    if execute == 0 {
+        return Err("dispatch held: pass --execute to authorize GitHub writes".into());
+    }
+    let mut store = StateStore::open(&config.state_root, config.capacity)?;
+    let mut prs = GhPullRequestReader::new(PathBuf::from("gh"));
+    let startup = startup_reconcile_all(&mut store, &mut prs)?;
+    if startup.scheduling_blocked() || !store.pending_attempts()?.is_empty() {
+        return Err(
+            "dispatch held: startup reconciliation has unresolved attempts or source intents"
+                .into(),
+        );
+    }
     let mut projects = GhProjectReader::new(PathBuf::from("gh"));
     let candidates = eligibility::select_target(
         &mut projects,
@@ -217,13 +230,8 @@ fn dispatch(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         .into());
     }
     let candidate = &candidates[0];
-    if execute == 0 {
-        return Err("dispatch held: pass --execute to authorize GitHub writes".into());
-    }
     verify_authenticated_account(PathBuf::from("gh").as_path(), &config, candidate)?;
     let (task_id, attempt_id) = (random_id()?, random_id()?);
-    let mut store = StateStore::open(&config.state_root, config.capacity)?;
-    let mut prs = GhPullRequestReader::new(PathBuf::from("gh"));
     let mut assignments = GhAssignmentWriter {
         executable: PathBuf::from("gh"),
     };

@@ -466,9 +466,173 @@ mod resume_cli {
                 .unwrap();
             store.hold_task("task", "fixture paused").unwrap();
         }
+        fn dispatch_gh(&self) -> (std::path::PathBuf, std::path::PathBuf) {
+            let assignments = self._dir.path().join("assignments.log");
+            let worker = self._dir.path().join("worker.marker");
+            fs::write(&assignments, "").unwrap();
+            let gh = self._dir.path().join("gh");
+            fs::write(&gh, format!(r#"#!/bin/sh
+printf '%s\n' "$*" >> '{}'
+case "$*" in
+  *initial-worker*|*resume-worker*) touch '{}' ;;
+  *"api -X POST "*) printf '%s\n' "$*" >> '{}' ;;
+  *graphql*) printf '%s\n' '{{"data":{{"node":{{"items":{{"nodes":[{{"id":"ITEM-8","content":{{"__typename":"Issue","id":"ISSUE-8","number":8,"repository":{{"id":"REPO","nameWithOwner":"org/tracker"}}}},"fieldValues":{{"nodes":[],"pageInfo":{{"hasNextPage":false}}}}}}],"pageInfo":{{"hasNextPage":false,"endCursor":null}}}}}}}}}}' ;;
+  *repos/org/tracker/issues/8*) printf '%s\n' '{{"node_id":"ISSUE-8","number":8,"repository_url":"https://api.github.com/repos/org/tracker","html_url":"https://github.com/org/tracker/issues/8","state":"open","assignees":[],"labels":[{{"name":"ready"}}],"milestone":null}}' ;;
+  *repos/org/tracker*) printf '%s\n' '{{"node_id":"REPO"}}' ;;
+  *"api user --jq .login"*) printf '%s\n' 'agent' ;;
+  *) exit 91 ;;
+esac
+"#, self.log.display(), worker.display(), assignments.display())).unwrap();
+            fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).unwrap();
+            (assignments, worker)
+        }
     }
     fn stderr(output: &std::process::Output) -> String {
         String::from_utf8_lossy(&output.stderr).into_owned()
+    }
+
+    #[test]
+    fn dispatch_execute_holds_unresolved_source_before_project_selection_with_spare_capacity() {
+        let h = Harness::new();
+        h.seed_held_task();
+        let mut store = StateStore::open(&h.state, 2).unwrap();
+        store
+            .record_claim_intent("task", "agent", "org/tracker", 7)
+            .unwrap();
+        assert_eq!(store.unresolved_sources().unwrap()[0].1, "claim_assignment");
+        drop(store);
+        let (assignments, worker) = h.dispatch_gh();
+        let output = h.run(&[
+            "dispatch",
+            "--execute",
+            "--config",
+            h.config.to_str().unwrap(),
+            "--repository",
+            "org/tracker",
+            "--issue",
+            "8",
+            "--config-revision",
+            "rev",
+        ]);
+        assert!(!output.status.success());
+        assert!(
+            stderr(&output).contains("startup reconciliation"),
+            "{}",
+            stderr(&output)
+        );
+        assert!(
+            !h.log.exists(),
+            "project selection ran before reconciliation"
+        );
+        assert_eq!(fs::read_to_string(assignments).unwrap(), "");
+        assert!(!worker.exists());
+        let store = StateStore::open(&h.state, 2).unwrap();
+        assert_eq!(store.unresolved_sources().unwrap()[0].1, "claim_assignment");
+    }
+
+    #[test]
+    fn dispatch_execute_holds_uncertain_attempt_with_spare_capacity() {
+        let h = Harness::new();
+        h.seed_held_task();
+        let db = rusqlite::Connection::open(h.state.join("state.sqlite3")).unwrap();
+        db.execute(
+            "INSERT INTO attempts(id,task_id,lifecycle) VALUES('old-attempt','task','launch_intended')",
+            [],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO reservations(attempt_id,task_id,status) VALUES('old-attempt','task','reserved')",
+            [],
+        )
+        .unwrap();
+        drop(db);
+        let store = StateStore::open(&h.state, 2).unwrap();
+        assert!(
+            store
+                .pending_attempts()
+                .unwrap()
+                .contains(&("task".into(), "old-attempt".into()))
+        );
+        assert!(store.unresolved_sources().unwrap().is_empty());
+        drop(store);
+        let (assignments, worker) = h.dispatch_gh();
+        let output = h.run(&[
+            "dispatch",
+            "--execute",
+            "--config",
+            h.config.to_str().unwrap(),
+            "--repository",
+            "org/tracker",
+            "--issue",
+            "8",
+            "--config-revision",
+            "rev",
+        ]);
+        assert!(!output.status.success());
+        assert!(
+            stderr(&output).contains("startup reconciliation"),
+            "{}",
+            stderr(&output)
+        );
+        assert!(!h.log.exists());
+        assert_eq!(fs::read_to_string(assignments).unwrap(), "");
+        assert!(!worker.exists());
+    }
+
+    #[test]
+    fn dispatch_execute_clean_store_reaches_eligible_project_candidate() {
+        let h = Harness::new();
+        let (assignments, worker) = h.dispatch_gh();
+        let output = h.run(&[
+            "dispatch",
+            "--execute",
+            "--config",
+            h.config.to_str().unwrap(),
+            "--repository",
+            "org/tracker",
+            "--issue",
+            "8",
+            "--config-revision",
+            "rev",
+        ]);
+        assert!(!output.status.success());
+        assert!(
+            stderr(&output).contains("GitHub account does not match"),
+            "{}",
+            stderr(&output)
+        );
+        let calls = fs::read_to_string(&h.log).unwrap();
+        assert!(calls.contains("api graphql"), "{calls}");
+        assert!(calls.contains("api user --jq .login"), "{calls}");
+        assert_eq!(fs::read_to_string(assignments).unwrap(), "");
+        assert!(!worker.exists());
+    }
+
+    #[test]
+    fn dispatch_without_execute_does_not_open_state_or_call_github() {
+        let h = Harness::new();
+        let (assignments, worker) = h.dispatch_gh();
+        let output = h.run(&[
+            "dispatch",
+            "--config",
+            h.config.to_str().unwrap(),
+            "--repository",
+            "org/tracker",
+            "--issue",
+            "8",
+            "--config-revision",
+            "rev",
+        ]);
+        assert!(!output.status.success());
+        assert!(
+            stderr(&output).contains("pass --execute"),
+            "{}",
+            stderr(&output)
+        );
+        assert!(!h.state.exists());
+        assert!(!h.log.exists());
+        assert_eq!(fs::read_to_string(assignments).unwrap(), "");
+        assert!(!worker.exists());
     }
 
     #[test]
