@@ -31,11 +31,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             luthor::supervisor::supervise(std::path::Path::new(&root), &attempt)?;
             Ok(())
         }
+        Some("status" | "show" | "logs") => operator(args),
         Some("discover") => discover(args.collect()),
         Some("dispatch") => dispatch(args.collect()),
         Some("--help" | "-h") => {
             println!(
-                "Usage: luthor discover --config <path>\n       luthor dispatch --config <path> --repository owner/repo --issue N --config-revision REV [--execute]"
+                "Usage: luthor discover --config <path>\n       luthor dispatch --config <path> --repository owner/repo --issue N --config-revision REV [--execute]\n       luthor status --config <path>\n       luthor show TASK --config <path>\n       luthor logs TASK [--attempt ATTEMPT] --config <path>"
             );
             Ok(())
         }
@@ -57,6 +58,22 @@ fn option(args: &[String], name: &str) -> Result<String, Box<dyn std::error::Err
         .filter(|v| !v.starts_with('-'))
         .cloned()
         .ok_or_else(|| format!("requires value for {name}").into())
+}
+fn operator(args: impl Iterator<Item = String>) -> Result<(), Box<dyn std::error::Error>> {
+    let mut values = args.collect::<Vec<_>>();
+    let config_pos = values
+        .iter()
+        .position(|arg| arg == "--config")
+        .ok_or("requires --config <path>")?;
+    if values.len() <= config_pos + 1 {
+        return Err("requires --config <path>".into());
+    }
+    let path = values.remove(config_pos + 1);
+    values.remove(config_pos);
+    let config = Config::from_json(&fs::read_to_string(path)?)?;
+    let output = luthor::cli::execute(&config.state_root, &values)?;
+    println!("{output}");
+    Ok(())
 }
 
 fn discover(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {

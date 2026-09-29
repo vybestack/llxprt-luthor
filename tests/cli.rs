@@ -1,279 +1,250 @@
-#[test]
-fn dispatch_without_execute_stops_before_write_and_state_creation() {
-    let dir = tempdir().unwrap();
-    let config = dir.path().join("config.json");
-    let response = project(
-        r#"{"__typename":"Issue","id":"ISSUE_NODE","number":7,"repository":{"id":"REPO_NODE","nameWithOwner":"org/tracker"}}"#,
-    );
-    let _ = run_in(dir.path(), &response, 1);
-    let output = Command::new(env!("CARGO_BIN_EXE_luthor"))
-        .args([
-            "dispatch",
-            "--config",
-            config.to_str().unwrap(),
-            "--repository",
-            "org/tracker",
-            "--issue",
-            "7",
-            "--config-revision",
-            "r1",
-        ])
-        .env("PATH", format!("{}:/usr/bin:/bin", dir.path().display()))
-        .output()
+use luthor::{
+    cli::{CliError, execute},
+    state::StateStore,
+    supervisor::{ExitReceipt, LaunchPlan},
+};
+use rusqlite::{Connection, params};
+use serde_json::{Value, json};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
+
+struct Fixture {
+    dir: tempfile::TempDir,
+    _lock: StateStore,
+}
+impl Fixture {
+    fn new() -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = StateStore::open(dir.path(), 2).unwrap();
+        Self { dir, _lock: lock }
+    }
+    fn root(&self) -> &Path {
+        self.dir.path()
+    }
+    fn db(&self) -> Connection {
+        Connection::open(self.root().join("state.sqlite3")).unwrap()
+    }
+    fn run(&self, args: &[&str]) -> Result<Value, CliError> {
+        execute(
+            self.root(),
+            &args.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+        )
+        .map(|s| serde_json::from_str(&s).unwrap())
+    }
+    fn task(&self, id: &str) {
+        self.db().execute("INSERT INTO tasks(id,tracker_repo_id,issue_node_id,repository,issue_number,state,config_revision)
+            VALUES(?1,?2,?3,'org/tracker',7,'held','rev')",params![id,format!("repo-{id}"),format!("issue-{id}")]).unwrap();
+    }
+    fn attempt(&self, task: &str, id: &str, session: &str) {
+        let db = self.db();
+        db.execute(
+            "INSERT INTO attempts(id,task_id,lifecycle) VALUES(?1,?2,'launch_intended')",
+            [id, task],
+        )
         .unwrap();
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("pass --execute"));
-    assert!(!dir.path().join("state").exists());
-}
-
-#[test]
-fn dispatch_rejects_missing_target_arguments_without_github_access() {
-    let output = Command::new(env!("CARGO_BIN_EXE_luthor"))
-        .args([
-            "dispatch",
-            "--config",
-            "/nonexistent",
-            "--repository",
-            "org/tracker",
-        ])
-        .output()
+        db.execute(
+            "INSERT INTO reservations(attempt_id,task_id,status) VALUES(?1,?2,'reserved')",
+            [id, task],
+        )
         .unwrap();
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("invalid dispatch arguments"));
-}
-use serde_json::Value;
-use std::{fs, os::unix::fs::PermissionsExt, process::Command};
-use tempfile::tempdir;
-
-fn run(fake_response: &str) -> std::process::Output {
-    let dir = tempdir().unwrap();
-    run_in(dir.path(), fake_response, 1)
-}
-
-fn run_in(dir: &std::path::Path, fake_response: &str, capacity: usize) -> std::process::Output {
-    run_in_with_marker(
-        dir,
-        fake_response,
-        capacity,
-        r#"{"kind":"label","name":"ready"}"#,
-    )
-}
-
-fn run_in_with_marker(
-    dir: &std::path::Path,
-    fake_response: &str,
-    capacity: usize,
-    marker: &str,
-) -> std::process::Output {
-    let bin = dir.join("gh");
-    let response = fake_response.replace('\'', "'\\''");
-    let script = format!(
-        "#!/bin/sh\ncase \"$2\" in graphql) printf '%s\\n' '{response}' ;; repos/org/tracker) printf '%s\\n' '{{\"node_id\":\"REPO_NODE\"}}' ;; repos/org/tracker/issues/7?per_page=100) printf '%s\\n' '{{\"node_id\":\"ISSUE_NODE\",\"repository_url\":\"https://api.github.com/repos/org/tracker\",\"html_url\":\"https://github.com/org/tracker/issues/7\",\"number\":7,\"state\":\"open\",\"assignees\":[],\"labels\":[{{\"name\":\"ready\"}}],\"milestone\":null}}' ;; *) printf '%s\\n' '{{}}' ;; esac\n"
-    );
-    fs::write(&bin, script).unwrap();
-    fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
-    let config = dir.join("config.json");
-    fs::write(
-        &config,
-        format!(
-            r#"{{"state_root":"{}","worktree_root":"{}","capacity":{},"assignment_login":"agent","sources":[{{"project_id":"PROJECT","repositories":["org/tracker"],"ready_marker":{marker},"milestone":null}}],"mappings":[{{"tracker_repository":"org/tracker","code_repository":"org/code","checkout":"/tmp/code","base_branch":"main","push_remote":"origin","allowed_pr_head_repository":"org/head","allowed_pr_author":"agent"}}],"initial":{{"executable":"agent","args":[]}},"resume":{{"executable":"agent","args":[]}}}}"#,
-            dir.join("state").display(),
-            dir.display(),
-            capacity
-        ),
-    )
-    .unwrap();
-    Command::new(env!("CARGO_BIN_EXE_luthor"))
-        .args(["discover", "--config", config.to_str().unwrap()])
-        .env("PATH", format!("{}:/usr/bin:/bin", dir.display()))
-        .output()
-        .unwrap()
-}
-
-fn project(content: &str) -> String {
-    let content: Value = serde_json::from_str(content).unwrap();
-    serde_json::json!({
-        "data": { "node": { "items": {
-            "nodes": [{
-                "id": "ITEM",
-                "content": content,
-                "fieldValues": { "nodes": [], "pageInfo": { "hasNextPage": false, "endCursor": null } }
-            }],
-            "pageInfo": { "hasNextPage": false, "endCursor": null }
-        }}}
-    }).to_string()
+        let plan = LaunchPlan {
+            task_id: task.into(),
+            attempt_id: id.into(),
+            session_id: session.into(),
+            worktree: PathBuf::from("/worktree"),
+            executable: PathBuf::from("/bin/worker"),
+            args: vec!["--secret-prompt".into()],
+            config_revision: "rev".into(),
+        };
+        db.execute(
+            "INSERT INTO intents(id,task_id,attempt_id,kind,detail) VALUES(?1,?2,?3,'launch',?4)",
+            params![
+                format!("launch-{id}"),
+                task,
+                id,
+                serde_json::to_string(&plan).unwrap()
+            ],
+        )
+        .unwrap();
+    }
+    fn evidence(&self, task: &str, attempt: Option<&str>, kind: &str, payload: &str) {
+        self.db()
+            .execute(
+                "INSERT INTO evidence(task_id,attempt_id,kind,payload) VALUES(?1,?2,?3,?4)",
+                params![task, attempt, kind, payload],
+            )
+            .unwrap();
+    }
+    fn logs(&self, id: &str) -> (PathBuf, PathBuf) {
+        let dir = self.root().join("attempts");
+        fs::create_dir_all(&dir).unwrap();
+        let stdout = dir.join(format!("{id}.stdout.log"));
+        let stderr = dir.join(format!("{id}.stderr.log"));
+        fs::write(&stdout, "hello").unwrap();
+        fs::write(&stderr, "warning").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&stdout, fs::Permissions::from_mode(0o600)).unwrap();
+            fs::set_permissions(&stderr, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        (stdout, stderr)
+    }
+    fn receipt(&self, task: &str, id: &str, stdout: PathBuf, stderr: PathBuf) {
+        let receipt = ExitReceipt {
+            attempt_id: id.into(),
+            child_pid: 42,
+            boot_identity: "boot".into(),
+            child_start_identity: "start".into(),
+            exit_code: Some(0),
+            signal: None,
+            stdout_path: stdout,
+            stdout_bytes: 5,
+            stderr_path: stderr,
+            stderr_bytes: 7,
+            stop_signals: vec![],
+        };
+        let payload = serde_json::to_string(&receipt).unwrap();
+        fs::write(
+            self.root()
+                .join("attempts")
+                .join(format!("{id}.receipt.json")),
+            &payload,
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(
+                self.root()
+                    .join("attempts")
+                    .join(format!("{id}.receipt.json")),
+                fs::Permissions::from_mode(0o600),
+            )
+            .unwrap();
+        }
+        self.evidence(task, Some(id), "attempt_exit", &payload);
+    }
 }
 
 #[test]
-fn discover_prints_complete_eligible_candidate_as_json_line() {
-    let output = run(&project(
-        r#"{"__typename":"Issue","id":"ISSUE_NODE","number":7,"repository":{"id":"REPO_NODE","nameWithOwner":"org/tracker"}}"#,
-    ));
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
+fn show_reports_events_issue_mapping_session_and_receipt_without_secrets() {
+    let f = Fixture::new();
+    f.task("task");
+    f.attempt("task", "attempt", "persisted-session");
+    let candidate = json!({"issue_url":"https://github.com/org/tracker/issues/7",
+        "source":{"project_id":"project"},"mapping":{"code_repository":"org/code"}});
+    f.evidence(
+        "task",
+        None,
+        "selection",
+        &json!({"candidate":candidate,"effective_config":{"secret":"do-not-show"}}).to_string(),
     );
-    let lines: Vec<_> = String::from_utf8(output.stdout)
-        .unwrap()
-        .lines()
-        .map(|line| serde_json::from_str::<Value>(line).unwrap())
-        .collect();
-    assert_eq!(lines.len(), 1);
-    assert_eq!(lines[0]["candidate"]["issue_number"], 7);
+    f.evidence("task", None, "held_reason", "needs inspection");
+    let (stdout, stderr) = f.logs("attempt");
+    f.receipt("task", "attempt", stdout, stderr);
+    let shown = f.run(&["show", "task"]).unwrap();
+    assert_eq!(shown["session"], "persisted-session");
+    assert_eq!(shown["task"]["source"]["project_id"], "project");
+    assert_eq!(shown["task"]["mapping"]["code_repository"], "org/code");
     assert_eq!(
-        lines[0]["candidate"]["mapping"]["code_repository"],
-        "org/code"
-    );
-    assert_eq!(lines[0]["candidate"]["project_id"], "PROJECT");
-    assert_eq!(lines[0]["evidence"]["state"], "open");
-    assert_eq!(lines[0]["candidate"]["tracker_repo_id"], "REPO_NODE");
-    assert_eq!(
-        lines[0]["candidate"]["issue_url"],
+        shown["task"]["issue_url"],
         "https://github.com/org/tracker/issues/7"
     );
-    assert_eq!(lines[0]["candidate"]["item_id"], "ITEM");
+    assert_eq!(shown["reason"], "needs inspection");
+    assert_eq!(shown["reserved_slot"], true);
+    assert_eq!(shown["attempts"][0]["id"], "attempt");
+    assert_eq!(shown["evidence"][2]["detail"]["stdout_bytes"], 5);
     assert!(
-        lines[0]["candidate"]["observed_at_unix_secs"]
-            .as_u64()
+        shown["evidence"][0]["created_at"]
+            .as_str()
+            .unwrap()
+            .contains(' ')
+    );
+    assert!(
+        shown["evidence"][0]["created_at_unix_secs"]
+            .as_i64()
             .unwrap()
             > 0
     );
-    assert_eq!(lines[0]["candidate"]["observed_labels"][0], "ready");
-    assert_eq!(lines[0]["candidate"]["observed_state"], "open");
+    assert!(shown["last_output_age_seconds"].is_number());
+    let rendered = shown.to_string();
+    assert!(!rendered.contains("do-not-show"));
+    assert!(!rendered.contains("secret-prompt"));
     assert_eq!(
-        lines[0]["candidate"]["observed_assignees"],
-        serde_json::json!([])
+        f.run(&["logs", "task", "--attempt", "attempt"]).unwrap()["receipt"]["exit_code"],
+        0
     );
+    assert_eq!(f.run(&["logs", "task"]).unwrap()["logs"]["stdout"], "hello");
 }
 
 #[test]
-fn discover_skips_pull_request_before_selecting_later_issue() {
-    let response = serde_json::json!({
-        "data": { "node": { "items": {
-            "nodes": [
-                {"id":"PR_ITEM","content":{"__typename":"PullRequest","id":"PR_NODE"},"fieldValues":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}},
-                {"id":"ISSUE_ITEM","content":{"__typename":"Issue","id":"ISSUE_NODE","number":7,"repository":{"id":"REPO_NODE","nameWithOwner":"org/tracker"}},"fieldValues":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}
-            ],
-            "pageInfo": {"hasNextPage": false, "endCursor": null}
-        }}}
-    }).to_string();
-    let output = run(&response);
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let lines: Vec<_> = String::from_utf8(output.stdout)
-        .unwrap()
-        .lines()
-        .map(|line| serde_json::from_str::<Value>(line).unwrap())
-        .collect();
-    assert_eq!(lines.len(), 1);
-    assert_eq!(lines[0]["candidate"]["issue_number"], 7);
-}
-
-#[test]
-fn discover_rejects_configured_date_marker_but_preserves_unrelated_date_field() {
-    let response = serde_json::json!({
-        "data": { "node": { "items": {
-            "nodes": [{
-                "id": "ITEM",
-                "content": {"__typename":"Issue","id":"ISSUE_NODE","number":7,"repository":{"id":"REPO_NODE","nameWithOwner":"org/tracker"}},
-                "fieldValues": {"nodes":[
-                    {"__typename":"ProjectV2ItemFieldSingleSelectValue","name":"Ready","field":{"name":"Status"}},
-                    {"__typename":"ProjectV2ItemFieldDateValue","field":{"name":"Due"}}
-                ],"pageInfo":{"hasNextPage":false,"endCursor":null}}
-            }],
-            "pageInfo":{"hasNextPage":false,"endCursor":null}
-        }}}
-    }).to_string();
-    let dir = tempdir().unwrap();
-    let unsupported = run_in_with_marker(
-        dir.path(),
-        &response,
-        1,
-        r#"{"kind":"project_field","name":"Due","value":"2026-01-01"}"#,
-    );
-    assert!(!unsupported.status.success());
-    assert!(unsupported.stdout.is_empty());
-    let stderr = String::from_utf8(unsupported.stderr).unwrap();
-    assert!(
-        stderr.contains("unsupported configured marker field Due"),
-        "{stderr}"
-    );
-    assert!(stderr.contains("project PROJECT item ITEM"), "{stderr}");
-
-    let supported = run_in_with_marker(
-        dir.path(),
-        &response,
-        1,
-        r#"{"kind":"project_field","name":"Status","value":"Ready"}"#,
-    );
-    assert!(
-        supported.status.success(),
-        "{}",
-        String::from_utf8_lossy(&supported.stderr)
-    );
-    let lines: Vec<Value> = String::from_utf8(supported.stdout)
-        .unwrap()
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect();
-    assert_eq!(lines.len(), 1);
+fn status_and_show_work_while_coordinator_owns_lock() {
+    let f = Fixture::new();
+    f.task("task");
+    let status = f.run(&["status"]).unwrap();
+    assert_eq!(status["capacity"]["limit"], 2);
+    assert_eq!(status["tasks"][0]["phase"], "held");
+    assert_eq!(status["tasks"][0]["reserved_slot"], false);
+    let shown = f.run(&["show", "task"]).unwrap();
+    assert_eq!(shown["last_output_age_seconds"], Value::Null);
     assert_eq!(
-        lines[0]["candidate"]["observed_project_fields"],
-        serde_json::json!([["Status", "Ready"]])
+        shown["output_age_unavailable_reason"],
+        "no reserved attempt"
     );
+    assert_eq!(f.run(&["show", "missing"]), Err(CliError::TaskNotFound));
+    assert_eq!(f.run(&["logs", "missing"]), Err(CliError::TaskNotFound));
+    assert_eq!(f.run(&["logs", "task"]), Err(CliError::AttemptNotFound));
 }
 
 #[test]
-fn discover_fails_closed_for_malformed_or_non_issue_project() {
-    let malformed = run(r#"{"data":{"node":{"items":null}}}"#);
-    assert!(!malformed.status.success());
-    assert!(malformed.stdout.is_empty());
-
-    let non_issue = run(&project(r#"{"__typename":"DraftIssue","title":"draft"}"#));
-    assert!(!non_issue.status.success());
-    assert!(non_issue.stdout.is_empty());
+fn logs_reject_foreign_attempt_traversal_and_world_readable_files() {
+    let f = Fixture::new();
+    f.task("one");
+    f.task("two");
+    f.attempt("two", "second", "session");
+    f.logs("second");
+    assert_eq!(
+        f.run(&["logs", "one", "--attempt", "second"]),
+        Err(CliError::AttemptNotFound)
+    );
+    for id in ["../second", "a/b", "..", "second\\other"] {
+        assert_eq!(
+            f.run(&["logs", "two", "--attempt", id]),
+            Err(CliError::Arguments)
+        );
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(
+            f.root().join("attempts/second.stdout.log"),
+            fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+        assert_eq!(f.run(&["logs", "two"]), Err(CliError::UnsafeLog));
+    }
 }
 
+#[cfg(unix)]
 #[test]
-fn discover_does_not_create_state_after_success_or_failure() {
-    let dir = tempdir().unwrap();
-    let state = dir.path().join("state");
-    let success = run_in(
-        dir.path(),
-        &project(
-            r#"{"__typename":"Issue","id":"ISSUE_NODE","number":7,"repository":{"id":"REPO_NODE","nameWithOwner":"org/tracker"}}"#,
-        ),
-        1,
-    );
-    assert!(success.status.success());
-    assert!(!state.exists());
-
-    let failure = run_in(dir.path(), r#"{"data":{"node":{"items":null}}}"#, 1);
-    assert!(!failure.status.success());
-    assert!(failure.stdout.is_empty());
-    assert!(!state.exists());
-}
-
-#[test]
-fn discover_ignores_live_state_lock_and_capacity_mismatch() {
-    let dir = tempdir().unwrap();
-    let state = dir.path().join("state");
-    let _store = luthor::state::StateStore::open(&state, 1).unwrap();
-    let output = run_in(
-        dir.path(),
-        &project(
-            r#"{"__typename":"Issue","id":"ISSUE_NODE","number":7,"repository":{"id":"REPO_NODE","nameWithOwner":"org/tracker"}}"#,
-        ),
-        2,
-    );
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(String::from_utf8(output.stdout).unwrap().lines().count(), 1);
+fn logs_reject_symlinks_and_receipt_path_mismatch() {
+    use std::os::unix::fs::symlink;
+    let f = Fixture::new();
+    f.task("task");
+    f.attempt("task", "attempt", "session");
+    let (stdout, stderr) = f.logs("attempt");
+    fs::remove_file(&stdout).unwrap();
+    symlink(&stderr, &stdout).unwrap();
+    assert_eq!(f.run(&["logs", "task"]), Err(CliError::UnsafeLog));
+    fs::remove_file(&stdout).unwrap();
+    fs::write(&stdout, "hello").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&stdout, fs::Permissions::from_mode(0o600)).unwrap();
+    let other = f.root().join("outside");
+    fs::write(&other, "hello").unwrap();
+    f.receipt("task", "attempt", other, stderr);
+    assert_eq!(f.run(&["logs", "task"]), Err(CliError::UnsafeLog));
 }

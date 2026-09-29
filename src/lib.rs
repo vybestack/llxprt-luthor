@@ -1,4 +1,5 @@
 pub mod claim;
+pub mod cli;
 pub mod config;
 pub mod coordinator;
 pub mod eligibility;

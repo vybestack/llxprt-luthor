@@ -41,6 +41,7 @@ create_intent:
 execution_mode: code_change
 owned_files:
 - src/main.rs
+- src/lib.rs
 - src/claim.rs
 - src/state.rs
 - src/github/pull_request.rs
