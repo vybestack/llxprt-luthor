@@ -95,7 +95,8 @@
         "Review passed: verified claim and optional milestone identity, exhaustive PR preflight, worktree and session identity, gated supervision, conservative restart capacity, operator controls and root checks. Shared state and coordinator ownership is recorded in WP03.",
         "Documented command JSON now parses and renders initial/resume argv with task-scoped session and distinct attempt prompt; root checks passed.",
         "WP03 rejected: log-failure evidence-write error leaves worker running; shared supervisor/test lane needs coordinated rework",
-        "WP03 fault fix integrated as 9bc8442; fmt, serial supervisor suite, strict clippy passed; full all-target test had transient supervisor receipt failures under parallel test execution."
+        "WP03 fault fix integrated as 9bc8442; fmt, serial supervisor suite, strict clippy passed; full all-target test had transient supervisor receipt failures under parallel test execution.",
+        "Independent review: stop-race classification test bypasses request_stop and lacks intent-before-exit-before-signal coverage; telemetry, serial offline locked tests, fmt and strict clippy pass. Shared state/main/daemon/config docs remain coordinated with the sequential WP02/WP03 lane."
       ],
       "provider": "__resolved_provider_absent__",
       "review": null,
@@ -105,13 +106,13 @@
         "reviewer": "deep-bug-investigator",
         "verdict": "changes_requested"
       },
-      "role": "reviewer",
-      "shell_pid": 95329,
-      "shell_pid_created_at": "1790706835.543026",
+      "role": "implementer",
+      "shell_pid": null,
+      "shell_pid_created_at": null,
       "subtasks": {
-        "T006": "done",
-        "T007": "done",
-        "T008": "done"
+        "T006": "planned",
+        "T007": "planned",
+        "T008": "planned"
       }
     },
     "WP04": {
