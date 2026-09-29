@@ -82,7 +82,7 @@
     },
     "WP03": {
       "actor": "user",
-      "agent": "architect",
+      "agent": null,
       "agent_profile": "__resolved_profile_absent__",
       "agent_profile_version": "__resolved_profile_version_absent__",
       "force_count": 6,
@@ -99,12 +99,12 @@
         "verdict": "changes_requested"
       },
       "role": "reviewer",
-      "shell_pid": 43558,
-      "shell_pid_created_at": "1790695236.619761",
+      "shell_pid": null,
+      "shell_pid_created_at": null,
       "subtasks": {
-        "T006": "done",
-        "T007": "done",
-        "T008": "done"
+        "T006": "planned",
+        "T007": "planned",
+        "T008": "planned"
       }
     },
     "WP04": {
