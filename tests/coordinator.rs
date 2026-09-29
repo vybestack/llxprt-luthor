@@ -757,7 +757,8 @@ fn startup_reconcile_holds_missing_receipt_without_relaunching() {
     f.run("task-a", &c, &mut github, &mut writer, &mut launcher)
         .unwrap();
     let launches = launcher.plans.len();
-    let report = startup_reconcile_all(&mut f.store, &mut github.prs).unwrap();
+    let mut projects = FakeGithub::new(&f.candidate);
+    let report = startup_reconcile_all(&mut f.store, &mut projects, &mut github.prs).unwrap();
     assert_eq!(report.attempts.len(), 1);
     assert!(matches!(report.attempts[0].review, AttemptReview::Held(_)));
     assert_eq!(f.store.reservation_count().unwrap(), 1);
@@ -768,10 +769,16 @@ fn startup_reconcile_holds_missing_receipt_without_relaunching() {
 fn unproven_stopped_attempt_never_reads_pr_or_releases_task() {
     let mut f = Fixture::new(1);
     f.stopped_but_unproven();
+    let mut projects = FakeGithub::new(&f.candidate);
     let mut prs = FakePr::default();
-    let result =
-        luthor::coordinator::reconcile_with_pr(&mut f.store, "task-a", "attempt-task-a", &mut prs)
-            .unwrap();
+    let result = luthor::coordinator::reconcile_with_pr(
+        &mut f.store,
+        "task-a",
+        "attempt-task-a",
+        &mut projects,
+        &mut prs,
+    )
+    .unwrap();
     assert!(matches!(
         result,
         luthor::supervisor::Reconciliation::Held { .. }

@@ -156,9 +156,15 @@ fn mutate(command: &str, mut values: Vec<String>) -> Result<(), Box<dyn std::err
             );
         }
         "reconcile" => {
+            let mut projects = GhProjectReader::new(PathBuf::from("gh"));
             let mut prs = GhPullRequestReader::new(PathBuf::from("gh"));
-            let result =
-                luthor::coordinator::reconcile_with_pr(&mut store, &task_id, &attempt, &mut prs)?;
+            let result = luthor::coordinator::reconcile_with_pr(
+                &mut store,
+                &task_id,
+                &attempt,
+                &mut projects,
+                &mut prs,
+            )?;
             match result {
                 luthor::supervisor::Reconciliation::Running => println!(
                     "{}",
@@ -212,8 +218,9 @@ fn dispatch(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         return Err("dispatch held: pass --execute to authorize GitHub writes".into());
     }
     let mut store = StateStore::open(&config.state_root, config.capacity)?;
+    let mut projects = GhProjectReader::new(PathBuf::from("gh"));
     let mut prs = GhPullRequestReader::new(PathBuf::from("gh"));
-    let startup = startup_reconcile_all(&mut store, &mut prs)?;
+    let startup = startup_reconcile_all(&mut store, &mut projects, &mut prs)?;
     if startup.scheduling_blocked()
         || startup.attempts.iter().any(|attempt| {
             matches!(

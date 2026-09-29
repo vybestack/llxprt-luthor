@@ -188,6 +188,14 @@ pub fn reconcile_source<P: ProjectReader>(
     Ok(report)
 }
 
+fn completion_claim_failure_reason(error: &ClaimError) -> &'static str {
+    match error {
+        ClaimError::Changed => "completion claim changed",
+        ClaimError::Source(_) => "completion claim read failed",
+        _ => unreachable!("completion claim verification only returns source or changed errors"),
+    }
+}
+
 /// Verify that the selected issue is still assigned solely to the configured
 /// login before completion is accepted.
 pub(crate) fn verify_completion_claim<P: ProjectReader>(
@@ -218,13 +226,14 @@ impl StartupReport {
 /// Reconcile every durable nonterminal attempt, even if a prior attempt cannot
 /// be verified. An error never releases its reservation and cannot be ignored by
 /// the scheduler. Source operations require proof before new selection.
-pub fn startup_reconcile_all<Q: PullRequestReader>(
+pub fn startup_reconcile_all<P: ProjectReader, Q: PullRequestReader>(
     store: &mut StateStore,
+    projects: &mut P,
     prs: &mut Q,
 ) -> Result<StartupReport, StateError> {
     let mut report = StartupReport::default();
     for (task_id, attempt_id) in store.pending_attempts()? {
-        let review = match reconcile_with_pr(store, &task_id, &attempt_id, prs) {
+        let review = match reconcile_with_pr(store, &task_id, &attempt_id, projects, prs) {
             Ok(supervisor::Reconciliation::Running) => AttemptReview::Running,
             Ok(result @ supervisor::Reconciliation::Completed { .. }) => {
                 AttemptReview::Completed(result)
@@ -248,10 +257,11 @@ pub fn startup_reconcile_all<Q: PullRequestReader>(
 
 /// Process and receipt proof precede the PR read. Only exhaustive absence
 /// releases a stopped task for resume or a natural exit for attention.
-pub fn reconcile_with_pr<Q: PullRequestReader>(
+pub fn reconcile_with_pr<P: ProjectReader, Q: PullRequestReader>(
     store: &mut StateStore,
     task_id: &str,
     attempt_id: &str,
+    projects: &mut P,
     prs: &mut Q,
 ) -> Result<supervisor::Reconciliation, SupervisorError> {
     let result = supervisor::reconcile_attempt(store, task_id, attempt_id)?;
@@ -259,18 +269,23 @@ pub fn reconcile_with_pr<Q: PullRequestReader>(
         return Ok(result);
     }
     if store.stopped_exit_for_pause(task_id, attempt_id)? {
-        return finish_verified_stopped_attempt_with_pr(store, task_id, attempt_id, prs, result);
+        return finish_verified_stopped_attempt_with_pr(
+            store, task_id, attempt_id, projects, prs, result,
+        );
     }
     if store.natural_exit_for_attention(task_id, attempt_id)? {
-        return finish_verified_natural_exit_with_pr(store, task_id, attempt_id, prs, result);
+        return finish_verified_natural_exit_with_pr(
+            store, task_id, attempt_id, projects, prs, result,
+        );
     }
     Ok(result)
 }
 
-fn finish_verified_stopped_attempt_with_pr<Q: PullRequestReader>(
+fn finish_verified_stopped_attempt_with_pr<P: ProjectReader, Q: PullRequestReader>(
     store: &mut StateStore,
     task_id: &str,
     attempt_id: &str,
+    projects: &mut P,
     prs: &mut Q,
     result: supervisor::Reconciliation,
 ) -> Result<supervisor::Reconciliation, SupervisorError> {
@@ -296,9 +311,9 @@ fn finish_verified_stopped_attempt_with_pr<Q: PullRequestReader>(
             store,
             task_id,
             attempt_id,
+            projects,
             prs,
-            *pr,
-            observed_at_unix_secs,
+            (*pr, observed_at_unix_secs),
             result,
         ),
         Ok(LookupResult::Ambiguous(_)) => Ok(supervisor::Reconciliation::Held {
@@ -310,10 +325,11 @@ fn finish_verified_stopped_attempt_with_pr<Q: PullRequestReader>(
     }
 }
 
-fn finish_verified_natural_exit_with_pr<Q: PullRequestReader>(
+fn finish_verified_natural_exit_with_pr<P: ProjectReader, Q: PullRequestReader>(
     store: &mut StateStore,
     task_id: &str,
     attempt_id: &str,
+    projects: &mut P,
     prs: &mut Q,
     result: supervisor::Reconciliation,
 ) -> Result<supervisor::Reconciliation, SupervisorError> {
@@ -362,6 +378,13 @@ fn finish_verified_natural_exit_with_pr<Q: PullRequestReader>(
             })();
             match verified {
                 Ok(verified) => {
+                    if let Err(error) = verify_completion_claim(projects, &selection) {
+                        let reason = completion_claim_failure_reason(&error);
+                        store.record_evidence(task_id, Some(attempt_id), "held_reason", reason)?;
+                        return Ok(supervisor::Reconciliation::Held {
+                            reason: reason.into(),
+                        });
+                    }
                     store.record_verified_open_pr(task_id, attempt_id, &verified)?;
                     Ok(result)
                 }
@@ -395,15 +418,16 @@ fn lookup_status(result: &Result<LookupResult, LookupError>) -> PausePrStatus {
     }
 }
 
-fn verify_and_record_open_pr<Q: PullRequestReader>(
+fn verify_and_record_open_pr<P: ProjectReader, Q: PullRequestReader>(
     store: &mut StateStore,
     task_id: &str,
     attempt_id: &str,
+    projects: &mut P,
     prs: &mut Q,
-    pr: crate::github::pull_request::PullRequestEvidence,
-    observed_at_unix_secs: u64,
+    evidence: (crate::github::pull_request::PullRequestEvidence, u64),
     result: supervisor::Reconciliation,
 ) -> Result<supervisor::Reconciliation, SupervisorError> {
+    let (pr, observed_at_unix_secs) = evidence;
     let verified = (|| {
         let login = prs
             .authenticated_identity()
@@ -415,6 +439,16 @@ fn verify_and_record_open_pr<Q: PullRequestReader>(
     })();
     match verified {
         Ok(verified) => {
+            let selection = store
+                .selection_evidence(task_id)?
+                .ok_or(StateError::InvalidSelection)?;
+            if let Err(error) = verify_completion_claim(projects, &selection) {
+                let reason = completion_claim_failure_reason(&error);
+                store.record_evidence(task_id, Some(attempt_id), "held_reason", reason)?;
+                return Ok(supervisor::Reconciliation::Held {
+                    reason: reason.into(),
+                });
+            }
             store.record_verified_open_pr(task_id, attempt_id, &verified)?;
             Ok(result)
         }
@@ -603,7 +637,7 @@ where
         ids,
     } = dependencies;
     let mut report = ScheduleReport {
-        startup: startup_reconcile_all(store, prs)?,
+        startup: startup_reconcile_all(store, projects, prs)?,
         ..Default::default()
     };
     if report.startup.scheduling_blocked() {
@@ -728,6 +762,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::github::project::{Issue, Page, ProjectItem, ProjectReadError};
     use crate::github::pull_request::ErrorCategory;
     use rusqlite::params;
     use serde_json::{Value, json};
@@ -874,6 +909,22 @@ mod tests {
 
     #[test]
     fn verified_stopped_attempt_pr_outcomes_gate_slot() {
+        struct NoProject;
+
+        impl ProjectReader for NoProject {
+            fn page(
+                &mut self,
+                _: &str,
+                _: Option<&str>,
+            ) -> Result<Page<ProjectItem>, ProjectReadError> {
+                panic!("project page should not be read")
+            }
+
+            fn issue(&mut self, _: &ProjectItem) -> Result<Issue, ProjectReadError> {
+                panic!("issue should not be read")
+            }
+        }
+
         for (scenario, expected) in [
             ("absent", PausePrStatus::Absent),
             ("open", PausePrStatus::Open),
@@ -893,10 +944,12 @@ mod tests {
                 scenario,
                 lookups: 0,
             };
+            let mut projects = NoProject;
             let result = finish_verified_stopped_attempt_with_pr(
                 &mut store,
                 "task",
                 "attempt",
+                &mut projects,
                 &mut prs,
                 supervisor::Reconciliation::Completed {
                     exit_code: Some(17),

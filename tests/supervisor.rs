@@ -1012,9 +1012,18 @@ fn natural_exit_matching_pr_is_proved_and_persisted() {
         matching: Some((selection.candidate.issue_url, identity.branch)),
         ..ExitPr::default()
     };
-    let result =
-        luthor::coordinator::reconcile_with_pr(&mut store, "task", "attempt-real", &mut prs)
-            .unwrap();
+    let mut projects = OtherProject(
+        store.selection_evidence("task").unwrap().unwrap().candidate,
+        1,
+    );
+    let result = luthor::coordinator::reconcile_with_pr(
+        &mut store,
+        "task",
+        "attempt-real",
+        &mut projects,
+        &mut prs,
+    )
+    .unwrap();
     assert!(
         matches!(
             result,
@@ -1075,9 +1084,19 @@ fn missing_receipt_cannot_be_overridden_by_matching_open_pr() {
         matching: Some((selection.candidate.issue_url, identity.branch)),
         ..ExitPr::default()
     };
+    let mut projects = OtherProject(
+        store.selection_evidence("task").unwrap().unwrap().candidate,
+        1,
+    );
     assert!(matches!(
-        luthor::coordinator::reconcile_with_pr(&mut store, "task", "attempt-real", &mut prs)
-            .unwrap(),
+        luthor::coordinator::reconcile_with_pr(
+            &mut store,
+            "task",
+            "attempt-real",
+            &mut projects,
+            &mut prs
+        )
+        .unwrap(),
         Reconciliation::Held { .. }
     ));
     assert_eq!(prs.reads, 0);
@@ -1106,8 +1125,17 @@ fn missing_receipt_cannot_be_overridden_by_matching_open_pr() {
         matching: prs.matching.clone(),
         ..ExitPr::default()
     };
+    let mut projects = OtherProject(
+        reopened
+            .selection_evidence("task")
+            .unwrap()
+            .unwrap()
+            .candidate,
+        1,
+    );
     let startup =
-        luthor::coordinator::startup_reconcile_all(&mut reopened, &mut startup_prs).unwrap();
+        luthor::coordinator::startup_reconcile_all(&mut reopened, &mut projects, &mut startup_prs)
+            .unwrap();
     assert!(matches!(
         startup.attempts[0].review,
         luthor::coordinator::AttemptReview::Held(_)
@@ -1150,9 +1178,18 @@ fn stopped_exit_matching_pr_is_proved_and_persisted() {
         matching: Some((selection.candidate.issue_url, identity.branch)),
         ..ExitPr::default()
     };
-    let result =
-        luthor::coordinator::reconcile_with_pr(&mut store, "task", "attempt-real", &mut prs)
-            .unwrap();
+    let mut projects = OtherProject(
+        store.selection_evidence("task").unwrap().unwrap().candidate,
+        1,
+    );
+    let result = luthor::coordinator::reconcile_with_pr(
+        &mut store,
+        "task",
+        "attempt-real",
+        &mut projects,
+        &mut prs,
+    )
+    .unwrap();
     assert_eq!(
         result,
         Reconciliation::Completed {
@@ -1488,9 +1525,19 @@ fn assert_natural_stop_accounted(
         Err(StateError::Capacity { .. })
     ));
     let mut prs = ExitPr::default();
+    let mut projects = OtherProject(
+        store.selection_evidence("task").unwrap().unwrap().candidate,
+        1,
+    );
     assert!(matches!(
-        luthor::coordinator::reconcile_with_pr(&mut store, "task", "attempt-real", &mut prs)
-            .unwrap(),
+        luthor::coordinator::reconcile_with_pr(
+            &mut store,
+            "task",
+            "attempt-real",
+            &mut projects,
+            &mut prs
+        )
+        .unwrap(),
         Reconciliation::Completed {
             exit_code: Some(7),
             signal: None
@@ -1581,9 +1628,19 @@ fn assert_natural_stop_accounted(
     assert!(!kinds.contains(&"independent_stop_signal".into()));
     assert!(!kinds.contains(&"independent_stop_decision".into()));
     assert_eq!(fs::read(receipt_path(config)).unwrap(), receipt);
+    let mut projects = OtherProject(
+        store.selection_evidence("task").unwrap().unwrap().candidate,
+        1,
+    );
     assert!(matches!(
-        luthor::coordinator::reconcile_with_pr(&mut store, "task", "attempt-real", &mut prs)
-            .unwrap(),
+        luthor::coordinator::reconcile_with_pr(
+            &mut store,
+            "task",
+            "attempt-real",
+            &mut projects,
+            &mut prs
+        )
+        .unwrap(),
         Reconciliation::Completed { .. }
     ));
     assert_eq!(prs.reads, 1);
@@ -1650,7 +1707,12 @@ fn natural_exit_pr_error_keeps_held_slot_and_evidence() {
         fail: true,
         ..Default::default()
     };
-    let report = luthor::coordinator::startup_reconcile_all(&mut store, &mut prs).unwrap();
+    let mut projects = OtherProject(
+        store.selection_evidence("task").unwrap().unwrap().candidate,
+        1,
+    );
+    let report =
+        luthor::coordinator::startup_reconcile_all(&mut store, &mut projects, &mut prs).unwrap();
     assert!(matches!(
         report.attempts[0].review,
         luthor::coordinator::AttemptReview::Held(_)
@@ -1682,11 +1744,16 @@ fn natural_exit_pr_error_keeps_held_slot_and_evidence() {
             .unwrap();
 
     let mut recovered_prs = ExitPr::default();
+    let mut projects = OtherProject(
+        store.selection_evidence("task").unwrap().unwrap().candidate,
+        1,
+    );
     assert!(matches!(
         luthor::coordinator::reconcile_with_pr(
             &mut store,
             "task",
             "attempt-real",
+            &mut projects,
             &mut recovered_prs
         )
         .unwrap(),
@@ -1732,8 +1799,17 @@ fn natural_exit_pr_error_keeps_held_slot_and_evidence() {
     drop(store);
     let mut reopened = StateStore::open(&config.state_root, config.capacity).unwrap();
     let mut startup_prs = ExitPr::default();
+    let mut projects = OtherProject(
+        reopened
+            .selection_evidence("task")
+            .unwrap()
+            .unwrap()
+            .candidate,
+        1,
+    );
     let startup =
-        luthor::coordinator::startup_reconcile_all(&mut reopened, &mut startup_prs).unwrap();
+        luthor::coordinator::startup_reconcile_all(&mut reopened, &mut projects, &mut startup_prs)
+            .unwrap();
     assert!(startup.attempts.is_empty());
     assert_eq!(startup_prs.reads, 0);
     assert_eq!(
@@ -1748,7 +1824,12 @@ fn uncertain_child_group_never_reads_pr_or_frees_capacity() {
     let (_dir, config, mut store) = dispatched_fixture(7);
     edit_receipt(&config, |receipt| receipt.child_pid = std::process::id());
     let mut prs = ExitPr::default();
-    let report = luthor::coordinator::startup_reconcile_all(&mut store, &mut prs).unwrap();
+    let mut projects = OtherProject(
+        store.selection_evidence("task").unwrap().unwrap().candidate,
+        1,
+    );
+    let report =
+        luthor::coordinator::startup_reconcile_all(&mut store, &mut projects, &mut prs).unwrap();
     assert!(matches!(
         report.attempts[0].review,
         luthor::coordinator::AttemptReview::Held(_)
