@@ -58,6 +58,7 @@ owned_files:
 - tests/daemon.rs
 - tests/state.rs
 - tests/eligibility.rs
+- dev-docs/config-and-state.md
 tags: []
 tracker_refs: []
 ---
