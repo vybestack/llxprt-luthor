@@ -27,10 +27,45 @@ pub enum StateError {
     InvalidCapacity,
     #[error("invalid configuration")]
     InvalidConfig,
+    #[error("candidate selection does not match effective configuration")]
+    InvalidSelection,
     #[error("configured capacity {configured} does not match persisted capacity {persisted}")]
     CapacityMismatch { configured: usize, persisted: usize },
     #[error("unsupported database version {0}")]
     UnsupportedDatabaseVersion(i32),
+}
+
+fn validate_selection(candidate: &Candidate, config: &Config) -> Result<(), StateError> {
+    let source = &candidate.source;
+    let mapping = &candidate.mapping;
+    let identity_matches = !candidate.project_id.is_empty()
+        && !candidate.item_id.is_empty()
+        && !candidate.issue_node_id.is_empty()
+        && !candidate.tracker_repo_id.is_empty()
+        && candidate.issue_number > 0
+        && candidate.issue_url
+            == format!(
+                "https://github.com/{}/issues/{}",
+                candidate.repository, candidate.issue_number
+            );
+    let milestone_matches = source
+        .milestone
+        .as_ref()
+        .map_or(candidate.milestone_title.is_none(), |title| {
+            candidate.milestone_title.as_ref() == Some(title)
+        });
+    if !config.sources.contains(source)
+        || !config.mappings.contains(mapping)
+        || candidate.project_id != source.project_id
+        || !source.repositories.contains(&candidate.repository)
+        || candidate.repository != mapping.tracker_repository
+        || candidate.marker != source.ready_marker
+        || !milestone_matches
+        || !identity_matches
+    {
+        return Err(StateError::InvalidSelection);
+    }
+    Ok(())
 }
 
 struct StateLock(File);
@@ -162,6 +197,7 @@ impl StateStore {
         config: &Config,
     ) -> Result<(), StateError> {
         config.validate().map_err(|_| StateError::InvalidConfig)?;
+        validate_selection(candidate, config)?;
         let repo_id = &candidate.tracker_repo_id;
         let issue_node_id = &candidate.issue_node_id;
         let tx = self.connection.transaction()?;

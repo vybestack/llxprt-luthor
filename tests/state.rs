@@ -127,23 +127,23 @@ use luthor::{
 };
 use rusqlite::Connection;
 
-fn candidate(repo_id: &str, issue_id: &str, repository: &str, number: u64) -> Candidate {
+fn candidate(issue_id: &str, number: u64) -> Candidate {
     Candidate {
         project_id: "project-1".into(),
         item_id: format!("item-{issue_id}"),
-        repository: repository.into(),
+        repository: "org/tracker".into(),
         issue_node_id: issue_id.into(),
         issue_number: number,
-        issue_url: format!("https://github.com/{repository}/issues/{number}"),
-        tracker_repo_id: repo_id.into(),
-        milestone_id: Some("milestone-id".into()),
-        milestone_title: Some("v1".into()),
+        issue_url: format!("https://github.com/org/tracker/issues/{number}"),
+        tracker_repo_id: "repo-node-id".into(),
+        milestone_id: None,
+        milestone_title: None,
         observed_at_unix_secs: 123,
         marker: Marker::Label {
             name: "ready".into(),
         },
         mapping: Mapping {
-            tracker_repository: repository.into(),
+            tracker_repository: "org/tracker".into(),
             code_repository: "org/code".into(),
             checkout: "/checkout".into(),
             base_branch: "main".into(),
@@ -153,11 +153,11 @@ fn candidate(repo_id: &str, issue_id: &str, repository: &str, number: u64) -> Ca
         },
         source: Source {
             project_id: "project-1".into(),
-            repositories: vec![repository.into()],
+            repositories: vec!["org/tracker".into()],
             ready_marker: Marker::Label {
                 name: "ready".into(),
             },
-            milestone: Some("v1".into()),
+            milestone: None,
         },
     }
 }
@@ -228,7 +228,7 @@ fn invalid_config_does_not_create_task_or_selection_evidence() {
     let mut invalid = config();
     invalid.capacity = 0;
     let error = store
-        .create_task("t1", &candidate("r", "i1", "repo", 1), "rev", &invalid)
+        .create_task("t1", &candidate("i1", 1), "rev", &invalid)
         .unwrap_err();
     assert_eq!(error.to_string(), "invalid configuration");
     assert_eq!(store.task_count().unwrap(), 0);
@@ -240,10 +240,10 @@ fn failed_attempt_insert_rolls_back_its_reservation() {
     let dir = tempfile::tempdir().unwrap();
     let mut store = StateStore::open(dir.path(), 2).unwrap();
     store
-        .create_task("t1", &candidate("r", "i1", "repo", 1), "rev", &config())
+        .create_task("t1", &candidate("i1", 1), "rev", &config())
         .unwrap();
     store
-        .create_task("t2", &candidate("r", "i2", "repo", 2), "rev", &config())
+        .create_task("t2", &candidate("i2", 2), "rev", &config())
         .unwrap();
     store.reserve("t1", "a1").unwrap();
     assert!(store.reserve("t2", "a1").is_err());
@@ -257,20 +257,10 @@ fn persists_identity_evidence_and_reservations_transactionally() {
     let dir = tempfile::tempdir().unwrap();
     let mut store = StateStore::open(dir.path(), 1).unwrap();
     store
-        .create_task(
-            "t1",
-            &candidate("100", "ISSUE1", "org/tracker", 1),
-            "rev",
-            &config(),
-        )
+        .create_task("t1", &candidate("ISSUE1", 1), "rev", &config())
         .unwrap();
     assert!(matches!(
-        store.create_task(
-            "t2",
-            &candidate("100", "ISSUE1", "org/tracker", 1),
-            "rev",
-            &config()
-        ),
+        store.create_task("t2", &candidate("ISSUE1", 1), "rev", &config()),
         Err(StateError::DuplicateTask(_, _))
     ));
     store
@@ -292,7 +282,7 @@ fn persists_identity_evidence_and_reservations_transactionally() {
             name: "ready".into()
         }
     );
-    assert_eq!(selection.candidate.milestone_title.as_deref(), Some("v1"));
+    assert_eq!(selection.candidate.milestone_title, None);
     assert_eq!(selection.candidate.mapping.code_repository, "org/code");
     assert_eq!(selection.candidate.observed_at_unix_secs, 123);
     assert_eq!(selection.config_revision, "rev");
@@ -310,12 +300,7 @@ fn persists_identity_evidence_and_reservations_transactionally() {
         "org/code"
     );
     assert!(matches!(
-        store.create_task(
-            "t2",
-            &candidate("100", "ISSUE1", "org/tracker", 1),
-            "rev",
-            &config()
-        ),
+        store.create_task("t2", &candidate("ISSUE1", 1), "rev", &config()),
         Err(StateError::DuplicateTask(_, _))
     ));
     assert_eq!(store.task_count().unwrap(), 1);
@@ -369,19 +354,9 @@ fn duplicate_identity_does_not_leave_partial_task() {
     let dir = tempfile::tempdir().unwrap();
     let mut store = StateStore::open(dir.path(), 1).unwrap();
     store
-        .create_task(
-            "t1",
-            &candidate("100", "ISSUE1", "org/tracker", 1),
-            "rev",
-            &config(),
-        )
+        .create_task("t1", &candidate("ISSUE1", 1), "rev", &config())
         .unwrap();
-    let _ = store.create_task(
-        "t2",
-        &candidate("100", "ISSUE1", "org/tracker", 1),
-        "rev",
-        &config(),
-    );
+    let _ = store.create_task("t2", &candidate("ISSUE1", 1), "rev", &config());
     assert_eq!(store.task_count().unwrap(), 1);
 }
 
@@ -390,12 +365,7 @@ fn reservation_history_allows_a_new_attempt_after_reopen() {
     let dir = tempfile::tempdir().unwrap();
     let mut store = StateStore::open(dir.path(), 1).unwrap();
     store
-        .create_task(
-            "task",
-            &candidate("repo", "issue", "org/repo", 1),
-            "rev",
-            &config(),
-        )
+        .create_task("task", &candidate("issue", 1), "rev", &config())
         .unwrap();
     store
         .record_evidence("task", Some("first"), "result", "prior evidence")
@@ -424,7 +394,7 @@ fn reservation_history_allows_a_new_attempt_after_reopen() {
             name: "ready".into()
         }
     );
-    assert_eq!(selection.candidate.milestone_title.as_deref(), Some("v1"));
+    assert_eq!(selection.candidate.milestone_title, None);
     assert_eq!(selection.candidate.mapping.code_repository, "org/code");
     assert_eq!(selection.candidate.observed_at_unix_secs, 123);
     assert_eq!(selection.config_revision, "rev");
@@ -455,5 +425,67 @@ fn reservation_history_allows_a_new_attempt_after_reopen() {
             ("first".into(), "released".into()),
             ("second".into(), "reserved".into())
         ]
+    );
+}
+
+#[test]
+fn invalid_selections_leave_no_task_or_evidence_after_reopen() {
+    for name in [
+        "unrelated mapping",
+        "unrelated source",
+        "mismatched marker",
+        "unexpected milestone",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut candidate = candidate(name, 1);
+        let config = config();
+        match name {
+            "unrelated mapping" => candidate.mapping.code_repository = "evil/repo".into(),
+            "unrelated source" => candidate.source.project_id = "other-project".into(),
+            "mismatched marker" => {
+                candidate.marker = Marker::Label {
+                    name: "other".into(),
+                }
+            }
+            "unexpected milestone" => candidate.milestone_title = Some("unexpected".into()),
+            _ => unreachable!(),
+        }
+        let mut store = StateStore::open(dir.path(), 1).unwrap();
+        assert!(
+            matches!(
+                store.create_task("task", &candidate, "rev", &config),
+                Err(StateError::InvalidSelection)
+            ),
+            "{name}"
+        );
+        drop(store);
+        let reopened = StateStore::open(dir.path(), 1).unwrap();
+        assert_eq!(reopened.task_count().unwrap(), 0, "{name}");
+        assert_eq!(reopened.selection_evidence("task").unwrap(), None, "{name}");
+    }
+}
+
+#[test]
+fn configured_milestone_selection_is_persisted() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut candidate = candidate("milestone-issue", 8);
+    let mut config = config();
+    config.sources[0].milestone = Some("v2".into());
+    candidate.source = config.sources[0].clone();
+    candidate.milestone_title = Some("v2".into());
+    let mut store = StateStore::open(dir.path(), 1).unwrap();
+    store
+        .create_task("task", &candidate, "rev", &config)
+        .unwrap();
+    drop(store);
+    let reopened = StateStore::open(dir.path(), 1).unwrap();
+    assert_eq!(reopened.task_count().unwrap(), 1);
+    assert_eq!(
+        reopened
+            .selection_evidence("task")
+            .unwrap()
+            .unwrap()
+            .candidate,
+        candidate
     );
 }
