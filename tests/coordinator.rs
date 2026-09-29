@@ -332,9 +332,10 @@ impl PullRequestReader for FakePr {
     }
     fn detail(&mut self, _: &str, _: u64) -> Result<Value, LookupError> {
         Ok(
-            json!({"id": 77, "state": "open", "html_url": "https://github.com/org/code/pull/7",
-            "base": {"repo": {"full_name": "org/code"}, "ref": "main"},
-            "head": {"repo": {"full_name": "org/code"}, "ref": "branch"},
+            json!({"id": 77, "number": 7, "state": "open", "html_url": "https://github.com/org/code/pull/7",
+            "body": "Tracker-Issue: https://github.com/org/tracker/issues/1", "created_at": "2026-01-01T00:00:00Z",
+            "base": {"repo": {"id": 10, "full_name": "org/code"}, "ref": "main"},
+            "head": {"repo": {"id": 10, "full_name": "org/code"}, "ref": "branch", "sha": "abc123"},
             "user": {"login": "bot"}, "draft": false }),
         )
     }

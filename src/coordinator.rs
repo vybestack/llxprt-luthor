@@ -669,10 +669,12 @@ mod tests {
         fn detail(&mut self, repository: &str, number: u64) -> Result<Value, LookupError> {
             assert_eq!(repository, "org/code");
             Ok(json!({
-                "id": number, "state": "open",
+                "id": number, "number": number, "state": "open",
                 "html_url": format!("https://github.com/org/code/pull/{number}"),
-                "base": {"repo": {"full_name": "org/code"}, "ref": "main"},
-                "head": {"repo": {"full_name": "org/code"}, "ref": "branch"},
+                "body": "Tracker-Issue: https://github.com/org/tracker/issues/1",
+                "created_at": "2026-01-01T00:00:00Z",
+                "base": {"repo": {"id": 10, "full_name": "org/code"}, "ref": "main"},
+                "head": {"repo": {"id": 10, "full_name": "org/code"}, "ref": "branch", "sha": "abc123"},
                 "user": {"login": "bot"}, "draft": false
             }))
         }

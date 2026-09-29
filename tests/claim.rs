@@ -46,7 +46,7 @@ fn item(number: u64, body: &str) -> Value {
     json!({"number":number,"body":body})
 }
 fn detail(number: u64, body: &str) -> Value {
-    json!({"id":number+100,"number":number,"html_url":format!("https://github.com/{REPO}/pull/{number}"),"body":body,"state":"open","draft":true,"base":{"ref":"main","repo":{"full_name":REPO}},"head":{"ref":format!("agent/{number}"),"repo":{"full_name":"fork/project"}},"user":{"login":"agent"},"mergeable_state":"dirty"})
+    json!({"id":number+100,"number":number,"html_url":format!("https://github.com/{REPO}/pull/{number}"),"body":body,"state":"open","draft":true,"created_at":"2026-01-01T00:00:00Z","base":{"ref":"main","repo":{"id":10,"full_name":REPO}},"head":{"sha":format!("sha-{number}"),"ref":format!("agent/{number}"),"repo":{"id":20,"full_name":"fork/project"}},"user":{"login":"agent"},"mergeable_state":"dirty"})
 }
 fn matching(number: u64) -> (Value, Value) {
     let body = format!("body\nTracker-Issue: {ISSUE}\n");
@@ -57,7 +57,7 @@ fn matching(number: u64) -> (Value, Value) {
 fn exhausts_two_pages_before_returning_absent() {
     let mut fake = Fake::default();
     fake.pages
-        .insert(1, (0..100).map(|n| item(n, "other")).collect());
+        .insert(1, (1..=100).map(|n| item(n, "other")).collect());
     fake.pages.insert(2, vec![]);
     assert_eq!(lookup(&mut fake, REPO, ISSUE), Ok(LookupResult::Absent));
 }

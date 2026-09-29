@@ -6,20 +6,28 @@ use thiserror::Error;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PullRequestEvidence {
     pub id: u64,
+    pub number: u64,
     pub url: String,
+    pub repository_id: u64,
     pub repository: String,
+    pub base_repository_id: u64,
     pub base_repository: String,
     pub base_branch: String,
+    pub head_repository_id: u64,
     pub head_repository: String,
     pub head_branch: String,
     pub author: String,
     pub draft: bool,
+    pub tracker_issue_url: String,
+    pub checks: Vec<String>,
+    pub created_at: String,
+    pub commit_sha: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LookupResult {
     Absent,
-    OpenPreexisting(PullRequestEvidence),
+    OpenPreexisting(Box<PullRequestEvidence>),
     Ambiguous(Vec<PullRequestEvidence>),
 }
 
@@ -98,13 +106,11 @@ impl GhPullRequestReader {
 impl PullRequestReader for GhPullRequestReader {
     fn page(&mut self, repository: &str, page: u32) -> Result<Vec<Value>, LookupError> {
         let path = format!("repos/{repository}/pulls?state=open&per_page=100&page={page}");
-        let value = self.api(&["api", &path])?;
-        value
+        self.api(&["api", &path])?
             .as_array()
             .cloned()
             .ok_or_else(|| error(ErrorCategory::Malformed, "invalid-page", None))
     }
-
     fn detail(&mut self, repository: &str, number: u64) -> Result<Value, LookupError> {
         self.api(&["api", &format!("repos/{repository}/pulls/{number}")])
     }
@@ -130,6 +136,7 @@ pub fn lookup<R: PullRequestReader>(
             let number = item
                 .get("number")
                 .and_then(Value::as_u64)
+                .filter(|n| *n > 0)
                 .ok_or_else(|| error(ErrorCategory::Malformed, "invalid-list-entry", None))?;
             let body = item
                 .get("body")
@@ -140,8 +147,8 @@ pub fn lookup<R: PullRequestReader>(
             }
             let detail = reader.detail(repository, number)?;
             let evidence = parse_evidence(&detail, repository)?;
-            if evidence.id == 0 {
-                return Err(error(ErrorCategory::Malformed, "invalid-pr-id", None));
+            if evidence.number != number || evidence.tracker_issue_url != issue_url {
+                return Err(error(ErrorCategory::Malformed, "invalid-pr-details", None));
             }
             matches.push(evidence);
         }
@@ -154,7 +161,7 @@ pub fn lookup<R: PullRequestReader>(
     }
     Ok(match matches.len() {
         0 => LookupResult::Absent,
-        1 => LookupResult::OpenPreexisting(matches.remove(0)),
+        1 => LookupResult::OpenPreexisting(Box::new(matches.remove(0))),
         _ => LookupResult::Ambiguous(matches),
     })
 }
@@ -166,16 +173,38 @@ fn has_tracker_line(body: &str, issue_url: &str) -> bool {
 
 fn parse_evidence(value: &Value, repository: &str) -> Result<PullRequestEvidence, LookupError> {
     let bad = || error(ErrorCategory::Malformed, "invalid-pr-details", None);
-    let id = value.get("id").and_then(Value::as_u64).ok_or_else(bad)?;
+    let id = value
+        .get("id")
+        .and_then(Value::as_u64)
+        .filter(|id| *id > 0)
+        .ok_or_else(bad)?;
+    let number = value
+        .get("number")
+        .and_then(Value::as_u64)
+        .filter(|n| *n > 0)
+        .ok_or_else(bad)?;
     let state = value.get("state").and_then(Value::as_str).ok_or_else(bad)?;
     if state != "open" {
         return Err(bad());
     }
     let url = string(value, "html_url").ok_or_else(bad)?;
     let expected_prefix = format!("https://github.com/{repository}/pull/");
-    if !url.starts_with(&expected_prefix) {
+    let url_number = url.strip_prefix(&expected_prefix).ok_or_else(bad)?;
+    if url_number != number.to_string() {
         return Err(bad());
     }
+    let repository_id = value
+        .pointer("/base/repo/id")
+        .and_then(Value::as_u64)
+        .filter(|id| *id > 0)
+        .ok_or_else(bad)?;
+    let base_repository_id = repository_id;
+    let head_repository_id = value
+        .pointer("/head/repo/id")
+        .and_then(Value::as_u64)
+        .filter(|id| *id > 0)
+        .ok_or_else(bad)?;
+    let body = value.get("body").and_then(Value::as_str).ok_or_else(bad)?;
     let base_repository = value
         .pointer("/base/repo/full_name")
         .and_then(Value::as_str)
@@ -213,16 +242,41 @@ fn parse_evidence(value: &Value, repository: &str) -> Result<PullRequestEvidence
         .get("draft")
         .and_then(Value::as_bool)
         .ok_or_else(bad)?;
+    let created_at = value
+        .get("created_at")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(bad)?
+        .to_owned();
+    let commit_sha = value
+        .pointer("/head/sha")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(bad)?
+        .to_owned();
+    let tracker_issue_url = body
+        .lines()
+        .find_map(|line| line.strip_prefix("Tracker-Issue: "))
+        .unwrap_or("")
+        .to_owned();
     Ok(PullRequestEvidence {
         id,
+        number,
         url: url.to_owned(),
+        repository_id,
         repository: repository.to_owned(),
+        base_repository_id,
         base_repository,
         base_branch,
+        head_repository_id,
         head_repository,
         head_branch,
         author,
         draft,
+        tracker_issue_url,
+        checks: Vec::new(),
+        created_at,
+        commit_sha,
     })
 }
 
