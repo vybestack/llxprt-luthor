@@ -6,6 +6,7 @@ use crate::{
         project::{ProjectReader, enumerate_target},
         pull_request::{LookupError, LookupResult, PullRequestReader, lookup},
     },
+    pr_evidence::{VerifiedOpenPr, expected_for_task},
     state::{ExitPrEvidence, PausePrEvidence, PausePrStatus, StateError, StateStore},
     supervisor::{self, LaunchPlan, SupervisorError},
     worktree::{self, WorktreeError, WorktreeInspection},
@@ -293,26 +294,65 @@ fn finish_verified_natural_exit_with_pr<Q: PullRequestReader>(
         .selection_evidence(task_id)?
         .ok_or(StateError::InvalidSelection)?;
     let repository = &selection.candidate.mapping.code_repository;
-    let status = exit_lookup_status(prs, repository, &selection.candidate.issue_url);
+    let lookup_result = lookup(prs, repository, &selection.candidate.issue_url);
     let observed_at_unix_secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| SupervisorError::IdentityUnavailable)?
         .as_secs();
+    let lookup_status = match &lookup_result {
+        Ok(LookupResult::Absent) => PausePrStatus::Absent,
+        Ok(LookupResult::OpenPreexisting(_)) => PausePrStatus::Open,
+        Ok(LookupResult::Ambiguous(_)) => PausePrStatus::Ambiguous,
+        Err(error) => PausePrStatus::Error {
+            category: error.category,
+            code: error.code.to_owned(),
+            http_status: error.status,
+        },
+    };
     let proof = ExitPrEvidence {
         observed_at_unix_secs,
         repository: repository.clone(),
-        status,
+        status: lookup_status,
     };
     store.record_exit_pr_lookup(task_id, attempt_id, &proof)?;
-    let reason = match proof.status {
-        PausePrStatus::Absent => return Ok(result),
-        PausePrStatus::Open => "exit PR present",
-        PausePrStatus::Ambiguous => "exit PR ambiguous",
-        PausePrStatus::Error { .. } => "exit PR read failed",
-    };
-    Ok(supervisor::Reconciliation::Held {
-        reason: reason.into(),
-    })
+    match lookup_result {
+        Ok(LookupResult::Absent) => Ok(result),
+        Ok(LookupResult::OpenPreexisting(pr)) => {
+            let verified = (|| {
+                let login = prs
+                    .authenticated_identity()
+                    .map_err(|_| "exit PR identity unavailable")?;
+                let expected = expected_for_task(store, task_id, prs, &login)
+                    .map_err(|_| "exit PR evidence unavailable")?;
+                VerifiedOpenPr::from_matching(
+                    *pr,
+                    &expected,
+                    &login,
+                    attempt_id,
+                    observed_at_unix_secs,
+                )
+                .map_err(|_| "exit PR verification failed")
+            })();
+            match verified {
+                Ok(verified) => {
+                    store.record_verified_open_pr(task_id, attempt_id, &verified)?;
+                    Ok(result)
+                }
+                Err(reason) => {
+                    store.record_evidence(task_id, Some(attempt_id), "held_reason", reason)?;
+                    Ok(supervisor::Reconciliation::Held {
+                        reason: reason.into(),
+                    })
+                }
+            }
+        }
+        Ok(LookupResult::Ambiguous(_)) => Ok(supervisor::Reconciliation::Held {
+            reason: "exit PR ambiguous".into(),
+        }),
+        Err(_) => Ok(supervisor::Reconciliation::Held {
+            reason: "exit PR read failed".into(),
+        }),
+    }
 }
 
 fn exit_lookup_status<Q: PullRequestReader>(
