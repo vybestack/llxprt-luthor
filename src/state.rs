@@ -1019,7 +1019,8 @@ impl StateStore {
                    (SELECT COUNT(*) FROM evidence WHERE attempt_id=?1 AND task_id=?2 AND kind='attempt_exit')=1
                AND (SELECT COUNT(*) FROM evidence WHERE task_id=?2 AND kind='claim_verified')=1
                AND (SELECT COUNT(*) FROM evidence WHERE task_id=?2 AND kind='worktree_created')=1
-               AND (SELECT COUNT(*) FROM evidence WHERE attempt_id=?1 AND kind='attempt_exit')=0",
+               AND (SELECT COUNT(*) FROM evidence WHERE attempt_id=?1 AND kind='attempt_exit')=0
+               AND (SELECT COUNT(*) FROM evidence WHERE attempt_id=?1 AND kind='log_failure')=0",
             params![attempt_id, task_id], |row| row.get(0)
         )?;
         if valid != 1 {

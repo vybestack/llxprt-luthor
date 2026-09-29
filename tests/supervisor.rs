@@ -5,6 +5,7 @@ use luthor::{
     supervisor::{
         Reconciliation, SupervisorError, execute_with_binary, prepare_initial, prepare_resume,
         reconcile_attempt, request_stop, run_gated_child_with_binary,
+        run_gated_child_with_log_writers,
     },
 };
 use std::{fs, io::Cursor, path::Path};
@@ -345,6 +346,117 @@ fn released_gate_captures_durable_logs_and_receipts_real_exit() {
         assert_eq!(
             receipt.stdout_path,
             dir.path().join(format!("{attempt}.stdout.log"))
+        );
+    }
+}
+
+#[cfg(unix)]
+struct BrokenLog(std::fs::File);
+
+#[cfg(unix)]
+impl std::io::Write for BrokenLog {
+    fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+        Err(std::io::Error::other("injected log write failure"))
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        std::io::Write::flush(&mut self.0)
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn live_worker_log_write_failure_stops_and_holds_both_streams() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::{io::Write, time::Instant};
+    for stream in ["stdout", "stderr"] {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, candidate) = configured(dir.path());
+        let mut store = StateStore::open(&config.state_root, 1).unwrap();
+        claimed(&mut store, &config, &candidate, dir.path());
+        let worker = dir.path().join("worker-that-must-not-run");
+        fs::write(
+            &worker,
+            "#!/bin/sh\nwhile :; do printf 'out\\n'; printf 'err\\n' >&2; done\n",
+        )
+        .unwrap();
+        fs::set_permissions(&worker, fs::Permissions::from_mode(0o700)).unwrap();
+        let plan = prepare_initial(&mut store, "task", "attempt-1").unwrap();
+        store
+            .begin_supervision("task", "attempt-1", &serde_json::to_string(&plan).unwrap())
+            .unwrap();
+        let attempts = config.state_root.join("attempts");
+        fs::create_dir(&attempts).unwrap();
+        fs::set_permissions(&attempts, fs::Permissions::from_mode(0o700)).unwrap();
+        let started = Instant::now();
+        let result = run_gated_child_with_log_writers(
+            &plan,
+            Cursor::new(b"R"),
+            &attempts,
+            Path::new(env!("CARGO_BIN_EXE_luthor")),
+            |out, err| {
+                if stream == "stdout" {
+                    (
+                        Box::new(BrokenLog(out)) as Box<dyn Write + Send>,
+                        Box::new(err) as Box<dyn Write + Send>,
+                    )
+                } else {
+                    (
+                        Box::new(out) as Box<dyn Write + Send>,
+                        Box::new(BrokenLog(err)) as Box<dyn Write + Send>,
+                    )
+                }
+            },
+        );
+        assert!(
+            matches!(result, Err(SupervisorError::ExecutionUnavailable)),
+            "{stream}: {result:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{stream}: stop took too long"
+        );
+        let failure: String = rusqlite::Connection::open(config.state_root.join("state.sqlite3"))
+            .unwrap()
+            .query_row(
+                "SELECT payload FROM evidence WHERE task_id='task' AND attempt_id='attempt-1' AND kind='log_failure'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let failure: serde_json::Value = serde_json::from_str(&failure).unwrap();
+        assert_eq!(failure["stream"], stream);
+        assert!(
+            failure["error"]
+                .as_str()
+                .unwrap()
+                .contains("injected log write failure")
+        );
+        assert!(store.stop_intent("task", "attempt-1").unwrap().is_some());
+        assert_eq!(store.reservation_count().unwrap(), 1);
+        assert_eq!(store.task_phase("task").unwrap().as_deref(), Some("held"));
+        assert!(!attempts.join("attempt-1.receipt.json").exists());
+        let child: serde_json::Value =
+            serde_json::from_slice(&fs::read(attempts.join("attempt-1.child.json")).unwrap())
+                .unwrap();
+        let pgid = child["pid"].as_i64().unwrap() as i32;
+        store
+            .record_evidence(
+                "task",
+                Some("attempt-1"),
+                "child_registered",
+                &child.to_string(),
+            )
+            .unwrap();
+        assert!(matches!(
+            reconcile_attempt(&mut store, "task", "attempt-1").unwrap(),
+            Reconciliation::Held { reason } if reason == "log drain failed"
+        ));
+        assert_eq!(store.reservation_count().unwrap(), 1);
+        assert_eq!(unsafe { libc::kill(-pgid, 0) }, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
         );
     }
 }

@@ -11,6 +11,7 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
     process::{Command, ExitStatus, Stdio},
+    sync::mpsc,
     thread,
     time::{Duration, Instant},
 };
@@ -877,7 +878,24 @@ pub fn run_gated_child_with_binary<R: Read>(
     store_root: &Path,
     binary: &Path,
 ) -> Result<ExitStatus, SupervisorError> {
-    run_gated_child_control(plan, gate, store_root, None, binary)
+    run_gated_child_control(plan, gate, store_root, None, binary, |out, err| (out, err))
+}
+
+/// Allows a controlled log writer to be injected without changing filesystem-wide behavior.
+#[cfg(unix)]
+pub fn run_gated_child_with_log_writers<R, O, E>(
+    plan: &LaunchPlan,
+    gate: R,
+    store_root: &Path,
+    binary: &Path,
+    writers: impl FnOnce(File, File) -> (O, E),
+) -> Result<ExitStatus, SupervisorError>
+where
+    R: Read,
+    O: Write + Send + 'static,
+    E: Write + Send + 'static,
+{
+    run_gated_child_control(plan, gate, store_root, None, binary, writers)
 }
 
 #[cfg(unix)]
@@ -914,13 +932,104 @@ fn configure_session(command: &mut Command, session: &SessionEnvironment) {
 }
 
 #[cfg(unix)]
-fn run_gated_child_control<R: Read>(
+fn record_log_failure(
+    plan: &LaunchPlan,
+    store_root: &Path,
+    stream: &str,
+    error: &str,
+) -> Result<(), SupervisorError> {
+    let path = store_root
+        .parent()
+        .ok_or(SupervisorError::Conflict)?
+        .join("state.sqlite3");
+    let mut connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+    connection.busy_timeout(Duration::from_secs(2))?;
+    let tx = connection.transaction()?;
+    let detail =
+        serde_json::json!({"task_id":plan.task_id,"attempt_id":plan.attempt_id}).to_string();
+    let persisted: Option<String> = tx
+        .query_row(
+            "SELECT detail FROM intents WHERE task_id=?1 AND attempt_id=?2 AND kind='stop'",
+            params![plan.task_id, plan.attempt_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if persisted.as_ref().is_some_and(|prior| prior != &detail) {
+        return Err(SupervisorError::Conflict);
+    }
+    if persisted.is_none() {
+        tx.execute(
+            "INSERT INTO intents(id,task_id,attempt_id,kind,detail) VALUES(?1,?2,?3,'stop',?4)",
+            params![
+                format!("stop-{}", plan.attempt_id),
+                plan.task_id,
+                plan.attempt_id,
+                detail
+            ],
+        )?;
+    }
+    let payload = serde_json::json!({"stream":stream,"error":error}).to_string();
+    tx.execute(
+        "INSERT INTO evidence(task_id,attempt_id,kind,payload) VALUES(?1,?2,'log_failure',?3)",
+        params![plan.task_id, plan.attempt_id, payload],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn stop_failed_log_child(
+    child: &mut Child,
+    registered: &ChildIdentity,
+) -> Result<(), SupervisorError> {
+    let pid = i32::try_from(registered.pid).map_err(|_| SupervisorError::StopUnavailable)?;
+    for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGKILL] {
+        if group_absent(pid) {
+            return if child.try_wait()?.is_some() {
+                Ok(())
+            } else {
+                Err(SupervisorError::StopUnavailable)
+            };
+        }
+        if !matching_child(registered) {
+            return Err(SupervisorError::StopUnavailable);
+        }
+        if unsafe { libc::kill(-pid, signal) } != 0 {
+            if group_absent(pid) && child.try_wait()?.is_some() {
+                return Ok(());
+            }
+            return Err(SupervisorError::StopUnavailable);
+        }
+        let deadline = Instant::now() + Duration::from_millis(400);
+        while Instant::now() < deadline {
+            let exited = child.try_wait()?.is_some();
+            if group_absent(pid) {
+                return if exited {
+                    Ok(())
+                } else {
+                    Err(SupervisorError::StopUnavailable)
+                };
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+    Err(SupervisorError::StopUnavailable)
+}
+
+#[cfg(unix)]
+fn run_gated_child_control<R, O, E>(
     plan: &LaunchPlan,
     mut gate: R,
     store_root: &Path,
     control: Option<&UnixListener>,
     binary: &Path,
-) -> Result<ExitStatus, SupervisorError> {
+    writers: impl FnOnce(File, File) -> (O, E),
+) -> Result<ExitStatus, SupervisorError>
+where
+    R: Read,
+    O: Write + Send + 'static,
+    E: Write + Send + 'static,
+{
     if !valid_attempt(&plan.attempt_id) {
         return Err(SupervisorError::Conflict);
     }
@@ -929,6 +1038,8 @@ fn run_gated_child_control<R: Read>(
     let stderr_path = store_root.join(format!("{}.stderr.log", plan.attempt_id));
     let stdout_file = private_file(&stdout_path)?;
     let stderr_file = private_file(&stderr_path)?;
+    let out_sync = stdout_file.try_clone()?;
+    let err_sync = stderr_file.try_clone()?;
     let plan_path = store_root.join(format!("{}.plan.json", plan.attempt_id));
     if control.is_none() {
         write_private_json(&plan_path, plan)?;
@@ -1009,28 +1120,67 @@ fn run_gated_child_control<R: Read>(
         }
     };
     let pid = child.id();
-    let boot_identity = registered.boot_identity;
-    let child_start_identity = registered.start_identity;
+    let boot_identity = registered.boot_identity.clone();
+    let child_start_identity = registered.start_identity.clone();
     let stdout = child.stdout.take().expect("piped stdout");
     let stderr = child.stderr.take().expect("piped stderr");
-    let out_thread = thread::spawn(move || -> Result<u64, std::io::Error> {
-        let mut file = stdout_file;
-        let bytes = std::io::copy(&mut std::io::BufReader::new(stdout), &mut file)?;
-        file.sync_all()?;
-        Ok(bytes)
+    let (mut out_file, mut err_file) = writers(stdout_file, stderr_file);
+    let (sender, receiver) = mpsc::channel();
+    let out_sender = sender.clone();
+    let out_thread = thread::spawn(move || {
+        let result =
+            std::io::copy(&mut std::io::BufReader::new(stdout), &mut out_file).and_then(|bytes| {
+                out_file.flush()?;
+                out_sync.sync_all()?;
+                Ok(bytes)
+            });
+        let _ = out_sender.send(("stdout", result));
     });
-    let err_thread = thread::spawn(move || -> Result<u64, std::io::Error> {
-        let mut file = stderr_file;
-        let bytes = std::io::copy(&mut std::io::BufReader::new(stderr), &mut file)?;
-        file.sync_all()?;
-        Ok(bytes)
+    let err_thread = thread::spawn(move || {
+        let result =
+            std::io::copy(&mut std::io::BufReader::new(stderr), &mut err_file).and_then(|bytes| {
+                err_file.flush()?;
+                err_sync.sync_all()?;
+                Ok(bytes)
+            });
+        let _ = sender.send(("stderr", result));
     });
     let mut stop_signals = Vec::new();
-    let status = if let Some(listener) = control {
-        loop {
-            if let Some(status) = child.try_wait()? {
-                break status;
+    let mut status = None;
+    let mut stdout_bytes = None;
+    let mut stderr_bytes = None;
+    let mut exited_at = None;
+    while status.is_none() || stdout_bytes.is_none() || stderr_bytes.is_none() {
+        if status.is_none() {
+            status = child.try_wait()?;
+            if status.is_some() {
+                exited_at = Some(Instant::now());
             }
+        }
+        while let Ok((stream, result)) = receiver.try_recv() {
+            let bytes = match result {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    record_log_failure(plan, store_root, stream, &error.to_string())?;
+                    stop_failed_log_child(&mut child, &registered)?;
+                    return Err(SupervisorError::ExecutionUnavailable);
+                }
+            };
+            match stream {
+                "stdout" => stdout_bytes = Some(bytes),
+                "stderr" => stderr_bytes = Some(bytes),
+                _ => unreachable!(),
+            }
+        }
+        if status.is_some() && stdout_bytes.is_some() && stderr_bytes.is_some() {
+            break;
+        }
+        if exited_at.is_some_and(|at| at.elapsed() > Duration::from_secs(2)) {
+            return Err(SupervisorError::ExecutionUnavailable);
+        }
+        if status.is_none()
+            && let Some(listener) = control
+        {
             match listener.accept() {
                 Ok((mut stream, _)) => handle_stop(
                     &mut stream,
@@ -1044,17 +1194,18 @@ fn run_gated_child_control<R: Read>(
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
                 Err(error) => return Err(error.into()),
             }
-            thread::sleep(Duration::from_millis(20));
         }
-    } else {
-        child.wait()?
-    };
-    let stdout_bytes = out_thread
+        thread::sleep(Duration::from_millis(20));
+    }
+    out_thread
         .join()
-        .map_err(|_| SupervisorError::ExecutionUnavailable)??;
-    let stderr_bytes = err_thread
+        .map_err(|_| SupervisorError::ExecutionUnavailable)?;
+    err_thread
         .join()
-        .map_err(|_| SupervisorError::ExecutionUnavailable)??;
+        .map_err(|_| SupervisorError::ExecutionUnavailable)?;
+    let status = status.expect("worker exited");
+    let stdout_bytes = stdout_bytes.expect("stdout drained");
+    let stderr_bytes = stderr_bytes.expect("stderr drained");
     let signal = {
         use std::os::unix::process::ExitStatusExt;
         status.signal()
@@ -1218,6 +1369,12 @@ pub fn reconcile_attempt(
         || child_file.start_identity.is_empty()
     {
         return Ok(held("child registration mismatch"));
+    }
+    if store
+        .evidence_payload(task_id, Some(attempt_id), "log_failure")?
+        .is_some()
+    {
+        return Ok(held("log drain failed"));
     }
     let receipt: ExitReceipt =
         match private_bytes(&attempts.join(format!("{attempt_id}.receipt.json")))
@@ -1452,6 +1609,7 @@ pub fn supervise(root: &Path, attempt: &str) -> Result<(), SupervisorError> {
             &attempts,
             Some(&listener),
             &env::current_exe()?,
+            |out, err| (out, err),
         )?;
         #[cfg(not(unix))]
         run_gated_child(&plan, std::io::stdin(), &attempts)?;
