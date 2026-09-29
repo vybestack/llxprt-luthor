@@ -91,19 +91,20 @@
       "last_transition_at": "2026-09-29T11:38:37.868269+00:00",
       "model": "__resolved_model_absent__",
       "provider": "__resolved_provider_absent__",
+      "review": null,
       "review_result": {
         "feedback_path": "/Volumes/XS1000/acoliver/projects/llxprt-luthor/branch-1/kitty-specs/luthor-issue-to-pr-daemon-01M3N2VK/tasks/WP03-claim-worktree-agent/review-cycle-1.md",
         "reference": "review-cycle://luthor-issue-to-pr-daemon-01M3N2VK/WP03-claim-worktree-agent/review-cycle-1.md",
         "reviewer": "deepthinker",
         "verdict": "changes_requested"
       },
-      "role": "reviewer",
-      "shell_pid": 8403,
-      "shell_pid_created_at": "1790681443.411776",
+      "role": "implementer",
+      "shell_pid": null,
+      "shell_pid_created_at": null,
       "subtasks": {
-        "T006": "done",
-        "T007": "done",
-        "T008": "done"
+        "T006": "planned",
+        "T007": "planned",
+        "T008": "planned"
       }
     },
     "WP04": {
