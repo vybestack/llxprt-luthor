@@ -1,5 +1,7 @@
+use crate::eligibility::Candidate;
 use fs2::FileExt;
 use rusqlite::{Connection, OptionalExtension, params};
+use serde::Serialize;
 use std::{
     fs::{self, File, OpenOptions},
     path::{Path, PathBuf},
@@ -12,6 +14,8 @@ pub enum StateError {
     Sql(#[from] rusqlite::Error),
     #[error(transparent)]
     Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Serialization(#[from] serde_json::Error),
     #[error("task identity already exists: {0}/{1}")]
     DuplicateTask(String, String),
     #[error("capacity exhausted: {reserved} reservations for capacity {capacity}")]
@@ -36,6 +40,12 @@ pub struct StateStore {
     connection: Connection,
     _lock: StateLock,
     root: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct SelectionEvidence {
+    pub candidate: Candidate,
+    pub config_revision: String,
 }
 
 impl StateStore {
@@ -116,12 +126,11 @@ impl StateStore {
     pub fn create_task(
         &mut self,
         id: &str,
-        repo_id: &str,
-        issue_node_id: &str,
-        repository: &str,
-        number: u64,
-        revision: &str,
+        candidate: &Candidate,
+        config_revision: &str,
     ) -> Result<(), StateError> {
+        let repo_id = &candidate.tracker_repo_id;
+        let issue_node_id = &candidate.issue_node_id;
         let tx = self.connection.transaction()?;
         let exists: Option<String> = tx
             .query_row(
@@ -136,7 +145,16 @@ impl StateStore {
                 issue_node_id.into(),
             ));
         }
-        tx.execute("INSERT INTO tasks(id,tracker_repo_id,issue_node_id,repository,issue_number,state,config_revision) VALUES(?1,?2,?3,?4,?5,'preparing',?6)", params![id, repo_id, issue_node_id, repository, number, revision])?;
+        tx.execute("INSERT INTO tasks(id,tracker_repo_id,issue_node_id,repository,issue_number,state,config_revision) VALUES(?1,?2,?3,?4,?5,'preparing',?6)", params![id, repo_id, issue_node_id, candidate.repository, candidate.issue_number, config_revision])?;
+        let evidence = SelectionEvidence {
+            candidate: candidate.clone(),
+            config_revision: config_revision.to_owned(),
+        };
+        let payload = serde_json::to_string(&evidence)?;
+        tx.execute(
+            "INSERT INTO evidence(task_id,attempt_id,kind,payload) VALUES(?1,NULL,'selection',?2)",
+            params![id, payload],
+        )?;
         tx.commit()?;
         Ok(())
     }
@@ -225,5 +243,18 @@ impl StateStore {
             .prepare("SELECT kind FROM evidence WHERE task_id=?1 ORDER BY sequence")?;
         let rows = statement.query_map([task_id], |r| r.get(0))?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn selection_evidence(
+        &self,
+        task_id: &str,
+    ) -> Result<Option<SelectionEvidence>, StateError> {
+        let payload: Option<String> = self.connection.query_row(
+            "SELECT payload FROM evidence WHERE task_id=?1 AND kind='selection' ORDER BY sequence LIMIT 1",
+            [task_id], |row| row.get(0),
+        ).optional()?;
+        payload
+            .map(|payload| serde_json::from_str(&payload).map_err(StateError::from))
+            .transpose()
     }
 }

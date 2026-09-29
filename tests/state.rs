@@ -63,7 +63,46 @@ fn failed_v1_migration_rolls_back_schema_and_version() {
     );
 }
 
+use luthor::{
+    config::{Mapping, Marker, Source},
+    eligibility::Candidate,
+};
 use rusqlite::Connection;
+
+fn candidate(repo_id: &str, issue_id: &str, repository: &str, number: u64) -> Candidate {
+    Candidate {
+        project_id: "project-1".into(),
+        item_id: format!("item-{issue_id}"),
+        repository: repository.into(),
+        issue_node_id: issue_id.into(),
+        issue_number: number,
+        issue_url: format!("https://github.com/{repository}/issues/{number}"),
+        tracker_repo_id: repo_id.into(),
+        milestone_id: Some("milestone-id".into()),
+        milestone_title: Some("v1".into()),
+        observed_at_unix_secs: 123,
+        marker: Marker::Label {
+            name: "ready".into(),
+        },
+        mapping: Mapping {
+            tracker_repository: repository.into(),
+            code_repository: "org/code".into(),
+            checkout: "/checkout".into(),
+            base_branch: "main".into(),
+            push_remote: "origin".into(),
+            allowed_pr_head_repository: "bot/fork".into(),
+            allowed_pr_author: "bot".into(),
+        },
+        source: Source {
+            project_id: "project-1".into(),
+            repositories: vec![repository.into()],
+            ready_marker: Marker::Label {
+                name: "ready".into(),
+            },
+            milestone: Some("v1".into()),
+        },
+    }
+}
 
 #[test]
 fn persisted_capacity_is_authoritative_and_schema_version_is_checked() {
@@ -96,10 +135,10 @@ fn failed_attempt_insert_rolls_back_its_reservation() {
     let dir = tempfile::tempdir().unwrap();
     let mut store = StateStore::open(dir.path(), 2).unwrap();
     store
-        .create_task("t1", "r", "i1", "repo", 1, "rev")
+        .create_task("t1", &candidate("r", "i1", "repo", 1), "rev")
         .unwrap();
     store
-        .create_task("t2", "r", "i2", "repo", 2, "rev")
+        .create_task("t2", &candidate("r", "i2", "repo", 2), "rev")
         .unwrap();
     store.reserve("t1", "a1").unwrap();
     assert!(store.reserve("t2", "a1").is_err());
@@ -113,10 +152,10 @@ fn persists_identity_evidence_and_reservations_transactionally() {
     let dir = tempfile::tempdir().unwrap();
     let mut store = StateStore::open(dir.path(), 1).unwrap();
     store
-        .create_task("t1", "100", "ISSUE1", "org/tracker", 1, "rev")
+        .create_task("t1", &candidate("100", "ISSUE1", "org/tracker", 1), "rev")
         .unwrap();
     assert!(matches!(
-        store.create_task("t2", "100", "ISSUE1", "org/tracker", 1, "rev"),
+        store.create_task("t2", &candidate("100", "ISSUE1", "org/tracker", 1), "rev"),
         Err(StateError::DuplicateTask(_, _))
     ));
     store
@@ -127,8 +166,27 @@ fn persists_identity_evidence_and_reservations_transactionally() {
         .unwrap();
     assert_eq!(
         store.evidence_kinds("t1").unwrap(),
-        vec!["project", "direct_issue"]
+        vec!["selection", "project", "direct_issue"]
     );
+    let selection = store.selection_evidence("t1").unwrap().unwrap();
+    assert_eq!(selection.candidate.project_id, "project-1");
+    assert_eq!(selection.candidate.item_id, "item-ISSUE1");
+    assert_eq!(
+        selection.candidate.marker,
+        Marker::Label {
+            name: "ready".into()
+        }
+    );
+    assert_eq!(selection.candidate.milestone_title.as_deref(), Some("v1"));
+    assert_eq!(selection.candidate.mapping.code_repository, "org/code");
+    assert_eq!(selection.candidate.observed_at_unix_secs, 123);
+    assert_eq!(selection.config_revision, "rev");
+    assert!(matches!(
+        store.create_task("t2", &candidate("100", "ISSUE1", "org/tracker", 1), "rev"),
+        Err(StateError::DuplicateTask(_, _))
+    ));
+    assert_eq!(store.task_count().unwrap(), 1);
+    assert_eq!(store.selection_evidence("t2").unwrap(), None);
     store.reserve("t1", "a1").unwrap();
     assert!(matches!(
         store.reserve("t1", "a2"),
@@ -178,9 +236,9 @@ fn duplicate_identity_does_not_leave_partial_task() {
     let dir = tempfile::tempdir().unwrap();
     let mut store = StateStore::open(dir.path(), 1).unwrap();
     store
-        .create_task("t1", "100", "ISSUE1", "org/tracker", 1, "rev")
+        .create_task("t1", &candidate("100", "ISSUE1", "org/tracker", 1), "rev")
         .unwrap();
-    let _ = store.create_task("t2", "100", "ISSUE1", "org/tracker", 1, "rev");
+    let _ = store.create_task("t2", &candidate("100", "ISSUE1", "org/tracker", 1), "rev");
     assert_eq!(store.task_count().unwrap(), 1);
 }
 
@@ -189,7 +247,7 @@ fn reservation_history_allows_a_new_attempt_after_reopen() {
     let dir = tempfile::tempdir().unwrap();
     let mut store = StateStore::open(dir.path(), 1).unwrap();
     store
-        .create_task("task", "repo", "issue", "org/repo", 1, "rev")
+        .create_task("task", &candidate("repo", "issue", "org/repo", 1), "rev")
         .unwrap();
     store
         .record_evidence("task", Some("first"), "result", "prior evidence")
@@ -205,7 +263,23 @@ fn reservation_history_allows_a_new_attempt_after_reopen() {
     let mut store = StateStore::open(dir.path(), 1).unwrap();
     store.reserve("task", "second").unwrap();
     assert_eq!(store.reservation_count().unwrap(), 1);
-    assert_eq!(store.evidence_kinds("task").unwrap(), vec!["result"]);
+    assert_eq!(
+        store.evidence_kinds("task").unwrap(),
+        vec!["selection", "result"]
+    );
+    let selection = store.selection_evidence("task").unwrap().unwrap();
+    assert_eq!(selection.candidate.project_id, "project-1");
+    assert_eq!(selection.candidate.item_id, "item-issue");
+    assert_eq!(
+        selection.candidate.marker,
+        Marker::Label {
+            name: "ready".into()
+        }
+    );
+    assert_eq!(selection.candidate.milestone_title.as_deref(), Some("v1"));
+    assert_eq!(selection.candidate.mapping.code_repository, "org/code");
+    assert_eq!(selection.candidate.observed_at_unix_secs, 123);
+    assert_eq!(selection.config_revision, "rev");
     let connection = Connection::open(dir.path().join("state.sqlite3")).unwrap();
     let rows: Vec<(String, String)> = connection
         .prepare("SELECT attempt_id,status FROM reservations ORDER BY attempt_id")

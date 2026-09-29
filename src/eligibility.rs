@@ -2,10 +2,11 @@ use crate::{
     config::{Mapping, Marker, Source},
     github::project::{Issue, ProjectError, ProjectItem, ProjectReader, enumerate},
 };
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use thiserror::Error;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Candidate {
     pub project_id: String,
     pub item_id: String,
