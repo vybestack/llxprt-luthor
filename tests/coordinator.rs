@@ -342,6 +342,41 @@ impl SupervisorLauncher for FakeLauncher {
 }
 
 #[test]
+fn worktree_preflight_failures_precede_assignment_and_attempts() {
+    for failure in ["base", "origin", "branch"] {
+        let mut f = Fixture::new(1);
+        let checkout = f.candidate.mapping.checkout.clone();
+        match failure {
+            "base" => git(&checkout, &["branch", "-m", "missing-base"]),
+            "origin" => git(
+                &checkout,
+                &[
+                    "remote",
+                    "set-url",
+                    "origin",
+                    "git@github.com:org/wrong.git",
+                ],
+            ),
+            "branch" => git(&checkout, &["branch", "luthor/task-a"]),
+            _ => unreachable!(),
+        }
+        let c = f.candidate.clone();
+        let mut github = FakeGithub::new(&c);
+        let mut writer = FakeWriter::default();
+        let mut launcher = FakeLauncher::default();
+        assert!(
+            matches!(
+                f.run("task-a", &c, &mut github, &mut writer, &mut launcher),
+                Err(DispatchError::Worktree(_))
+            ),
+            "{failure}"
+        );
+        assert_eq!(writer.calls, 0, "{failure}");
+        assert!(!f.config.worktree_root.exists(), "{failure}");
+    }
+}
+
+#[test]
 fn verified_claim_and_worktree_precede_fake_launch() {
     let mut f = Fixture::new(1);
     let c = f.candidate.clone();

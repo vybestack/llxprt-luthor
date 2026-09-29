@@ -190,6 +190,62 @@ fn identity(
     })
 }
 
+fn validate_task_id(task_id: &str) -> Result<(), WorktreeError> {
+    if task_id.is_empty()
+        || task_id.len() > 128
+        || !task_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        || task_id.starts_with('-')
+    {
+        return Err(WorktreeError::InvalidTaskId);
+    }
+    Ok(())
+}
+
+/// Checks worktree feasibility without creating files, branches, or Git worktrees.
+pub fn preflight(
+    task_id: &str,
+    worktree_root: &Path,
+    mapping: &Mapping,
+) -> Result<(), WorktreeError> {
+    validate_task_id(task_id)?;
+    validate_root_components(worktree_root)?;
+    match fs::symlink_metadata(worktree_root) {
+        Ok(meta) if !meta.is_dir() || meta.file_type().is_symlink() => {
+            return Err(WorktreeError::Conflict(
+                "worktree root is not a real directory",
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    let root = if worktree_root.exists() {
+        fs::canonicalize(worktree_root)?
+    } else {
+        worktree_root.to_path_buf()
+    };
+    let path = root.join(task_id);
+    let (checkout, _, _) = validate_checkout(mapping)?;
+    if path.starts_with(&checkout) || checkout.starts_with(&path) {
+        return Err(WorktreeError::Conflict("worktree path overlaps checkout"));
+    }
+    match fs::symlink_metadata(&path) {
+        Ok(_) => return Err(WorktreeError::Conflict("worktree path already exists")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    let branch_ref = format!("refs/heads/luthor/{task_id}");
+    let branch_check = git(&checkout, &["show-ref", "--verify", "--quiet", &branch_ref])?;
+    if branch_check.status.code() != Some(1) {
+        return Err(WorktreeError::Conflict(
+            "branch exists or cannot be checked",
+        ));
+    }
+    Ok(())
+}
+
 /// Returns existing evidence only after comparing it to the current filesystem and Git identity.
 /// An unfinished intent is never retried or inferred complete from Git state.
 pub fn ensure_worktree(

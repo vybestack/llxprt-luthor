@@ -167,6 +167,7 @@ where
     store.ensure_dispatch_capacity()?;
     store.create_task(task_id, candidate, config_revision, config)?;
     let result = (|| {
+        worktree::preflight(task_id, &config.worktree_root, &candidate.mapping)?;
         claim::claim(
             store,
             task_id,
