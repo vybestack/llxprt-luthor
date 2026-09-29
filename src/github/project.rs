@@ -84,7 +84,7 @@ impl ProjectReader for GhProjectReader {
         project_id: &str,
         cursor: Option<&str>,
     ) -> Result<Page<ProjectItem>, String> {
-        const QUERY: &str = "query($projectId: ID!, $cursor: String) { node(id: $projectId) { ... on ProjectV2 { items(first: 100, after: $cursor) { nodes { id content { __typename ... on Issue { id number repository { nameWithOwner } } } fieldValues(first: 100) { nodes { __typename ... on ProjectV2ItemFieldSingleSelectValue { name value } ... on ProjectV2ItemFieldTextValue { name text } } pageInfo { hasNextPage endCursor } } } pageInfo { hasNextPage endCursor } } } } }";
+        const QUERY: &str = "query($projectId: ID!, $cursor: String) { node(id: $projectId) { ... on ProjectV2 { items(first: 100, after: $cursor) { nodes { id content { __typename ... on Issue { id number repository { nameWithOwner } } } fieldValues(first: 100) { nodes { __typename ... on ProjectV2ItemFieldSingleSelectValue { name field { ... on ProjectV2SingleSelectField { name } ... on ProjectV2Field { name } } } ... on ProjectV2ItemFieldTextValue { text field { ... on ProjectV2SingleSelectField { name } ... on ProjectV2Field { name } } } } pageInfo { hasNextPage endCursor } } } pageInfo { hasNextPage endCursor } } } } }";
         let query_arg = format!("query={QUERY}");
         let project_id_arg = format!("projectId={project_id}");
         let cursor_arg = cursor.map(|cursor| format!("cursor={cursor}"));
@@ -156,11 +156,23 @@ impl ProjectReader for GhProjectReader {
             for field in field_nodes {
                 match field.get("__typename").and_then(Value::as_str) {
                     Some("ProjectV2ItemFieldSingleSelectValue") => fields.push((
+                        required_string(
+                            field
+                                .get("field")
+                                .ok_or_else(|| "invalid-project-field".to_owned())?,
+                            "name",
+                            "invalid-project-field",
+                        )?,
                         required_string(field, "name", "invalid-project-field")?,
-                        required_string(field, "value", "invalid-project-field")?,
                     )),
                     Some("ProjectV2ItemFieldTextValue") => fields.push((
-                        required_string(field, "name", "invalid-project-field")?,
+                        required_string(
+                            field
+                                .get("field")
+                                .ok_or_else(|| "invalid-project-field".to_owned())?,
+                            "name",
+                            "invalid-project-field",
+                        )?,
                         required_string(field, "text", "invalid-project-field")?,
                     )),
                     Some(_) | None => {}

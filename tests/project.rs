@@ -23,7 +23,7 @@ fn response(field_values: &str) -> String {
 }
 #[test]
 fn parses_project_fields_and_direct_issue_identity() {
-    let fv = r#"{"nodes":[{"__typename":"ProjectV2ItemFieldSingleSelectValue","name":"Status","value":"Ready"},{"__typename":"ProjectV2ItemFieldTextValue","name":"Owner","text":"Ada"},{"__typename":"ProjectV2ItemFieldDateValue","name":"Due","date":"2026-01-01"}],"pageInfo":{"hasNextPage":false,"endCursor":null}}"#;
+    let fv = r#"{"nodes":[{"__typename":"ProjectV2ItemFieldSingleSelectValue","name":"Ready","field":{"name":"Status"}},{"__typename":"ProjectV2ItemFieldTextValue","text":"Ada","field":{"name":"Owner"}},{"__typename":"ProjectV2ItemFieldDateValue","name":"Due","date":"2026-01-01"}],"pageInfo":{"hasNextPage":false,"endCursor":null}}"#;
     let (_dir, mut r) = reader(&response(fv));
     let page = r.page("P", None).unwrap();
     assert_eq!(page.items[0].issue_node_id, "ISSUE1");
