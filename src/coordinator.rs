@@ -188,6 +188,23 @@ pub fn reconcile_source<P: ProjectReader>(
     Ok(report)
 }
 
+/// Verify that the selected issue is still assigned solely to the configured
+/// login before completion is accepted.
+pub(crate) fn verify_completion_claim<P: ProjectReader>(
+    projects: &mut P,
+    selection: &crate::state::SelectionEvidence,
+) -> Result<(), ClaimError> {
+    let login = &selection.effective_config.assignment_login;
+    if login.trim().is_empty() {
+        return Err(ClaimError::Changed);
+    }
+    let (_, issue) = claim::fresh(projects, &selection.candidate)?;
+    if issue.assignees != [login.as_str()] {
+        return Err(ClaimError::Changed);
+    }
+    Ok(())
+}
+
 impl StartupReport {
     pub fn scheduling_blocked(&self) -> bool {
         !self.source_holds.is_empty()
