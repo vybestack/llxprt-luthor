@@ -46,7 +46,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             luthor::supervisor::worker_gate(std::path::Path::new(&plan))?;
             Ok(())
         }
-        Some("status" | "show" | "logs") => operator(args),
+        Some(command @ ("status" | "show" | "logs")) => {
+            operator(std::iter::once(command.to_owned()).chain(args))
+        }
         Some(command @ ("pause" | "reconcile")) => mutate(command, args.collect()),
         Some("discover") => discover(args.collect()),
         Some("daemon") => luthor::daemon::run(&args.collect::<Vec<_>>()),

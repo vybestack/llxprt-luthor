@@ -815,6 +815,127 @@ esac
     }
 
     #[test]
+    fn local_controls_verify_live_child_and_expose_stop_intent_without_secrets() {
+        use luthor::supervisor::{Reconciliation, reconcile_attempt};
+        let h = Harness::new();
+        h.seed_running_task();
+        let mut store = StateStore::open(&h.state, 2).unwrap();
+        let status = h.run(&["status", "--config", h.config.to_str().unwrap()]);
+        assert!(status.status.success(), "{}", stderr(&status));
+        let status: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
+        let task = &status["tasks"][0];
+        assert_eq!(task["phase"], "running");
+        assert_eq!(task["latest_attempt_lifecycle"], "running");
+        assert_eq!(task["reserved_slot"], true);
+        assert_eq!(status["capacity"]["reserved"], 1);
+        for who in ["child", "supervisor"] {
+            assert!(task["process"][who]["pid"].as_u64().unwrap() > 0);
+            assert!(
+                task["process"][who]["boot_identity"]
+                    .as_str()
+                    .unwrap()
+                    .len()
+                    <= 256
+            );
+            assert!(
+                !task["process"][who]["start_identity"]
+                    .as_str()
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(task["process"][who]["group_id"].as_u64().unwrap() > 0);
+        }
+        let shown = h.run(&["show", "task", "--config", h.config.to_str().unwrap()]);
+        assert!(shown.status.success(), "{}", stderr(&shown));
+        let shown: serde_json::Value = serde_json::from_slice(&shown.stdout).unwrap();
+        assert_eq!(shown["phase"], "running");
+        assert_eq!(shown["process"], task["process"]);
+        assert_eq!(shown["attempts"][0]["lifecycle"], "running");
+        assert!(!status.to_string().contains("Work on "));
+        assert!(!shown.to_string().contains("Work on "));
+        assert!(matches!(
+            reconcile_attempt(&mut store, "task", "running-attempt").unwrap(),
+            Reconciliation::Running
+        ));
+        drop(store);
+        let after = h.run(&["status", "--config", h.config.to_str().unwrap()]);
+        let after: serde_json::Value = serde_json::from_slice(&after.stdout).unwrap();
+        assert_eq!(after["tasks"][0]["phase"], "running");
+        h.stop_running_task();
+        for args in [vec!["status"], vec!["show", "task"]] {
+            let mut command = args;
+            command.extend(["--config", h.config.to_str().unwrap()]);
+            let output = h.run(&command);
+            assert!(output.status.success(), "{}", stderr(&output));
+            let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            let task = if command[0] == "status" {
+                &result["tasks"][0]
+            } else {
+                &result
+            };
+            assert_eq!(task["phase"], "stop_requested");
+            assert_eq!(task["process"], serde_json::Value::Null);
+            assert_eq!(task["reserved_slot"], true);
+        }
+    }
+
+    #[test]
+    fn local_controls_hold_live_child_when_gate_proof_is_missing() {
+        let h = Harness::new();
+        h.seed_running_task();
+        let db = rusqlite::Connection::open(h.state.join("state.sqlite3")).unwrap();
+        db.execute("DELETE FROM evidence WHERE task_id='task' AND attempt_id='running-attempt' AND kind='gate_sent'", []).unwrap();
+        drop(db);
+        for args in [vec!["status"], vec!["show", "task"]] {
+            let mut command = args;
+            command.extend(["--config", h.config.to_str().unwrap()]);
+            let output = h.run(&command);
+            assert!(output.status.success(), "{}", stderr(&output));
+            let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            let task = if command[0] == "status" {
+                &result["tasks"][0]
+            } else {
+                &result
+            };
+            assert_eq!(task["phase"], "held");
+            assert_eq!(task["process"], serde_json::Value::Null);
+            assert_eq!(task["reserved_slot"], true);
+        }
+        h.stop_running_task();
+    }
+
+    #[test]
+    fn local_controls_reject_forged_child_identity_with_gate_evidence() {
+        let h = Harness::new();
+        h.seed_running_task();
+        let path = h.state.join("attempts/running-attempt.child.json");
+        let mut child: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        child["pid"] = serde_json::json!(1);
+        child["group_id"] = serde_json::json!(1);
+        fs::write(&path, serde_json::to_vec(&child).unwrap()).unwrap();
+        let db = rusqlite::Connection::open(h.state.join("state.sqlite3")).unwrap();
+        db.execute("UPDATE evidence SET payload=?1 WHERE task_id='task' AND attempt_id='running-attempt' AND kind='child_registered'", [child.to_string()]).unwrap();
+        drop(db);
+        for args in [vec!["status"], vec!["show", "task"]] {
+            let mut command = args;
+            command.extend(["--config", h.config.to_str().unwrap()]);
+            let output = h.run(&command);
+            assert!(output.status.success(), "{}", stderr(&output));
+            let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            let task = if command[0] == "status" {
+                &result["tasks"][0]
+            } else {
+                &result
+            };
+            assert_eq!(task["phase"], "held");
+            assert_eq!(task["process"], serde_json::Value::Null);
+            assert_eq!(task["reserved_slot"], true);
+        }
+        h.stop_running_task();
+    }
+
+    #[test]
     fn dispatch_execute_admits_second_issue_beside_verified_live_worker() {
         let h = Harness::new();
         h.seed_running_task();

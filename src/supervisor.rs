@@ -1269,29 +1269,51 @@ where
 }
 #[cfg(unix)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-struct ChildIdentity {
-    pid: u32,
-    boot_identity: String,
-    start_identity: String,
-    group_id: u32,
+pub(crate) struct ChildIdentity {
+    pub(crate) pid: u32,
+    pub(crate) boot_identity: String,
+    pub(crate) start_identity: String,
+    pub(crate) group_id: u32,
 }
 
 #[cfg(unix)]
-#[derive(Debug, Deserialize, PartialEq, Eq)]
-struct ProcessIdentity {
-    pid: u32,
-    boot_identity: String,
-    start_identity: String,
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct ProcessIdentity {
+    pub(crate) pid: u32,
+    pub(crate) boot_identity: String,
+    pub(crate) start_identity: String,
 }
 
 #[cfg(unix)]
-fn recorded_process(payload: &str) -> Option<ProcessIdentity> {
+pub(crate) fn recorded_process(payload: &str) -> Option<ProcessIdentity> {
     let value: ProcessIdentity = serde_json::from_str(payload).ok()?;
     (value.pid > 0
         && i32::try_from(value.pid).is_ok()
         && !value.boot_identity.trim().is_empty()
         && !value.start_identity.trim().is_empty())
     .then_some(value)
+}
+
+#[cfg(unix)]
+pub(crate) fn verified_live_process(child: &ChildIdentity, supervisor: &ProcessIdentity) -> bool {
+    let bounded = |boot: &str, start: &str| {
+        !boot.trim().is_empty()
+            && boot.len() <= 256
+            && !start.trim().is_empty()
+            && start.len() <= 64
+    };
+    child.pid != supervisor.pid
+        && bounded(&child.boot_identity, &child.start_identity)
+        && bounded(&supervisor.boot_identity, &supervisor.start_identity)
+        && matching_child(child)
+        && !zombie(child.pid)
+        && identity(supervisor.pid).ok().as_ref()
+            == Some(&(
+                supervisor.boot_identity.clone(),
+                supervisor.start_identity.clone(),
+            ))
+        && !zombie(supervisor.pid)
+        && unsafe { libc::getpgid(supervisor.pid as i32) } == supervisor.pid as i32
 }
 
 #[cfg(unix)]
@@ -1444,15 +1466,7 @@ pub fn reconcile_attempt(
             || attempts
                 .join(format!("{attempt_id}.supervisor-error.json"))
                 .exists()
-            || !matching_child(&child_file)
-            || zombie(child_file.pid)
-            || identity(supervisor.pid).ok().as_ref()
-                != Some(&(
-                    supervisor.boot_identity.clone(),
-                    supervisor.start_identity.clone(),
-                ))
-            || zombie(supervisor.pid)
-            || unsafe { libc::getpgid(supervisor.pid as i32) } != supervisor.pid as i32
+            || !verified_live_process(&child_file, &supervisor)
         {
             return Ok(held("live worker identity or reservation unverified"));
         }

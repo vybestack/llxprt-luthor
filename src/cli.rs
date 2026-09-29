@@ -1,3 +1,5 @@
+#[cfg(unix)]
+use crate::supervisor::{ChildIdentity, recorded_process, verified_live_process};
 use crate::supervisor::{ExitReceipt, LaunchPlan};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde_json::{Value, json};
@@ -30,6 +32,115 @@ pub enum CliError {
 fn database(root: &Path) -> Result<Connection, CliError> {
     Connection::open_with_flags(root.join("state.sqlite3"), OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(|_| CliError::Database)
+}
+
+#[cfg(unix)]
+fn live_process(conn: &Connection, root: &Path, task: &str, attempt: &str) -> Option<Value> {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = attempts_dir(root).ok()?;
+    if fs::metadata(&dir).ok()?.permissions().mode() & 0o777 != 0o700 {
+        return None;
+    }
+    let plan_path = dir.join(format!("{attempt}.plan.json"));
+    let (mut plan_file, _) = private_file(&plan_path).ok()?;
+    let mut bytes = Vec::new();
+    plan_file.read_to_end(&mut bytes).ok()?;
+    let plan: LaunchPlan = serde_json::from_slice(&bytes).ok()?;
+    if plan.task_id != task || plan.attempt_id != attempt || plan.session_id != task {
+        return None;
+    }
+    let valid: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM attempts a JOIN reservations r ON r.attempt_id=a.id AND r.task_id=a.task_id
+         JOIN tasks t ON t.id=a.task_id WHERE a.id=?1 AND a.task_id=?2 AND a.lifecycle='launch_intended'
+         AND a.outcome IS NULL AND r.status='reserved' AND t.state='held'
+         AND (SELECT COUNT(*) FROM intents WHERE task_id=?2 AND attempt_id=?1 AND kind='launch' AND detail=?3)=1
+         AND (SELECT COUNT(*) FROM intents WHERE task_id=?2 AND attempt_id=?1 AND kind='supervisor_dispatch' AND detail=?3)=1
+         AND (SELECT COUNT(*) FROM intents WHERE task_id=?2 AND attempt_id=?1 AND kind='gate_release')=1
+         AND (SELECT COUNT(*) FROM evidence WHERE task_id=?2 AND attempt_id=?1 AND kind='child_registered')=1
+         AND (SELECT COUNT(*) FROM evidence WHERE task_id=?2 AND attempt_id=?1 AND kind='supervisor_ready')=1
+         AND (SELECT COUNT(*) FROM evidence WHERE task_id=?2 AND attempt_id=?1 AND kind='gate_sent')=1
+         AND (SELECT COUNT(*) FROM evidence WHERE task_id=?2 AND attempt_id=?1 AND kind='log_failure')=0)",
+        rusqlite::params![attempt, task, serde_json::to_string(&plan).ok()?], |r| r.get(0)
+    ).ok()?;
+    if !valid
+        || dir.join(format!("{attempt}.receipt.json")).exists()
+        || dir
+            .join(format!("{attempt}.supervisor-error.json"))
+            .exists()
+    {
+        return None;
+    }
+    let (mut file, _) = private_file(&dir.join(format!("{attempt}.child.json"))).ok()?;
+    bytes.clear();
+    file.read_to_end(&mut bytes).ok()?;
+    let child: ChildIdentity = serde_json::from_slice(&bytes).ok()?;
+    let evidence = |table: &str, kind: &str| -> Option<String> {
+        let sql = match table {
+            "evidence" => {
+                "SELECT payload FROM evidence WHERE task_id=?1 AND attempt_id=?2 AND kind=?3"
+            }
+            "intents" => {
+                "SELECT detail FROM intents WHERE task_id=?1 AND attempt_id=?2 AND kind=?3"
+            }
+            _ => unreachable!(),
+        };
+        conn.query_row(sql, [task, attempt, kind], |r| r.get(0))
+            .ok()
+    };
+    if serde_json::from_str::<ChildIdentity>(&evidence("evidence", "child_registered")?).ok()?
+        != child
+    {
+        return None;
+    }
+    let supervisor = recorded_process(&evidence("evidence", "supervisor_ready")?)?;
+    if recorded_process(&evidence("evidence", "gate_sent")?)? != supervisor
+        || recorded_process(&evidence("intents", "gate_release")?)? != supervisor
+        || !verified_live_process(&child, &supervisor)
+    {
+        return None;
+    }
+    Some(json!({"attempt_id":attempt,
+        "child":{"pid":child.pid,"group_id":child.group_id,
+        "boot_identity":child.boot_identity,"start_identity":child.start_identity},
+        "supervisor":{"pid":supervisor.pid,"group_id":supervisor.pid,
+        "boot_identity":supervisor.boot_identity,"start_identity":supervisor.start_identity}}))
+}
+
+fn operator_state(
+    conn: &Connection,
+    root: &Path,
+    task: &str,
+    attempt: Option<&str>,
+    phase: &str,
+) -> Result<(String, Option<Value>), CliError> {
+    if phase != "held" {
+        return Ok((phase.to_owned(), None));
+    }
+    let Some(attempt) = attempt.filter(|id| valid_attempt(id)) else {
+        return Ok((phase.to_owned(), None));
+    };
+    let stopped: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM intents WHERE task_id=?1 AND attempt_id=?2 AND kind='stop')",
+        [task, attempt], |r| r.get(0)
+    ).map_err(|_| CliError::Database)?;
+    if stopped {
+        return Ok(("stop_requested".into(), None));
+    }
+    #[cfg(unix)]
+    if let Some(process) = live_process(conn, root, task, attempt) {
+        // Recheck after probing the OS so a concurrent stop cannot be reported as running.
+        let stopped: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM intents WHERE task_id=?1 AND attempt_id=?2 AND kind='stop')",
+            [task, attempt], |r| r.get(0)
+        ).map_err(|_| CliError::Database)?;
+        if stopped {
+            return Ok(("stop_requested".into(), None));
+        }
+        return Ok(("running".into(), Some(process)));
+    }
+    #[cfg(not(unix))]
+    let _ = root;
+    Ok(("held".into(), None))
 }
 
 pub fn execute(root: &Path, args: &[String]) -> Result<String, CliError> {
@@ -113,6 +224,33 @@ fn status(conn: &Connection, root: &Path) -> Result<Value, CliError> {
         .map_err(|_| CliError::Database)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| CliError::Database)?;
+    let mut tasks: Vec<Value> = tasks;
+    for task in &mut tasks {
+        let task_id = task["task_id"].as_str().ok_or(CliError::Database)?;
+        let reserved_attempt: Option<String> = conn
+            .query_row(
+                "SELECT a.id FROM attempts a JOIN reservations r ON r.attempt_id=a.id
+             WHERE a.task_id=?1 AND r.status='reserved' ORDER BY a.rowid DESC LIMIT 1",
+                [task_id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|_| CliError::Database)?;
+        let (phase, process) = operator_state(
+            conn,
+            root,
+            task_id,
+            reserved_attempt.as_deref(),
+            task["phase"].as_str().ok_or(CliError::Database)?,
+        )?;
+        if phase == "running" || phase == "stop_requested" {
+            task["phase"] = json!(phase);
+            if task["latest_attempt_id"].as_str() == reserved_attempt.as_deref() {
+                task["latest_attempt_lifecycle"] = json!(phase);
+            }
+        }
+        task["process"] = json!(process);
+    }
     Ok(
         json!({"tasks":tasks,"capacity":{"reserved":reserved,"limit":capacity},
         "reserved_slot_count":reserved,"latest_telemetry":null,
@@ -199,7 +337,7 @@ fn show(conn: &Connection, root: &Path, task: &str) -> Result<Value, CliError> {
         FROM attempts a WHERE a.task_id=?1 ORDER BY a.created_at,a.rowid",
         )
         .map_err(|_| CliError::Database)?;
-    let attempts = stmt.query_map([task], |r| Ok(json!({
+    let mut attempts = stmt.query_map([task], |r| Ok(json!({
         "id":r.get::<_,String>(0)?, "lifecycle":r.get::<_,String>(1)?,
         "outcome":r.get::<_,Option<String>>(2)?, "created_at":r.get::<_,String>(3)?,
         "created_at_unix_secs":r.get::<_,Option<i64>>(4)?, "reservation":r.get::<_,Option<String>>(5)?
@@ -246,9 +384,14 @@ fn show(conn: &Connection, root: &Path, task: &str) -> Result<Value, CliError> {
         .rev()
         .find(|e| e["kind"] == "held_reason")
         .and_then(|e| e["detail"].as_str());
-    let latest_attempt = attempts.last();
-    let latest_attempt_id = latest_attempt.and_then(|a| a["id"].as_str());
-    let latest_attempt_outcome = latest_attempt.and_then(|a| a["outcome"].as_str());
+    let latest_attempt_id = attempts
+        .last()
+        .and_then(|a| a["id"].as_str())
+        .map(str::to_owned);
+    let latest_attempt_outcome = attempts
+        .last()
+        .and_then(|a| a["outcome"].as_str())
+        .map(str::to_owned);
     let output_silence_warning =
         last_output_age_seconds.is_some_and(|age| age >= SILENCE_WARNING_THRESHOLD_SECONDS);
     let last_observed_pr = evidence
@@ -256,13 +399,26 @@ fn show(conn: &Connection, root: &Path, task: &str) -> Result<Value, CliError> {
         .rev()
         .find(|e| e["kind"] == "pause_pr_lookup")
         .map(|event| json!({"proof":event["detail"],"observed_at":event["created_at"]}));
+    let active_attempt_id = active_attempt
+        .and_then(|a| a["id"].as_str())
+        .map(str::to_owned);
+    let (display_phase, process) =
+        operator_state(conn, root, task, active_attempt_id.as_deref(), &phase)?;
+    if (display_phase == "running" || display_phase == "stop_requested")
+        && let Some(attempt) = attempts
+            .iter_mut()
+            .rev()
+            .find(|a| a["reservation"] == "reserved")
+    {
+        attempt["lifecycle"] = json!(display_phase);
+    }
     Ok(
         json!({"task":{"id":task,"repository":repository,"issue_number":number,
         "issue_url":candidate.as_ref().and_then(|v|v.get("issue_url")),
         "source":candidate.as_ref().and_then(|v|v.get("source")),
         "mapping":candidate.as_ref().and_then(|v|v.get("mapping"))},
-        "phase":phase,"reason":reason,"reserved_slot":reserved,"attempts":attempts,
-        "intents":intents,"evidence":evidence,"session":session,
+        "phase":display_phase,"reason":reason,"reserved_slot":reserved,"attempts":attempts,
+        "process":process,"intents":intents,"evidence":evidence,"session":session,
         "worktree":worktree.and_then(|v|serde_json::from_str::<Value>(&v).ok()),
         "last_output_age_seconds":last_output_age_seconds,
         "output_age_unavailable_reason":output_age_unavailable_reason,
