@@ -282,7 +282,7 @@ fn finish_verified_stopped_attempt_with_pr<Q: PullRequestReader>(
             prs,
             *pr,
             observed_at_unix_secs,
-            "exit",
+            result,
         ),
         Ok(LookupResult::Ambiguous(_)) => Ok(supervisor::Reconciliation::Held {
             reason: "pause PR ambiguous".into(),
@@ -385,28 +385,27 @@ fn verify_and_record_open_pr<Q: PullRequestReader>(
     prs: &mut Q,
     pr: crate::github::pull_request::PullRequestEvidence,
     observed_at_unix_secs: u64,
-    context: &str,
+    result: supervisor::Reconciliation,
 ) -> Result<supervisor::Reconciliation, SupervisorError> {
     let verified = (|| {
         let login = prs
             .authenticated_identity()
-            .map_err(|_| format!("{context} PR identity unavailable"))?;
+            .map_err(|_| "exit PR identity unavailable")?;
         let expected = expected_for_task(store, task_id, prs, &login)
-            .map_err(|_| format!("{context} PR evidence unavailable"))?;
+            .map_err(|_| "exit PR evidence unavailable")?;
         VerifiedOpenPr::from_matching(pr, &expected, &login, attempt_id, observed_at_unix_secs)
-            .map_err(|_| format!("{context} PR verification failed"))
+            .map_err(|_| "exit PR verification failed")
     })();
     match verified {
         Ok(verified) => {
             store.record_verified_open_pr(task_id, attempt_id, &verified)?;
-            Ok(supervisor::Reconciliation::Completed {
-                exit_code: None,
-                signal: None,
-            })
+            Ok(result)
         }
         Err(reason) => {
-            store.record_evidence(task_id, Some(attempt_id), "held_reason", &reason)?;
-            Ok(supervisor::Reconciliation::Held { reason })
+            store.record_evidence(task_id, Some(attempt_id), "held_reason", reason)?;
+            Ok(supervisor::Reconciliation::Held {
+                reason: reason.to_owned(),
+            })
         }
     }
 }
@@ -883,7 +882,7 @@ mod tests {
                 "attempt",
                 &mut prs,
                 supervisor::Reconciliation::Completed {
-                    exit_code: None,
+                    exit_code: Some(17),
                     signal: Some(15),
                 },
             )
@@ -906,6 +905,24 @@ mod tests {
                 ));
                 assert_eq!(store.task_phase("task").unwrap().as_deref(), Some("paused"));
                 assert!(store.ensure_dispatch_capacity().is_ok());
+            } else if scenario == "open" {
+                assert_eq!(
+                    result,
+                    supervisor::Reconciliation::Held {
+                        reason: "exit PR evidence unavailable".into(),
+                    }
+                );
+                assert_eq!(store.task_phase("task").unwrap().as_deref(), Some("held"));
+                assert!(
+                    store
+                        .evidence_payload("task", Some("attempt"), "verified_open_pr")
+                        .unwrap()
+                        .is_none()
+                );
+                assert!(matches!(
+                    store.ensure_dispatch_capacity(),
+                    Err(StateError::Capacity { .. })
+                ));
             } else {
                 assert!(matches!(result, supervisor::Reconciliation::Held { .. }));
                 assert_eq!(store.task_phase("task").unwrap().as_deref(), Some("held"));
