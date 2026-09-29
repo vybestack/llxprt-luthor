@@ -1025,21 +1025,139 @@ fn natural_exit_seven_attends_and_scheduler_dispatches_only_other_issue() {
     );
 }
 
-#[cfg(unix)]
-#[test]
-fn pause_after_natural_exit_preserves_natural_attention_path() {
-    let (_dir, config, mut store) = dispatched_fixture(7);
-    let before: luthor::supervisor::ExitReceipt =
-        serde_json::from_slice(&fs::read(receipt_path(&config)).unwrap()).unwrap();
-    assert!(before.stop_signals.is_empty());
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+struct StopRaceCleanup(std::path::PathBuf);
 
-    // Model exit after durable pause intent and before any stop signal is sent.
-    store.record_stop_intent("task", "attempt-real").unwrap();
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+impl Drop for StopRaceCleanup {
+    fn drop(&mut self) {
+        drop(FixtureGroupGuard(
+            self.0.join("attempts/attempt-real.child.json"),
+        ));
+        let Ok(db) = rusqlite::Connection::open_with_flags(
+            self.0.join("state.sqlite3"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        ) else {
+            return;
+        };
+        let Ok(payload) = db.query_row(
+            "SELECT payload FROM evidence WHERE kind='supervisor_ready' AND attempt_id='attempt-real'",
+            [],
+            |row| row.get::<_, String>(0),
+        ) else {
+            return;
+        };
+        let Ok(process) = serde_json::from_str::<serde_json::Value>(&payload) else {
+            return;
+        };
+        let Some(pid) = process["pid"]
+            .as_u64()
+            .and_then(|id| u32::try_from(id).ok())
+        else {
+            return;
+        };
+        let expected = (
+            process["boot_identity"].as_str().unwrap_or_default().into(),
+            process["start_identity"]
+                .as_str()
+                .unwrap_or_default()
+                .into(),
+        );
+        for _ in 0..200 {
+            if observed_process_identity(pid).as_ref() != Some(&expected) {
+                return;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        if observed_process_identity(pid).as_ref() == Some(&expected) {
+            unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+        }
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn natural_stop_race_fixture() -> (
+    tempfile::TempDir,
+    Config,
+    StateStore,
+    luthor::supervisor::LaunchPlan,
+    StopRaceCleanup,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let (config, mut store, plan, marker) = prepared_fake_worker(&dir);
+    let cleanup = StopRaceCleanup(config.state_root.clone());
+    let release = config.state_root.join("release-natural-exit");
+    fs::write(
+        &plan.executable,
+        format!(
+            "#!/bin/sh
+echo started > '{}'
+while [ ! -f '{}' ]; do :; done
+exit 7
+",
+            marker.display(),
+            release.display(),
+        ),
+    )
+    .unwrap();
+    execute_with_binary(&mut store, &plan, Path::new(env!("CARGO_BIN_EXE_luthor"))).unwrap();
+    for _ in 0..200 {
+        if marker.exists() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        marker.exists(),
+        "natural-exit worker did not reach release gate"
+    );
+    assert!(!receipt_path(&config).exists());
+    assert!(store.stop_intent("task", "attempt-real").unwrap().is_none());
+    let child: serde_json::Value = serde_json::from_slice(
+        &fs::read(config.state_root.join("attempts/attempt-real.child.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        unsafe { libc::kill(-(child["pid"].as_i64().unwrap() as i32), 0) },
+        0
+    );
+    assert_eq!(store.reservation_count().unwrap(), 1);
+    assert!(matches!(
+        store.ensure_dispatch_capacity(),
+        Err(StateError::Capacity { .. })
+    ));
+    (dir, config, store, plan, cleanup)
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn release_natural_exit(config: &Config) -> Vec<u8> {
+    fs::write(config.state_root.join("release-natural-exit"), b"exit now").unwrap();
+    let receipt = stopped_receipt(config);
+    assert_eq!(receipt.exit_code, Some(7));
+    assert_eq!(receipt.signal, None);
+    assert!(receipt.stop_signals.is_empty());
+    assert_eq!(unsafe { libc::kill(-(receipt.child_pid as i32), 0) }, -1);
+    assert_eq!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::ESRCH)
+    );
+    fs::read(receipt_path(config)).unwrap()
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn assert_natural_stop_accounted(
+    config: &Config,
+    mut store: StateStore,
+    plan: &luthor::supervisor::LaunchPlan,
+    receipt: &[u8],
+) {
+    assert_eq!(fs::read(receipt_path(config)).unwrap(), receipt);
     assert!(store.stop_intent("task", "attempt-real").unwrap().is_some());
-    let after: luthor::supervisor::ExitReceipt =
-        serde_json::from_slice(&fs::read(receipt_path(&config)).unwrap()).unwrap();
-    assert!(after.stop_signals.is_empty());
-
+    assert_eq!(store.reservation_count().unwrap(), 1);
+    assert!(matches!(
+        store.ensure_dispatch_capacity(),
+        Err(StateError::Capacity { .. })
+    ));
     let mut prs = ExitPr::default();
     assert!(matches!(
         luthor::coordinator::reconcile_with_pr(&mut store, "task", "attempt-real", &mut prs)
@@ -1050,21 +1168,149 @@ fn pause_after_natural_exit_preserves_natural_attention_path() {
         }
     ));
     assert_eq!(prs.reads, 1);
+    assert_eq!(exit_proof(config).status, PausePrStatus::Absent);
     assert_eq!(
         store.task_phase("task").unwrap().as_deref(),
         Some("attention")
     );
     assert_eq!(store.reservation_count().unwrap(), 0);
+    store.ensure_dispatch_capacity().unwrap();
+    assert!(matches!(
+        prepare_resume(&mut store, "task", "attempt-next"),
+        Err(SupervisorError::State(StateError::LaunchBlocked))
+    ));
+    drop(store);
+
+    let config_path = config.state_root.join("config.json");
+    fs::write(&config_path, serde_json::to_vec(config).unwrap()).unwrap();
+    let resume = Command::new(env!("CARGO_BIN_EXE_luthor"))
+        .args(["resume", "task", "--config"])
+        .arg(&config_path)
+        .arg("--execute")
+        .output()
+        .unwrap();
+    assert!(!resume.status.success());
+    assert!(String::from_utf8_lossy(&resume.stderr).contains("resume held: task is not resumable"));
+
+    let mut store = StateStore::open(&config.state_root, config.capacity).unwrap();
+    let view = |args: &[&str]| -> serde_json::Value {
+        let output = luthor::cli::execute(
+            &config.state_root,
+            &args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>(),
+        )
+        .unwrap();
+        serde_json::from_str(&output).unwrap()
+    };
+    let status = view(&["status"]);
+    let shown = view(&["show", "task"]);
+    assert_eq!(status["tasks"].as_array().unwrap().len(), 1);
+    let task = &status["tasks"][0];
+    assert_eq!(task["phase"], "attention");
+    assert_eq!(shown["phase"], task["phase"]);
+    assert_eq!(task["latest_attempt_id"], "attempt-real");
+    assert_eq!(shown["latest_attempt_id"], task["latest_attempt_id"]);
+    assert_eq!(task["latest_attempt_lifecycle"], "completed");
     assert_eq!(
-        store.latest_attempt("task").unwrap().as_deref(),
-        Some("attempt-real")
+        shown["attempts"][0]["lifecycle"],
+        task["latest_attempt_lifecycle"]
     );
-    assert!(
-        store
-            .evidence_kinds("task")
-            .unwrap()
-            .contains(&"exit_pr_lookup".into())
+    assert_eq!(
+        task["latest_attempt_outcome"],
+        "exit_code=Some(7);signal=None"
     );
+    assert_eq!(
+        shown["latest_attempt_outcome"],
+        task["latest_attempt_outcome"]
+    );
+    assert_eq!(task["reserved_slot"], false);
+    assert_eq!(shown["reserved_slot"], task["reserved_slot"]);
+    assert_eq!(status["capacity"]["reserved"], 0);
+    assert_eq!(shown["attempts"].as_array().unwrap().len(), 1);
+    assert_eq!(shown["attempts"][0]["reservation"], "released");
+    assert_eq!(shown["session"], plan.session_id);
+    assert_eq!(
+        shown["worktree"],
+        serde_json::to_value(&plan.expected_worktree).unwrap()
+    );
+    let claims: Vec<_> = shown["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|event| event["kind"] == "claim_verified")
+        .collect();
+    assert_eq!(claims.len(), 1);
+    assert_eq!(claims[0]["detail"], config.assignment_login);
+    let launch: luthor::supervisor::LaunchPlan =
+        serde_json::from_str(&store.launch_intent("attempt-real").unwrap().unwrap()).unwrap();
+    assert_eq!(&launch, plan);
+    assert!(!store.has_attempt("task", "attempt-next").unwrap());
+    let kinds = store.evidence_kinds("task").unwrap();
+    assert_eq!(
+        kinds.iter().filter(|kind| *kind == "attempt_exit").count(),
+        1
+    );
+    assert!(!kinds.contains(&"independent_stop_signal".into()));
+    assert!(!kinds.contains(&"independent_stop_decision".into()));
+    assert_eq!(fs::read(receipt_path(config)).unwrap(), receipt);
+    assert!(matches!(
+        luthor::coordinator::reconcile_with_pr(&mut store, "task", "attempt-real", &mut prs)
+            .unwrap(),
+        Reconciliation::Completed { .. }
+    ));
+    assert_eq!(prs.reads, 1);
+    assert_eq!(store.reservation_count().unwrap(), 0);
+    assert_eq!(
+        store.task_phase("task").unwrap().as_deref(),
+        Some("attention")
+    );
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn pause_after_natural_exit_preserves_natural_attention_path() {
+    let (_dir, config, mut store, plan, _cleanup) = natural_stop_race_fixture();
+    let receipt = release_natural_exit(&config);
+    assert!(store.stop_intent("task", "attempt-real").unwrap().is_none());
+    assert!(matches!(
+        request_stop(&mut store, "task", "attempt-real"),
+        Ok(()) | Err(SupervisorError::StopUnavailable)
+    ));
+    assert_natural_stop_accounted(&config, store, &plan, &receipt);
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn pause_intent_before_natural_exit_before_signal_preserves_attention_path() {
+    let (_dir, config, mut store, plan, _cleanup) = natural_stop_race_fixture();
+    let stop = luthor::supervisor::prepare_stop(&mut store, "task", "attempt-real").unwrap();
+    let db = rusqlite::Connection::open_with_flags(
+        config.state_root.join("state.sqlite3"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let intent: String = db.query_row(
+        "SELECT detail FROM intents WHERE kind='stop' AND task_id='task' AND attempt_id='attempt-real'",
+        [], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&intent).unwrap(),
+        serde_json::json!({"task_id":"task","attempt_id":"attempt-real"})
+    );
+    assert!(!receipt_path(&config).exists());
+    let child: serde_json::Value = serde_json::from_slice(
+        &fs::read(config.state_root.join("attempts/attempt-real.child.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        unsafe { libc::kill(-(child["pid"].as_i64().unwrap() as i32), 0) },
+        0
+    );
+    let receipt = release_natural_exit(&config);
+    assert!(matches!(
+        stop.finish(),
+        Ok(()) | Err(SupervisorError::StopUnavailable)
+    ));
+    assert_natural_stop_accounted(&config, store, &plan, &receipt);
 }
 
 #[cfg(unix)]

@@ -705,6 +705,33 @@ fn stop_without_supervisor(
     Err(SupervisorError::StopUnavailable)
 }
 
+/// A durable stop request awaiting the process-identity and signal decision.
+#[cfg(unix)]
+#[must_use]
+pub struct PendingStop<'a> {
+    store: &'a mut StateStore,
+    task_id: &'a str,
+    attempt_id: &'a str,
+}
+
+/// Commit the intent separately so exit between intent and signaling is testable.
+#[cfg(unix)]
+pub fn prepare_stop<'a>(
+    store: &'a mut StateStore,
+    task_id: &'a str,
+    attempt_id: &'a str,
+) -> Result<PendingStop<'a>, SupervisorError> {
+    if !valid_attempt(attempt_id) {
+        return Err(SupervisorError::Conflict);
+    }
+    store.record_stop_intent(task_id, attempt_id)?;
+    Ok(PendingStop {
+        store,
+        task_id,
+        attempt_id,
+    })
+}
+
 /// Persist the request before contacting the supervisor.
 #[cfg(unix)]
 pub fn request_stop(
@@ -712,53 +739,63 @@ pub fn request_stop(
     task_id: &str,
     attempt_id: &str,
 ) -> Result<(), SupervisorError> {
-    if !valid_attempt(attempt_id) {
-        return Err(SupervisorError::Conflict);
-    }
-    store.record_stop_intent(task_id, attempt_id)?;
-    let recorded = store
-        .evidence_payload(task_id, Some(attempt_id), "supervisor_ready")?
-        .as_deref()
-        .and_then(recorded_process)
-        .ok_or(SupervisorError::StopUnavailable)?;
-    match identity(recorded.pid) {
-        Ok((boot, start)) if boot == recorded.boot_identity && start == recorded.start_identity =>
-        {
-            #[cfg(any(target_os = "macos", target_os = "linux"))]
-            if zombie(recorded.pid) {
-                return stop_without_supervisor(store, task_id, attempt_id, &recorded);
-            }
-        }
-        Ok(_) => return stop_without_supervisor(store, task_id, attempt_id, &recorded),
-        Err(_) => {
-            let pid = i32::try_from(recorded.pid).map_err(|_| SupervisorError::StopUnavailable)?;
-            // A failed identity lookup alone is not proof of death.
-            if unsafe { libc::kill(pid, 0) } == 0 {
+    prepare_stop(store, task_id, attempt_id)?.finish()
+}
+
+#[cfg(unix)]
+impl PendingStop<'_> {
+    pub fn finish(self) -> Result<(), SupervisorError> {
+        let Self {
+            store,
+            task_id,
+            attempt_id,
+        } = self;
+        let recorded = store
+            .evidence_payload(task_id, Some(attempt_id), "supervisor_ready")?
+            .as_deref()
+            .and_then(recorded_process)
+            .ok_or(SupervisorError::StopUnavailable)?;
+        match identity(recorded.pid) {
+            Ok((boot, start))
+                if boot == recorded.boot_identity && start == recorded.start_identity =>
+            {
                 #[cfg(any(target_os = "macos", target_os = "linux"))]
                 if zombie(recorded.pid) {
                     return stop_without_supervisor(store, task_id, attempt_id, &recorded);
                 }
-                return Err(SupervisorError::StopUnavailable);
             }
-            if std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH) {
-                return Err(SupervisorError::StopUnavailable);
+            Ok(_) => return stop_without_supervisor(store, task_id, attempt_id, &recorded),
+            Err(_) => {
+                let pid =
+                    i32::try_from(recorded.pid).map_err(|_| SupervisorError::StopUnavailable)?;
+                // A failed identity lookup alone is not proof of death.
+                if unsafe { libc::kill(pid, 0) } == 0 {
+                    #[cfg(any(target_os = "macos", target_os = "linux"))]
+                    if zombie(recorded.pid) {
+                        return stop_without_supervisor(store, task_id, attempt_id, &recorded);
+                    }
+                    return Err(SupervisorError::StopUnavailable);
+                }
+                if std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH) {
+                    return Err(SupervisorError::StopUnavailable);
+                }
+                return stop_without_supervisor(store, task_id, attempt_id, &recorded);
             }
-            return stop_without_supervisor(store, task_id, attempt_id, &recorded);
         }
+        let path = stop_socket(&store.root().join("attempts"), attempt_id);
+        let mut stream = UnixStream::connect(path).map_err(|_| SupervisorError::StopUnavailable)?;
+        stream.set_read_timeout(Some(Duration::from_secs(3)))?;
+        stream.set_write_timeout(Some(Duration::from_secs(3)))?;
+        if peer_pid(&stream)? != recorded.pid {
+            return Err(SupervisorError::StopUnavailable);
+        }
+        stream.write_all(format!("{task_id}\n{attempt_id}\n").as_bytes())?;
+        let mut answer = [0];
+        if stream.read_exact(&mut answer).is_err() || answer[0] != b'Y' {
+            return Err(SupervisorError::StopUnavailable);
+        }
+        Ok(())
     }
-    let path = stop_socket(&store.root().join("attempts"), attempt_id);
-    let mut stream = UnixStream::connect(path).map_err(|_| SupervisorError::StopUnavailable)?;
-    stream.set_read_timeout(Some(Duration::from_secs(3)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(3)))?;
-    if peer_pid(&stream)? != recorded.pid {
-        return Err(SupervisorError::StopUnavailable);
-    }
-    stream.write_all(format!("{task_id}\n{attempt_id}\n").as_bytes())?;
-    let mut answer = [0];
-    if stream.read_exact(&mut answer).is_err() || answer[0] != b'Y' {
-        return Err(SupervisorError::StopUnavailable);
-    }
-    Ok(())
 }
 
 #[cfg(not(unix))]

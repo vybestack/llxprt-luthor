@@ -584,7 +584,7 @@ impl StateStore {
                    AND CASE WHEN json_valid(p.payload) THEN json_extract(p.payload,'$.status.status')='absent' ELSE 0 END
                    AND (SELECT COUNT(*) FROM evidence WHERE attempt_id=a.id AND kind='attempt_exit')=1
                    AND (SELECT COUNT(*) FROM evidence WHERE attempt_id=a.id AND kind='exit_pr_lookup')=1
-                   AND (SELECT COUNT(*) FROM intents WHERE task_id=t.id AND attempt_id=a.id AND kind='stop')=0
+                   AND CASE WHEN json_valid(e.payload) THEN json_array_length(e.payload,'$.stop_signals')=0 ELSE 0 END
                    AND (SELECT COUNT(*) FROM intents WHERE task_id=t.id AND attempt_id=a.id AND kind='launch')=1
                    AND (SELECT COUNT(*) FROM evidence WHERE task_id=t.id AND kind='claim_verified')=1
                    AND (SELECT COUNT(*) FROM evidence WHERE task_id=t.id AND kind='worktree_created')=1
