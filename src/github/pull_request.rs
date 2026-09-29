@@ -50,6 +50,7 @@ pub struct LookupError {
 }
 
 pub trait PullRequestReader {
+    fn authenticated_identity(&mut self) -> Result<String, LookupError>;
     fn page(&mut self, repository: &str, page: u32) -> Result<Vec<Value>, LookupError>;
     fn detail(&mut self, repository: &str, number: u64) -> Result<Value, LookupError>;
     fn repository_identity(&mut self, name: &str) -> Result<u64, LookupError>;
@@ -140,6 +141,40 @@ fn valid_repository_segment(segment: &str) -> bool {
 }
 
 impl PullRequestReader for GhPullRequestReader {
+    fn authenticated_identity(&mut self) -> Result<String, LookupError> {
+        let output = Command::new(&self.executable)
+            .args(["api", "user", "--jq", ".login"])
+            .output()
+            .map_err(|_| error(ErrorCategory::Transport, "identity-command-failed", None))?;
+        if !output.status.success() {
+            return Err(error(
+                ErrorCategory::Unknown,
+                "identity-command-failed",
+                None,
+            ));
+        }
+        let stdout = std::str::from_utf8(&output.stdout)
+            .map_err(|_| error(ErrorCategory::Malformed, "identity-invalid-output", None))?;
+        let login = stdout.strip_suffix('\n').unwrap_or(stdout);
+        if login.is_empty()
+            || login.trim() != login
+            || login.contains(['\n', '\r'])
+            || !login
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        {
+            return Err(error(
+                ErrorCategory::Malformed,
+                "identity-invalid-output",
+                None,
+            ));
+        }
+        if login != "acoliver" {
+            return Err(error(ErrorCategory::Permission, "identity-mismatch", None));
+        }
+        Ok(login.to_owned())
+    }
+
     fn page(&mut self, repository: &str, page: u32) -> Result<Vec<Value>, LookupError> {
         let path = format!("repos/{repository}/pulls?state=open&per_page=100&page={page}");
         self.api(&["api", &path])?
@@ -337,5 +372,41 @@ fn error(category: ErrorCategory, code: &'static str, status: Option<u16>) -> Lo
         category,
         code,
         status,
+    }
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn gh_script(contents: &[u8]) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gh");
+        std::fs::write(&path, contents).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        (dir, path)
+    }
+
+    #[test]
+    fn accepts_single_authorized_login() {
+        let (_dir, executable) = gh_script(b"#!/bin/sh\nprintf 'acoliver\\n'\n");
+        let mut reader = GhPullRequestReader::new(executable);
+        assert_eq!(reader.authenticated_identity().unwrap(), "acoliver");
+    }
+
+    #[test]
+    fn rejects_malformed_or_extra_output() {
+        for script in [
+            b"#!/bin/sh\nprintf '\\n'\n".as_slice(),
+            b"#!/bin/sh\nprintf 'acoliver\\nother\\n'\n",
+        ] {
+            let (_dir, executable) = gh_script(script);
+            let mut reader = GhPullRequestReader::new(executable);
+            assert_eq!(
+                reader.authenticated_identity().unwrap_err().category,
+                ErrorCategory::Malformed
+            );
+        }
     }
 }

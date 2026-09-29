@@ -643,6 +643,10 @@ mod tests {
     }
 
     impl PullRequestReader for FakePr {
+        fn authenticated_identity(&mut self) -> Result<String, LookupError> {
+            Ok("bot".into())
+        }
+
         fn page(&mut self, repository: &str, page: u32) -> Result<Vec<Value>, LookupError> {
             assert_eq!(repository, "org/code");
             assert_eq!(page, 1);

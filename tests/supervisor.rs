@@ -849,6 +849,9 @@ struct ExitPr {
 }
 #[cfg(unix)]
 impl PullRequestReader for ExitPr {
+    fn authenticated_identity(&mut self) -> Result<String, LookupError> {
+        Ok("bot".into())
+    }
     fn page(&mut self, _: &str, _: u32) -> Result<Vec<serde_json::Value>, LookupError> {
         self.reads += 1;
         if self.fail {

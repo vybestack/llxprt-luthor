@@ -89,6 +89,9 @@ struct Fake {
 }
 
 impl PullRequestReader for Fake {
+    fn authenticated_identity(&mut self) -> Result<String, LookupError> {
+        Ok("agent".into())
+    }
     fn page(&mut self, _: &str, page: u32) -> Result<Vec<Value>, LookupError> {
         if self.failed_page == Some(page) {
             return Err(LookupError {
@@ -670,6 +673,9 @@ impl luthor::github::project::ProjectReader for ClaimProjects {
 
 struct EmptyPullRequests;
 impl luthor::github::pull_request::PullRequestReader for EmptyPullRequests {
+    fn authenticated_identity(&mut self) -> Result<String, LookupError> {
+        Ok("acoliver".into())
+    }
     fn page(&mut self, _: &str, _: u32) -> Result<Vec<Value>, LookupError> {
         Ok(vec![])
     }

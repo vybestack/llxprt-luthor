@@ -314,6 +314,9 @@ struct FakePr {
     fail_on: Option<usize>,
 }
 impl PullRequestReader for FakePr {
+    fn authenticated_identity(&mut self) -> Result<String, LookupError> {
+        Ok("bot".into())
+    }
     fn page(&mut self, _: &str, _: u32) -> Result<Vec<Value>, LookupError> {
         self.lookups += 1;
         if self.fail_on == Some(self.lookups) {
