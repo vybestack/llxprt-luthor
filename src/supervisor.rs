@@ -1104,6 +1104,55 @@ mod failed_log_stop_tests {
     use std::cell::Cell;
 
     #[test]
+    fn tracked_current_process_prevents_absence_proof() {
+        let (boot_identity, start_identity) = identity(std::process::id()).unwrap();
+        let child = ChildIdentity {
+            pid: u32::MAX - 10,
+            boot_identity: boot_identity.clone(),
+            start_identity: "synthetic-child-start".to_owned(),
+            group_id: u32::MAX - 10,
+        };
+        let supervisor = ProcessIdentity {
+            pid: std::process::id(),
+            boot_identity: boot_identity.clone(),
+            start_identity,
+        };
+        let tracked = [ProcessIdentity {
+            pid: std::process::id(),
+            boot_identity,
+            start_identity: "tracked-current-process".to_owned(),
+        }];
+        assert!(!registered_processes_absent(&child, &supervisor, &tracked));
+    }
+
+    #[test]
+    fn invalid_tracked_boot_is_rejected_before_absence_checks() {
+        let (boot_identity, start_identity) = identity(std::process::id()).unwrap();
+        let child = ChildIdentity {
+            pid: u32::MAX - 10,
+            boot_identity: boot_identity.clone(),
+            start_identity: "synthetic-child-start".to_owned(),
+            group_id: u32::MAX - 10,
+        };
+        let supervisor = ProcessIdentity {
+            pid: std::process::id(),
+            boot_identity,
+            start_identity,
+        };
+        let tracked = [ProcessIdentity {
+            pid: u32::MAX - 11,
+            boot_identity: "different-boot".to_owned(),
+            start_identity: "tracked-start".to_owned(),
+        }];
+        assert!(!registered_processes_absent(&child, &supervisor, &tracked));
+    }
+
+    #[test]
+    fn malformed_tracked_process_is_rejected() {
+        assert!(recorded_process("not-json").is_none());
+    }
+
+    #[test]
     fn leader_exit_before_signal_keeps_group_held_without_signaling_reused_identity() {
         let signals = Cell::new(0);
         let result = stop_failed_log_child_with(
@@ -1417,12 +1466,14 @@ pub(crate) fn recorded_process(payload: &str) -> Option<ProcessIdentity> {
 }
 
 /// Proves the registered direct processes and their process groups are absent.
-/// This does not prove that an untracked descendant escaped into another group
-/// or session is absent; no descendant registry is available here.
+/// Recorded known descendants are checked individually. This does not prove
+/// that a deliberately untracked descendant escaped into another group or
+/// session is absent; that remains an out-of-scope cooperative constraint.
 #[cfg(unix)]
 pub(crate) fn registered_processes_absent(
     child: &ChildIdentity,
     supervisor: &ProcessIdentity,
+    tracked: &[ProcessIdentity],
 ) -> bool {
     let bounded = |boot: &str, start: &str| {
         !boot.trim().is_empty()
@@ -1438,6 +1489,12 @@ pub(crate) fn registered_processes_absent(
         || child.group_id != child.pid
         || !bounded(&child.boot_identity, &child.start_identity)
         || !bounded(&supervisor.boot_identity, &supervisor.start_identity)
+        || tracked.iter().any(|process| {
+            process.pid == 0
+                || i32::try_from(process.pid).is_err()
+                || !bounded(&process.boot_identity, &process.start_identity)
+                || process.boot_identity != child.boot_identity
+        })
     {
         return false;
     }
@@ -1455,6 +1512,7 @@ pub(crate) fn registered_processes_absent(
     };
     pid_absent(child.pid)
         && pid_absent(supervisor.pid)
+        && tracked.iter().all(|process| pid_absent(process.pid))
         && group_absent(child.group_id as i32)
         && group_absent(supervisor.pid as i32)
 }
@@ -1634,7 +1692,15 @@ pub fn reconcile_attempt(
         {
             return Ok(held("live worker identity or reservation unverified"));
         }
-        if registered_processes_absent(&child_file, &supervisor) {
+        let tracked = store
+            .evidence_payloads(task_id, attempt_id, "tracked_descendant")?
+            .into_iter()
+            .map(|payload| recorded_process(&payload))
+            .collect::<Option<Vec<_>>>();
+        let Some(tracked) = tracked else {
+            return Ok(held("invalid tracked descendant identity"));
+        };
+        if registered_processes_absent(&child_file, &supervisor, &tracked) {
             return Ok(held(
                 "receipt missing; registered processes absent; operator recovery required",
             ));
