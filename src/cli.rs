@@ -69,18 +69,37 @@ fn status(conn: &Connection, root: &Path) -> Result<Value, CliError> {
         (SELECT a.id FROM attempts a WHERE a.task_id=t.id ORDER BY a.rowid DESC LIMIT 1),
         (SELECT a.outcome FROM attempts a WHERE a.task_id=t.id ORDER BY a.rowid DESC LIMIT 1),
         (SELECT a.lifecycle FROM attempts a WHERE a.task_id=t.id ORDER BY a.rowid DESC LIMIT 1),
-        (SELECT e.payload FROM evidence e WHERE e.task_id=t.id AND e.kind='pause_pr_lookup' ORDER BY e.sequence DESC LIMIT 1)
+        (SELECT e.payload FROM evidence e WHERE e.task_id=t.id AND e.kind='pause_pr_lookup' ORDER BY e.sequence DESC LIMIT 1),
+        (SELECT CAST(strftime('%s', a.created_at) AS INTEGER) FROM attempts a
+         JOIN reservations r ON r.attempt_id=a.id
+         WHERE a.task_id=t.id AND r.status='reserved' ORDER BY a.rowid DESC LIMIT 1)
         FROM tasks t ORDER BY t.created_at,t.id").map_err(|_| CliError::Database)?;
     let tasks = stmt
         .query_map([], |r| {
+            let active_attempt = r.get::<_, Option<String>>(6)?;
+            let output = active_attempt.as_deref().and_then(|id| output_time(root, id));
+            let current = now();
+            let start = r.get::<_, Option<i64>>(11)?
+                .and_then(|epoch| u64::try_from(epoch).ok())
+                .filter(|epoch| *epoch <= current);
+            let (output_log_status, age, unavailable_reason) = match (active_attempt, output) {
+                (None, _) => ("unavailable", None, Some("no reserved attempt")),
+                (Some(_), Some(timestamp)) => (
+                    "available", Some(current.saturating_sub(timestamp)), None,
+                ),
+                (Some(_), None) => match start {
+                    Some(epoch) => ("no_output_yet", Some(current - epoch), None),
+                    None => ("unavailable", None, Some("no verified output log data or valid attempt start time")),
+                },
+            };
             Ok(json!({
                 "task_id":r.get::<_,String>(0)?, "phase":r.get::<_,String>(1)?,
                 "repository":r.get::<_,String>(2)?, "issue_number":r.get::<_,i64>(3)?,
                 "reserved_slot":r.get::<_,bool>(4)?, "reason":r.get::<_,Option<String>>(5)?,
-                "last_output_age_seconds":r.get::<_,Option<String>>(6)?.as_deref().and_then(|id| output_time(root,id)).map(|timestamp| now().saturating_sub(timestamp)),
-                "output_age_unavailable_reason":if r.get::<_,Option<String>>(6)?.is_none(){Some("no reserved attempt")}else if r.get::<_,Option<String>>(6)?.as_deref().and_then(|id| output_time(root,id)).is_none(){Some("no verified output log data")}else{None},
-                "output_log_status":if r.get::<_,Option<String>>(6)?.as_deref().and_then(|id| output_time(root,id)).is_some(){"available"}else{"unavailable"},
-                "output_silence_warning":r.get::<_,Option<String>>(6)?.as_deref().and_then(|id| output_time(root,id)).is_some_and(|timestamp| now().saturating_sub(timestamp)>=SILENCE_WARNING_THRESHOLD_SECONDS),
+                "last_output_age_seconds":age,
+                "output_age_unavailable_reason":unavailable_reason,
+                "output_log_status":output_log_status,
+                "output_silence_warning":age.is_some_and(|seconds| seconds >= SILENCE_WARNING_THRESHOLD_SECONDS),
                 "silence_warning_threshold_seconds":SILENCE_WARNING_THRESHOLD_SECONDS,
                 "latest_attempt_id":r.get::<_,Option<String>>(7)?,
                 "latest_attempt_outcome":r.get::<_,Option<String>>(8)?,

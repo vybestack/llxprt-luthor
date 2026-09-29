@@ -266,12 +266,127 @@ fn status_reports_output_age_and_silence_without_exposing_log_contents() {
     fs::write(stderr, "").unwrap();
     let status = f.run(&["status"]).unwrap();
     let task = &status["tasks"][0];
-    assert_eq!(task["last_output_age_seconds"], Value::Null);
+    assert!(task["last_output_age_seconds"].is_number());
     assert_eq!(task["output_silence_warning"], false);
+    assert_eq!(task["output_log_status"], "no_output_yet");
+    assert_eq!(task["output_age_unavailable_reason"], Value::Null);
+}
+
+#[test]
+fn status_warns_on_durable_attempt_age_with_empty_logs_without_requesting_stop() {
+    let f = Fixture::new();
+    f.task("old");
+    f.attempt("old", "silent", "session");
+    let (stdout, stderr) = f.logs("silent");
+    fs::write(stdout, "").unwrap();
+    fs::write(stderr, "").unwrap();
+    f.db()
+        .execute(
+            "UPDATE attempts SET created_at=datetime('now','-600 seconds') WHERE id='silent'",
+            [],
+        )
+        .unwrap();
+
+    let status = f.run(&["status"]).unwrap();
+    let task = &status["tasks"][0];
+    assert_eq!(task["output_log_status"], "no_output_yet");
+    assert!(task["last_output_age_seconds"].as_u64().unwrap() >= 300);
+    assert_eq!(task["output_age_unavailable_reason"], Value::Null);
+    assert_eq!(task["output_silence_warning"], true);
+    assert_eq!(task["phase"], "held");
+    let shown = f.run(&["show", "old"]).unwrap();
+    assert_eq!(shown["phase"], "held");
+    assert!(
+        shown["intents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|i| i["kind"] != "stop")
+    );
+    assert_eq!(
+        f.db()
+            .query_row("SELECT state FROM tasks WHERE id='old'", [], |r| r
+                .get::<_, String>(0))
+            .unwrap(),
+        "held"
+    );
+    assert_eq!(
+        f.db()
+            .query_row(
+                "SELECT lifecycle FROM attempts WHERE id='silent'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+        "launch_intended"
+    );
+
+    f.task("young");
+    f.attempt("young", "quiet", "session");
+    let (stdout, stderr) = f.logs("quiet");
+    fs::write(&stdout, "").unwrap();
+    fs::write(&stderr, "").unwrap();
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(600);
+    let times = fs::FileTimes::new().set_modified(old);
+    for path in [&stdout, &stderr] {
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_times(times)
+            .unwrap();
+    }
+    let status = f.run(&["status"]).unwrap();
+    let young = status["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["task_id"] == "young")
+        .unwrap();
+    assert_eq!(young["output_log_status"], "no_output_yet");
+    assert!(young["last_output_age_seconds"].as_u64().unwrap() < 300);
+    assert_eq!(young["output_silence_warning"], false);
+}
+
+#[test]
+fn status_does_not_warn_without_a_valid_reserved_attempt_start() {
+    let f = Fixture::new();
+    f.task("task");
+    f.attempt("task", "silent", "session");
+    let (stdout, stderr) = f.logs("silent");
+    fs::write(stdout, "").unwrap();
+    fs::write(stderr, "").unwrap();
+    f.db()
+        .execute(
+            "UPDATE attempts SET created_at='invalid' WHERE id='silent'",
+            [],
+        )
+        .unwrap();
+    let task = &f.run(&["status"]).unwrap()["tasks"][0];
+    assert_eq!(task["output_silence_warning"], false);
+    assert_eq!(task["last_output_age_seconds"], Value::Null);
+    assert_eq!(task["output_log_status"], "unavailable");
     assert_eq!(
         task["output_age_unavailable_reason"],
-        "no verified output log data"
+        "no verified output log data or valid attempt start time"
     );
+
+    f.db()
+        .execute(
+            "UPDATE attempts SET created_at=datetime('now','-600 seconds') WHERE id='silent'",
+            [],
+        )
+        .unwrap();
+    f.db()
+        .execute(
+            "UPDATE reservations SET status='released' WHERE attempt_id='silent'",
+            [],
+        )
+        .unwrap();
+    let task = &f.run(&["status"]).unwrap()["tasks"][0];
+    assert_eq!(task["output_silence_warning"], false);
+    assert_eq!(task["last_output_age_seconds"], Value::Null);
+    assert_eq!(task["output_age_unavailable_reason"], "no reserved attempt");
 }
 
 #[test]
