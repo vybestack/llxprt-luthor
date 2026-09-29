@@ -1,4 +1,70 @@
 #[test]
+fn evidence_payloads_are_ordered_task_scoped_and_durable() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = StateStore::open(dir.path(), 1).unwrap();
+    store
+        .create_task("task", &candidate("issue", 1), "rev", &config())
+        .unwrap();
+    store
+        .create_task("other-task", &candidate("other-issue", 2), "rev", &config())
+        .unwrap();
+    store
+        .record_evidence(
+            "task",
+            Some("shared-attempt"),
+            "tracked_descendant",
+            "first",
+        )
+        .unwrap();
+    store
+        .record_evidence(
+            "task",
+            Some("shared-attempt"),
+            "tracked_descendant",
+            "second",
+        )
+        .unwrap();
+    store
+        .record_evidence(
+            "other-task",
+            Some("shared-attempt"),
+            "tracked_descendant",
+            "other task",
+        )
+        .unwrap();
+    store
+        .record_evidence(
+            "task",
+            Some("shared-attempt"),
+            "different_kind",
+            "other kind",
+        )
+        .unwrap();
+
+    assert_eq!(
+        store
+            .evidence_payloads("task", "shared-attempt", "tracked_descendant")
+            .unwrap(),
+        vec!["first", "second"]
+    );
+    assert!(
+        store
+            .evidence_payloads("missing", "shared-attempt", "tracked_descendant")
+            .unwrap()
+            .is_empty()
+    );
+    drop(store);
+
+    let reopened = StateStore::open(dir.path(), 1).unwrap();
+    assert_eq!(
+        reopened
+            .evidence_payloads("task", "shared-attempt", "tracked_descendant")
+            .unwrap(),
+        vec!["first", "second"]
+    );
+}
+
+#[test]
 fn migrates_v2_released_reservation_and_preserves_attempt_history() {
     use rusqlite::Connection;
 

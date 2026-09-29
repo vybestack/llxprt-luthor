@@ -1367,6 +1367,21 @@ impl StateStore {
         self.unique_payload(true, task_id, attempt_id, kind)
     }
 
+    pub fn evidence_payloads(
+        &self,
+        task_id: &str,
+        attempt_id: &str,
+        kind: &str,
+    ) -> Result<Vec<String>, StateError> {
+        let mut statement = self.connection.prepare(
+            "SELECT payload FROM evidence WHERE task_id=?1 AND attempt_id=?2 AND kind=?3 ORDER BY sequence",
+        )?;
+        let payloads = statement
+            .query_map(params![task_id, attempt_id, kind], |row| row.get(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(payloads)
+    }
+
     pub(crate) fn intent_payload(
         &self,
         task_id: &str,
