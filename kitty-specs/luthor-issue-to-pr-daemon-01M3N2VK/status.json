@@ -60,7 +60,8 @@
       "model": "__resolved_model_absent__",
       "notes": [
         "Date GraphQL selection omits date scalar needed by the parser; unrelated Date blocks eligible Status discovery",
-        "Integrated a07e8eb; full offline test and strict lint gates passed; addresses review-cycle-6."
+        "Integrated a07e8eb; full offline test and strict lint gates passed; addresses review-cycle-6.",
+        "Review passed: query-shaped Date lacks date, configured Due errors, unrelated Date with Status Ready selects one candidate, credential prompt rejection retained; fmt/offline locked tests/strict clippy passed. Shared lane WP03 depends on WP02."
       ],
       "provider": "__resolved_provider_absent__",
       "review": null,
