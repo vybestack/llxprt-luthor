@@ -82,7 +82,7 @@
     },
     "WP03": {
       "actor": "llxprt",
-      "agent": null,
+      "agent": "llxprt",
       "agent_profile": "__resolved_profile_absent__",
       "agent_profile_version": "__resolved_profile_version_absent__",
       "force_count": 6,
@@ -90,6 +90,9 @@
       "last_event_id": "01M3PX1PT55MXA3HW98HD5FJQX",
       "last_transition_at": "2026-09-29T15:38:02.949280+00:00",
       "model": "__resolved_model_absent__",
+      "notes": [
+        "WP03 fix integrated; root fmt, locked offline all-target tests, and strict Clippy passed."
+      ],
       "provider": "__resolved_provider_absent__",
       "review": null,
       "review_result": {
