@@ -20,7 +20,7 @@ fn documented_json_example_loads_and_round_trips() {
 }
 
 fn valid() -> &'static str {
-    r#"{"state_root":"/private/state","worktree_root":"/private/worktrees","capacity":2,"sources":[{"project_id":"PVT_1","repositories":["org/tracker"],"ready_marker":{"kind":"label","name":"luthor-ready"},"milestone":"0.12.0"}],"mappings":[{"tracker_repository":"org/tracker","code_repository":"org/code","checkout":"/src/code","base_branch":"main","push_remote":"origin","allowed_pr_head_repository":"org/fork","allowed_pr_author":"alice"}],"initial":{"executable":"/bin/llxprt-code-rs","args":["--prompt","Work on {task.issue_url}","--cwd","{worktree}"]},"resume":{"executable":"/bin/llxprt-code-rs","args":["--session","{attempt.id}","--cwd","{worktree}","-p","Continue {task.issue_url}"]}}"#
+    r#"{"state_root":"/private/state","worktree_root":"/private/worktrees","capacity":2,"assignment_login":"bot","sources":[{"project_id":"PVT_1","repositories":["org/tracker"],"ready_marker":{"kind":"label","name":"luthor-ready"},"milestone":"0.12.0"}],"mappings":[{"tracker_repository":"org/tracker","code_repository":"org/code","checkout":"/src/code","base_branch":"main","push_remote":"origin","allowed_pr_head_repository":"org/fork","allowed_pr_author":"alice"}],"initial":{"executable":"/bin/llxprt-code-rs","args":["--prompt","Work on {task.issue_url}","--cwd","{worktree}"]},"resume":{"executable":"/bin/llxprt-code-rs","args":["--session","{attempt.id}","--cwd","{worktree}","-p","Continue {task.issue_url}"]}}"#
 }
 
 #[test]

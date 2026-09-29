@@ -87,6 +87,7 @@ pub struct EffectiveConfigSnapshot {
     pub state_root: PathBuf,
     pub worktree_root: PathBuf,
     pub capacity: usize,
+    pub assignment_login: String,
     pub sources: Vec<Source>,
     pub mappings: Vec<Mapping>,
     pub initial: CommandTemplate,
@@ -99,6 +100,7 @@ impl From<&Config> for EffectiveConfigSnapshot {
             state_root: config.state_root.clone(),
             worktree_root: config.worktree_root.clone(),
             capacity: config.capacity,
+            assignment_login: config.assignment_login.clone(),
             sources: config.sources.clone(),
             mappings: config.mappings.clone(),
             initial: config.initial.clone(),
@@ -226,6 +228,46 @@ impl StateStore {
             params![id, payload],
         )?;
         tx.commit()?;
+        Ok(())
+    }
+
+    pub fn record_claim_intent(
+        &mut self,
+        task_id: &str,
+        principal: &str,
+        repository: &str,
+        number: u64,
+    ) -> Result<(), StateError> {
+        let tx = self.connection.transaction()?;
+        let prior: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM intents WHERE task_id=?1 AND kind='claim_assignment'",
+            [task_id],
+            |r| r.get(0),
+        )?;
+        if prior != 0 {
+            return Err(StateError::InvalidSelection);
+        }
+        tx.execute(
+            "INSERT INTO intents(id,task_id,kind,detail) VALUES(?1,?2,'claim_assignment',?3)",
+            params![
+                format!("claim-{task_id}"),
+                task_id,
+                serde_json::json!({"principal":principal,"repository":repository,"number":number})
+                    .to_string()
+            ],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn set_task_phase(&mut self, task_id: &str, phase: &str) -> Result<(), StateError> {
+        let changed = self.connection.execute(
+            "UPDATE tasks SET state=?2 WHERE id=?1",
+            params![task_id, phase],
+        )?;
+        if changed != 1 {
+            return Err(StateError::InvalidSelection);
+        }
         Ok(())
     }
 

@@ -16,6 +16,7 @@ pub struct Config {
     pub state_root: PathBuf,
     pub worktree_root: PathBuf,
     pub capacity: usize,
+    pub assignment_login: String,
     pub sources: Vec<Source>,
     pub mappings: Vec<Mapping>,
     pub initial: CommandTemplate,
@@ -136,6 +137,14 @@ impl Config {
             return Err(ConfigError::Invalid(
                 "capacity, sources and mappings must be non-empty".into(),
             ));
+        }
+        if self.assignment_login.trim().is_empty()
+            || !self
+                .assignment_login
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "-_".contains(c))
+        {
+            return Err(ConfigError::Invalid("invalid assignment_login".into()));
         }
         let mapping_repositories: HashSet<_> = self
             .mappings

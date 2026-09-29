@@ -33,7 +33,7 @@ fn run_in_with_marker(
     fs::write(
         &config,
         format!(
-            r#"{{"state_root":"{}","worktree_root":"{}","capacity":{},"sources":[{{"project_id":"PROJECT","repositories":["org/tracker"],"ready_marker":{marker},"milestone":null}}],"mappings":[{{"tracker_repository":"org/tracker","code_repository":"org/code","checkout":"/tmp/code","base_branch":"main","push_remote":"origin","allowed_pr_head_repository":"org/head","allowed_pr_author":"agent"}}],"initial":{{"executable":"agent","args":[]}},"resume":{{"executable":"agent","args":[]}}}}"#,
+            r#"{{"state_root":"{}","worktree_root":"{}","capacity":{},"assignment_login":"agent","sources":[{{"project_id":"PROJECT","repositories":["org/tracker"],"ready_marker":{marker},"milestone":null}}],"mappings":[{{"tracker_repository":"org/tracker","code_repository":"org/code","checkout":"/tmp/code","base_branch":"main","push_remote":"origin","allowed_pr_head_repository":"org/head","allowed_pr_author":"agent"}}],"initial":{{"executable":"agent","args":[]}},"resume":{{"executable":"agent","args":[]}}}}"#,
             dir.join("state").display(),
             dir.display(),
             capacity

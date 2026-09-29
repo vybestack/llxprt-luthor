@@ -171,6 +171,7 @@ fn config() -> Config {
         state_root: "/state".into(),
         worktree_root: "/worktrees".into(),
         capacity: 1,
+        assignment_login: "bot".into(),
         sources: vec![Source {
             project_id: "project-1".into(),
             repositories: vec!["org/tracker".into()],
