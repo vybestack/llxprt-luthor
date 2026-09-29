@@ -115,8 +115,45 @@ pub fn inspect_recovery_quiescence(
         return held("dispatch plan mismatch");
     }
 
-    // This subset does not establish the complete filesystem and process identity
-    // chain. Keep recovery held rather than infer absence from incomplete evidence.
+    let held = |reason| Ok(RecoveryInspection::Held(reason));
+    let Some(worktree) = store.evidence_payload(task_id, None, "worktree_created")? else {
+        return held("missing worktree evidence");
+    };
+    let Some(worktree) = serde_json::from_str::<WorktreeIdentity>(&worktree).ok() else {
+        return held("invalid worktree evidence");
+    };
+    let record = store.worktree_record(task_id)?;
+    if worktree.path != plan.worktree
+        || worktree != plan.expected_worktree
+        || record.as_ref().is_none_or(|r| {
+            r.identity.as_ref() != Some(&worktree)
+                || r.intent.path != worktree.path
+                || r.intent.branch != worktree.branch
+                || r.intent.base != worktree.base
+                || r.intent.repository != worktree.repository
+        })
+    {
+        return held("worktree identity mismatch");
+    }
+    if worktree::verify_snapshot(&worktree).is_err() {
+        return held("worktree snapshot mismatch");
+    }
+    let Some(selection) = store.selection_evidence(task_id)? else {
+        return held("missing selection");
+    };
+    if selection.config_revision != plan.config_revision
+        || selection.candidate.mapping.code_repository != worktree.repository
+    {
+        return held("selection mismatch");
+    }
+    let Some(claim) = store.evidence_payload(task_id, None, "claim_verified")? else {
+        return held("missing claim evidence");
+    };
+    if claim.trim().is_empty() || claim != selection.effective_config.assignment_login {
+        return held("claim identity mismatch");
+    }
+
+    // Process identity remains incomplete, so recovery stays held.
     Ok(RecoveryInspection::Held(
         "complete recovery identity proof not implemented",
     ))
