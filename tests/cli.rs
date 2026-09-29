@@ -8,6 +8,20 @@ fn run(fake_response: &str) -> std::process::Output {
 }
 
 fn run_in(dir: &std::path::Path, fake_response: &str, capacity: usize) -> std::process::Output {
+    run_in_with_marker(
+        dir,
+        fake_response,
+        capacity,
+        r#"{"kind":"label","name":"ready"}"#,
+    )
+}
+
+fn run_in_with_marker(
+    dir: &std::path::Path,
+    fake_response: &str,
+    capacity: usize,
+    marker: &str,
+) -> std::process::Output {
     let bin = dir.join("gh");
     let response = fake_response.replace('\'', "'\\''");
     let script = format!(
@@ -19,7 +33,7 @@ fn run_in(dir: &std::path::Path, fake_response: &str, capacity: usize) -> std::p
     fs::write(
         &config,
         format!(
-            r#"{{"state_root":"{}","worktree_root":"{}","capacity":{},"sources":[{{"project_id":"PROJECT","repositories":["org/tracker"],"ready_marker":{{"kind":"label","name":"ready"}},"milestone":null}}],"mappings":[{{"tracker_repository":"org/tracker","code_repository":"org/code","checkout":"/tmp/code","base_branch":"main","push_remote":"origin","allowed_pr_head_repository":"org/head","allowed_pr_author":"agent"}}],"initial":{{"executable":"agent","args":[]}},"resume":{{"executable":"agent","args":[]}}}}"#,
+            r#"{{"state_root":"{}","worktree_root":"{}","capacity":{},"sources":[{{"project_id":"PROJECT","repositories":["org/tracker"],"ready_marker":{marker},"milestone":null}}],"mappings":[{{"tracker_repository":"org/tracker","code_repository":"org/code","checkout":"/tmp/code","base_branch":"main","push_remote":"origin","allowed_pr_head_repository":"org/head","allowed_pr_author":"agent"}}],"initial":{{"executable":"agent","args":[]}},"resume":{{"executable":"agent","args":[]}}}}"#,
             dir.join("state").display(),
             dir.display(),
             capacity
@@ -114,6 +128,60 @@ fn discover_skips_pull_request_before_selecting_later_issue() {
         .collect();
     assert_eq!(lines.len(), 1);
     assert_eq!(lines[0]["candidate"]["issue_number"], 7);
+}
+
+#[test]
+fn discover_rejects_configured_date_marker_but_preserves_unrelated_date_field() {
+    let response = serde_json::json!({
+        "data": { "node": { "items": {
+            "nodes": [{
+                "id": "ITEM",
+                "content": {"__typename":"Issue","id":"ISSUE_NODE","number":7,"repository":{"id":"REPO_NODE","nameWithOwner":"org/tracker"}},
+                "fieldValues": {"nodes":[
+                    {"__typename":"ProjectV2ItemFieldSingleSelectValue","name":"Ready","field":{"name":"Status"}},
+                    {"__typename":"ProjectV2ItemFieldDateValue","date":"2026-01-01","field":{"name":"Due"}}
+                ],"pageInfo":{"hasNextPage":false,"endCursor":null}}
+            }],
+            "pageInfo":{"hasNextPage":false,"endCursor":null}
+        }}}
+    }).to_string();
+    let dir = tempdir().unwrap();
+    let unsupported = run_in_with_marker(
+        dir.path(),
+        &response,
+        1,
+        r#"{"kind":"project_field","name":"Due","value":"2026-01-01"}"#,
+    );
+    assert!(!unsupported.status.success());
+    assert!(unsupported.stdout.is_empty());
+    let stderr = String::from_utf8(unsupported.stderr).unwrap();
+    assert!(
+        stderr.contains("unsupported configured marker field Due"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("project PROJECT item ITEM"), "{stderr}");
+
+    let supported = run_in_with_marker(
+        dir.path(),
+        &response,
+        1,
+        r#"{"kind":"project_field","name":"Status","value":"Ready"}"#,
+    );
+    assert!(
+        supported.status.success(),
+        "{}",
+        String::from_utf8_lossy(&supported.stderr)
+    );
+    let lines: Vec<Value> = String::from_utf8(supported.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 1);
+    assert_eq!(
+        lines[0]["candidate"]["observed_project_fields"],
+        serde_json::json!([["Status", "Ready"], ["Due", "2026-01-01"]])
+    );
 }
 
 #[test]

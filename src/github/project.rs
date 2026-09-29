@@ -355,7 +355,21 @@ impl ProjectReader for GhProjectReader {
                         )?,
                         required_string(field, "text", "invalid-project-field")?,
                     )),
-                    Some("ProjectV2ItemFieldIterationValue" | "ProjectV2ItemFieldDateValue") => {
+                    Some("ProjectV2ItemFieldDateValue") => {
+                        let name = required_string(
+                            field
+                                .get("field")
+                                .ok_or_else(|| "invalid-project-field".to_owned())?,
+                            "name",
+                            "invalid-project-field",
+                        )?;
+                        fields.push((
+                            name.clone(),
+                            required_string(field, "date", "invalid-project-field")?,
+                        ));
+                        unsupported_fields.push(name);
+                    }
+                    Some("ProjectV2ItemFieldIterationValue") => {
                         unsupported_fields.push(required_string(
                             field
                                 .get("field")

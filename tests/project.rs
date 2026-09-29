@@ -72,7 +72,10 @@ fn fake_gh_paginates_two_pages_and_preserves_requested_fields() {
     assert_eq!(page1.items.len(), 1);
     assert_eq!(
         page1.items[0].fields,
-        vec![("Status".into(), "Ready".into())]
+        vec![
+            ("Status".into(), "Ready".into()),
+            ("Due".into(), "2026-01-01".into())
+        ]
     );
     assert!(page1.has_next_page);
     let page2 = reader.page("PROJECT", page1.end_cursor.as_deref()).unwrap();
@@ -116,7 +119,9 @@ fn parses_project_fields_and_direct_issue_identity() {
         page.items[0].fields,
         vec![
             ("Status".into(), "Ready".into()),
-            ("Owner".into(), "Ada".into())
+            ("Owner".into(), "Ada".into()),
+            ("Due".into(), "2026-01-01".into()),
+            ("Archive Date".into(), "2026-02-01".into())
         ]
     );
     assert_eq!(
