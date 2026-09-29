@@ -139,6 +139,18 @@ fn claim_fixture() -> (
     ClaimWriter,
     StateStore,
 ) {
+    claim_fixture_with_milestone(None)
+}
+
+fn claim_fixture_with_milestone(
+    milestone: Option<&str>,
+) -> (
+    tempfile::TempDir,
+    Candidate,
+    ClaimProjects,
+    ClaimWriter,
+    StateStore,
+) {
     let dir = tempfile::tempdir().unwrap();
     let config = Config {
         state_root: dir.path().into(),
@@ -179,8 +191,8 @@ fn claim_fixture() -> (
         issue_number: 7,
         issue_url: "https://github.com/org/tracker/issues/7".into(),
         tracker_repo_id: "R1".into(),
-        milestone_id: None,
-        milestone_title: None,
+        milestone_id: milestone.map(|_| "MILESTONE1".into()),
+        milestone_title: milestone.map(str::to_string),
         observed_at_unix_secs: 1_700_000_000,
         observed_state: "open".into(),
         observed_assignees: vec![],
@@ -198,6 +210,8 @@ fn claim_fixture() -> (
         issue_reads: 0,
         failed_issue_read: None,
         later_page: None,
+        milestone: candidate.milestone_title.clone(),
+        milestone_id: candidate.milestone_id.clone(),
         item: ProjectItem {
             item_id: "item-N7".into(),
             issue_node_id: "N7".into(),
@@ -294,6 +308,67 @@ fn verified_claim_assigns_once() {
     assert_eq!(*assignees.borrow(), vec!["bot"]);
     assert_eq!(projects.issue_reads, 2);
     assert_claim_state(&dir, "claimed", true, true);
+}
+
+#[test]
+fn optional_source_claims_persisted_issue_milestone_after_reopen() {
+    let (dir, candidate, mut projects, mut writer, store) =
+        claim_fixture_with_milestone(Some("0.12.0"));
+    assert_eq!(candidate.source.milestone, None);
+    drop(store);
+    let mut reopened = StateStore::open(dir.path(), 1).unwrap();
+    assert_eq!(
+        reopened
+            .selection_evidence("task")
+            .unwrap()
+            .unwrap()
+            .candidate,
+        candidate
+    );
+    let mut prs = EmptyPullRequests;
+    claim(
+        &mut reopened,
+        "task",
+        &candidate,
+        "bot",
+        &mut projects,
+        &mut prs,
+        &mut writer,
+    )
+    .unwrap();
+    assert_eq!(projects.issue_reads, 2);
+    assert_eq!(writer.calls, 1);
+    assert_claim_state(&dir, "claimed", true, true);
+}
+
+#[test]
+fn changed_optional_issue_milestone_refuses_claim_before_assignment() {
+    for (title, id) in [
+        (Some("0.13.0"), Some("MILESTONE1")),
+        (Some("0.12.0"), Some("MILESTONE2")),
+        (None, None),
+    ] {
+        let (dir, candidate, mut projects, mut writer, mut store) =
+            claim_fixture_with_milestone(Some("0.12.0"));
+        projects.milestone = title.map(str::to_string);
+        projects.milestone_id = id.map(str::to_string);
+        let mut prs = EmptyPullRequests;
+        assert!(matches!(
+            claim(
+                &mut store,
+                "task",
+                &candidate,
+                "bot",
+                &mut projects,
+                &mut prs,
+                &mut writer,
+            ),
+            Err(ClaimError::Changed)
+        ));
+        assert_eq!(writer.calls, 0);
+        assert_eq!(projects.issue_reads, 1);
+        assert_claim_state(&dir, "preparing", false, false);
+    }
 }
 
 #[test]
@@ -455,6 +530,8 @@ struct ClaimProjects {
     issue_reads: usize,
     failed_issue_read: Option<usize>,
     later_page: Option<Result<Vec<ProjectItem>, ProjectReadError>>,
+    milestone: Option<String>,
+    milestone_id: Option<String>,
     item: ProjectItem,
 }
 impl luthor::github::project::ProjectReader for ClaimProjects {
@@ -507,8 +584,8 @@ impl luthor::github::project::ProjectReader for ClaimProjects {
             state: "open".into(),
             assignees: self.assignees.borrow().clone(),
             labels: vec!["ready".into()],
-            milestone: None,
-            milestone_id: None,
+            milestone: self.milestone.clone(),
+            milestone_id: self.milestone_id.clone(),
             observed_at_unix_secs: 1_700_000_000,
         })
     }
@@ -543,6 +620,20 @@ impl luthor::claim::AssignmentWriter for ClaimWriter {
         }
         Ok(())
     }
+}
+
+#[test]
+fn optional_source_reconcile_compares_persisted_milestone_identity() {
+    let (_dir, _candidate, mut projects, _writer, mut store) =
+        claim_fixture_with_milestone(Some("0.12.0"));
+    let unchanged =
+        luthor::coordinator::reconcile_source(&mut store, "task", &mut projects).unwrap();
+    assert_eq!(unchanged.project_membership, Some(true));
+    assert!(!unchanged.reasons.contains(&"issue_identity_mismatch"));
+
+    projects.milestone_id = Some("MILESTONE2".into());
+    let changed = luthor::coordinator::reconcile_source(&mut store, "task", &mut projects).unwrap();
+    assert!(changed.reasons.contains(&"issue_identity_mismatch"));
 }
 
 #[test]

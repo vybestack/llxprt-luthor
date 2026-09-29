@@ -109,8 +109,13 @@ pub fn reconcile_source<P: ProjectReader>(
                         || issue.repository != candidate.repository
                         || issue.tracker_repo_id != candidate.tracker_repo_id
                         || issue.url != candidate.issue_url
-                        || issue.milestone != candidate.source.milestone
+                        || issue.milestone != candidate.milestone_title
                         || issue.milestone_id != candidate.milestone_id
+                        || candidate
+                            .source
+                            .milestone
+                            .as_ref()
+                            .is_some_and(|title| issue.milestone.as_ref() != Some(title))
                     {
                         report.reasons.push("issue_identity_mismatch");
                     }

@@ -141,8 +141,12 @@ pub(crate) fn fresh<R: ProjectReader>(
         || issue.number != c.issue_number
         || issue.state != "open"
         || !marker
-        || issue.milestone != c.source.milestone
+        || issue.milestone != c.milestone_title
         || issue.milestone_id != c.milestone_id
+        || c.source
+            .milestone
+            .as_ref()
+            .is_some_and(|title| issue.milestone.as_ref() != Some(title))
         || item.item_id != c.item_id
     {
         return Err(ClaimError::Changed);
@@ -158,9 +162,13 @@ pub fn claim<P: ProjectReader, Q: PullRequestReader, W: AssignmentWriter>(
     prs: &mut Q,
     writer: &mut W,
 ) -> Result<(), ClaimError> {
-    let configured_login = store
-        .claim_assignment_login(task_id)?
+    let selection = store
+        .selection_evidence(task_id)?
         .ok_or(ClaimError::Changed)?;
+    if selection.candidate != *c {
+        return Err(ClaimError::Changed);
+    }
+    let configured_login = selection.effective_config.assignment_login;
     if principal != configured_login || principal.trim().is_empty() {
         return Err(ClaimError::Changed);
     }

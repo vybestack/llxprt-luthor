@@ -54,9 +54,7 @@ fn validate_selection(candidate: &Candidate, config: &Config) -> Result<(), Stat
     let milestone_matches = source
         .milestone
         .as_ref()
-        .map_or(candidate.milestone_title.is_none(), |title| {
-            candidate.milestone_title.as_ref() == Some(title)
-        });
+        .is_none_or(|title| candidate.milestone_title.as_ref() == Some(title));
     if !config.sources.contains(source)
         || !config.mappings.contains(mapping)
         || candidate.project_id != source.project_id
@@ -335,10 +333,6 @@ impl StateStore {
         }
         self.selection_evidence(task_id)?
             .ok_or(StateError::InvalidSelection)
-    }
-
-    pub fn worktree_intent(&self, task_id: &str) -> Result<Option<WorktreeIntent>, StateError> {
-        Ok(self.worktree_record(task_id)?.map(|record| record.intent))
     }
 
     pub fn worktree_record(&self, task_id: &str) -> Result<Option<WorktreeRecord>, StateError> {

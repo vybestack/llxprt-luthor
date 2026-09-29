@@ -451,7 +451,7 @@ fn invalid_selections_leave_no_task_or_evidence_after_reopen() {
     ] {
         let dir = tempfile::tempdir().unwrap();
         let mut candidate = candidate(name, 1);
-        let config = config();
+        let mut config = config();
         match name {
             "unrelated mapping" => candidate.mapping.code_repository = "evil/repo".into(),
             "unrelated source" => candidate.source.project_id = "other-project".into(),
@@ -460,7 +460,11 @@ fn invalid_selections_leave_no_task_or_evidence_after_reopen() {
                     name: "other".into(),
                 }
             }
-            "unexpected milestone" => candidate.milestone_title = Some("unexpected".into()),
+            "unexpected milestone" => {
+                config.sources[0].milestone = Some("v2".into());
+                candidate.source = config.sources[0].clone();
+                candidate.milestone_title = Some("unexpected".into());
+            }
             _ => unreachable!(),
         }
         let mut store = StateStore::open(dir.path(), 1).unwrap();
@@ -476,6 +480,33 @@ fn invalid_selections_leave_no_task_or_evidence_after_reopen() {
         assert_eq!(reopened.task_count().unwrap(), 0, "{name}");
         assert_eq!(reopened.selection_evidence("task").unwrap(), None, "{name}");
     }
+}
+
+#[test]
+fn optional_source_persists_actual_issue_milestone_after_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut candidate = candidate("milestone-issue", 8);
+    candidate.milestone_title = Some("0.12.0".into());
+    candidate.milestone_id = Some("MILESTONE1".into());
+    let mut store = StateStore::open(dir.path(), 1).unwrap();
+    store
+        .create_task("task", &candidate, "rev", &config())
+        .unwrap();
+    drop(store);
+    let reopened = StateStore::open(dir.path(), 1).unwrap();
+    assert_eq!(reopened.task_count().unwrap(), 1);
+    let selection = reopened.selection_evidence("task").unwrap().unwrap();
+    assert_eq!(selection.candidate, candidate);
+    assert_eq!(selection.candidate.source.milestone, None);
+    assert_eq!(
+        selection.candidate.milestone_title.as_deref(),
+        Some("0.12.0")
+    );
+    assert_eq!(
+        selection.candidate.milestone_id.as_deref(),
+        Some("MILESTONE1")
+    );
+    assert_eq!(reopened.evidence_kinds("task").unwrap(), vec!["selection"]);
 }
 
 #[test]

@@ -140,7 +140,12 @@ fn creates_and_reopens_verified_worktree() {
     );
     assert_eq!(identity.head, git(&identity.path, &["rev-parse", "HEAD"]));
     assert_eq!(
-        f.store.worktree_intent("task-1").unwrap().unwrap().branch,
+        f.store
+            .worktree_record("task-1")
+            .unwrap()
+            .unwrap()
+            .intent
+            .branch,
         identity.branch
     );
     drop(f.store);
@@ -166,7 +171,7 @@ fn preclaim_and_invalid_ids_refuse_without_side_effects() {
         f.create("../outside"),
         Err(WorktreeError::InvalidTaskId)
     ));
-    assert!(f.store.worktree_intent("task-1").unwrap().is_none());
+    assert!(f.store.worktree_record("task-1").unwrap().is_none());
     assert!(!f.config.worktree_root.exists());
 }
 
@@ -180,14 +185,14 @@ fn duplicate_task_and_foreign_path_or_branch_are_not_adopted() {
         f.create("task-1"),
         Err(WorktreeError::Conflict(_))
     ));
-    assert!(f.store.worktree_intent("task-1").unwrap().is_none());
+    assert!(f.store.worktree_record("task-1").unwrap().is_none());
     fs::remove_dir(f.config.worktree_root.join("task-1")).unwrap();
     git(&f.config.mappings[0].checkout, &["branch", "luthor/task-1"]);
     assert!(matches!(
         f.create("task-1"),
         Err(WorktreeError::Conflict(_))
     ));
-    assert!(f.store.worktree_intent("task-1").unwrap().is_none());
+    assert!(f.store.worktree_record("task-1").unwrap().is_none());
     f.task("task-2", 2, true);
     f.create("task-2").unwrap();
     assert!(matches!(
@@ -218,7 +223,7 @@ fn symlink_root_and_replaced_worktree_hold() {
         f.create("task-1"),
         Err(WorktreeError::Conflict(_))
     ));
-    assert!(f.store.worktree_intent("task-1").unwrap().is_none());
+    assert!(f.store.worktree_record("task-1").unwrap().is_none());
     fs::remove_file(&f.config.worktree_root).unwrap();
     let WorktreeResult::Created(identity) = f.create("task-1").unwrap() else {
         panic!()
@@ -247,7 +252,7 @@ fn user_symlink_ancestor_is_rejected_before_creating_a_root() {
         Err(WorktreeError::Conflict(_))
     ));
     assert!(!real.join("private").exists());
-    assert!(f.store.worktree_intent("task-1").unwrap().is_none());
+    assert!(f.store.worktree_record("task-1").unwrap().is_none());
 }
 
 #[test]
@@ -346,7 +351,7 @@ fn interruption_after_root_creation_leaves_durable_intent_and_never_adopts_a_pat
         )
     }));
     assert!(result.is_err());
-    let intent = f.store.worktree_intent("task-1").unwrap().unwrap();
+    let intent = f.store.worktree_record("task-1").unwrap().unwrap().intent;
     assert_eq!(
         intent.path,
         fs::canonicalize(f.dir.path())
@@ -364,7 +369,10 @@ fn interruption_after_root_creation_leaves_durable_intent_and_never_adopts_a_pat
         ))
     ));
     assert_eq!(store.task_phase("task-1").unwrap().as_deref(), Some("held"));
-    assert_eq!(store.worktree_intent("task-1").unwrap(), Some(intent));
+    assert_eq!(
+        store.worktree_record("task-1").unwrap().map(|r| r.intent),
+        Some(intent)
+    );
 }
 
 #[test]
@@ -386,7 +394,7 @@ fn rejected_begin_worktree_leaves_root_untouched() {
         ))
     ));
     assert!(!root.exists());
-    assert!(f.store.worktree_intent("task-1").unwrap().is_none());
+    assert!(f.store.worktree_record("task-1").unwrap().is_none());
 }
 
 #[cfg(unix)]
@@ -411,7 +419,7 @@ fn changed_root_after_intent_does_not_create_a_worktree() {
         ),
         Err(WorktreeError::Conflict("worktree root contains a symlink"))
     ));
-    assert!(f.store.worktree_intent("task-1").unwrap().is_some());
+    assert!(f.store.worktree_record("task-1").unwrap().is_some());
     assert!(!moved.join("task-1").exists());
     assert_eq!(
         f.store.task_phase("task-1").unwrap().as_deref(),
