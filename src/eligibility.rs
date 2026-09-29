@@ -12,12 +12,8 @@ pub struct Candidate {
     pub repository: String,
     pub issue_node_id: String,
     pub issue_number: u64,
-    pub mapping: MappingIdentity,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MappingIdentity {
-    pub code_repository: String,
+    pub mapping: Mapping,
+    pub source: Source,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -39,7 +35,7 @@ pub fn select<R: ProjectReader>(
         .iter()
         .map(|m| (m.tracker_repository.as_str(), m))
         .collect();
-    let mut candidates: HashMap<String, (Candidate, String, Option<String>)> = HashMap::new();
+    let mut candidates: HashMap<String, (Candidate, Marker, Option<String>)> = HashMap::new();
     for source in sources {
         for (item, issue) in enumerate(reader, &source.project_id)? {
             if !source
@@ -69,13 +65,12 @@ pub fn select<R: ProjectReader>(
                 repository: issue.repository.clone(),
                 issue_node_id: issue.node_id.clone(),
                 issue_number: issue.number,
-                mapping: MappingIdentity {
-                    code_repository: mapping.code_repository.clone(),
-                },
+                mapping: (*mapping).clone(),
+                source: source.clone(),
             };
             if let Some((previous, marker, milestone)) = candidates.get(&key) {
                 if previous.mapping != candidate.mapping
-                    || *marker != format!("{:?}", source.ready_marker)
+                    || *marker != source.ready_marker
                     || *milestone != source.milestone
                 {
                     return Err(EligibilityError::ConflictingSource(key));
@@ -85,7 +80,7 @@ pub fn select<R: ProjectReader>(
                     key,
                     (
                         candidate,
-                        format!("{:?}", source.ready_marker),
+                        source.ready_marker.clone(),
                         source.milestone.clone(),
                     ),
                 );

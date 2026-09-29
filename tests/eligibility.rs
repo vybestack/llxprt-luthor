@@ -82,6 +82,9 @@ fn mapping() -> Mapping {
         code_repository: "org/code".into(),
         checkout: "/checkout".into(),
         base_branch: "main".into(),
+        push_remote: "origin".into(),
+        allowed_pr_head_repository: "org/fork".into(),
+        allowed_pr_author: "alice".into(),
     }
 }
 

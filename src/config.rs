@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{collections::HashSet, path::PathBuf};
 use thiserror::Error;
 
@@ -22,7 +22,7 @@ pub struct Config {
     pub resume: CommandTemplate,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Source {
     pub project_id: String,
@@ -31,20 +31,23 @@ pub struct Source {
     pub milestone: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Marker {
     Label { name: String },
     ProjectField { name: String, value: String },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Mapping {
     pub tracker_repository: String,
     pub code_repository: String,
     pub checkout: PathBuf,
     pub base_branch: String,
+    pub push_remote: String,
+    pub allowed_pr_head_repository: String,
+    pub allowed_pr_author: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -203,6 +206,21 @@ impl Config {
                     "mapping checkout and base_branch are required".into(),
                 ));
             }
+            validate_push_remote(&mapping.push_remote)?;
+            validate_repository(&mapping.allowed_pr_head_repository)?;
+            if mapping.allowed_pr_author.trim().is_empty()
+                || !mapping
+                    .allowed_pr_author
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "-_".contains(c))
+            {
+                return Err(ConfigError::Invalid("invalid allowed_pr_author".into()));
+            }
+            if mapping.allowed_pr_head_repository == mapping.tracker_repository
+                || mapping.allowed_pr_head_repository == mapping.code_repository
+            {
+                return Err(ConfigError::Invalid("allowed PR head repository must be distinct from tracker and code repositories".into()));
+            }
         }
         validate_command(&self.initial)?;
         validate_command(&self.resume)?;
@@ -273,6 +291,26 @@ fn validate_repository(value: &str) -> Result<(), ConfigError> {
         return Err(ConfigError::Invalid(format!(
             "invalid repository name: {value}"
         )));
+    }
+    Ok(())
+}
+
+fn validate_push_remote(value: &str) -> Result<(), ConfigError> {
+    if value.is_empty()
+        || !value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_.@/:".contains(c))
+        || value.contains("..")
+        || value.starts_with('-')
+    {
+        return Err(ConfigError::Invalid("invalid push_remote".into()));
+    }
+    if let Some((scheme, authority_path)) = value.split_once("://")
+        && (!matches!(scheme, "https" | "ssh")
+            || authority_path.contains('@')
+            || !authority_path.contains('/'))
+    {
+        return Err(ConfigError::Invalid("invalid push_remote URL".into()));
     }
     Ok(())
 }
