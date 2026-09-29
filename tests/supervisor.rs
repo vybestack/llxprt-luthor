@@ -2015,6 +2015,70 @@ fn verified_exit_seven_releases_once_and_survives_restart() {
 
 #[cfg(unix)]
 #[test]
+fn malformed_tracked_descendant_evidence_holds_missing_receipt_attempt() {
+    let (_dir, config, mut store) = dispatched_fixture(0);
+    fs::remove_file(receipt_path(&config)).unwrap();
+    store
+        .record_evidence(
+            "task",
+            Some("attempt-real"),
+            "tracked_descendant",
+            "{malformed",
+        )
+        .unwrap();
+
+    assert!(matches!(
+        reconcile_attempt(&mut store, "task", "attempt-real").unwrap(),
+        Reconciliation::Held { reason } if reason == "invalid tracked descendant identity"
+    ));
+    assert_eq!(store.reservation_count().unwrap(), 1);
+    assert_eq!(store.task_phase("task").unwrap().as_deref(), Some("held"));
+    assert!(
+        !store
+            .evidence_kinds("task")
+            .unwrap()
+            .iter()
+            .any(|kind| kind == "attempt_exit")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn live_tracked_descendant_prevents_missing_receipt_absence_reconciliation() {
+    let (_dir, config, mut store) = dispatched_fixture(0);
+    fs::remove_file(receipt_path(&config)).unwrap();
+    let (boot_identity, start_identity) = test_process_identity(std::process::id());
+    let tracked = serde_json::json!({
+        "pid": std::process::id(),
+        "boot_identity": boot_identity,
+        "start_identity": start_identity,
+    });
+    store
+        .record_evidence(
+            "task",
+            Some("attempt-real"),
+            "tracked_descendant",
+            &tracked.to_string(),
+        )
+        .unwrap();
+
+    assert!(matches!(
+        reconcile_attempt(&mut store, "task", "attempt-real").unwrap(),
+        Reconciliation::Held { reason } if reason != "receipt missing; registered processes absent; operator recovery required"
+    ));
+    assert_eq!(store.reservation_count().unwrap(), 1);
+    assert_eq!(store.task_phase("task").unwrap().as_deref(), Some("held"));
+    assert!(
+        !store
+            .evidence_kinds("task")
+            .unwrap()
+            .iter()
+            .any(|kind| kind == "attempt_exit")
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn absent_and_corrupt_receipt_keep_reservation() {
     let (_dir, config, mut store) = dispatched_fixture(0);
     let receipt = receipt_path(&config);
