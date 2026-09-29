@@ -1054,6 +1054,83 @@ fn natural_exit_matching_pr_is_proved_and_persisted() {
     );
     assert_eq!(prs.reads, 1);
 }
+
+#[cfg(unix)]
+#[test]
+fn missing_receipt_cannot_be_overridden_by_matching_open_pr() {
+    let (_dir, mut config, mut store) = dispatched_fixture(0);
+    config.capacity = 1;
+    let receipt = receipt_path(&config);
+    assert!(receipt.exists());
+    fs::remove_file(&receipt).unwrap();
+
+    let selection = store.selection_evidence("task").unwrap().unwrap();
+    let identity = store
+        .worktree_record("task")
+        .unwrap()
+        .unwrap()
+        .identity
+        .unwrap();
+    let mut prs = ExitPr {
+        matching: Some((selection.candidate.issue_url, identity.branch)),
+        ..ExitPr::default()
+    };
+    assert!(matches!(
+        luthor::coordinator::reconcile_with_pr(&mut store, "task", "attempt-real", &mut prs)
+            .unwrap(),
+        Reconciliation::Held { .. }
+    ));
+    assert_eq!(prs.reads, 0);
+    assert_eq!(store.task_phase("task").unwrap().as_deref(), Some("held"));
+    assert_eq!(store.reservation_count().unwrap(), 1);
+    assert!(matches!(
+        store.ensure_dispatch_capacity(),
+        Err(StateError::Capacity { .. })
+    ));
+    let kinds = store.evidence_kinds("task").unwrap();
+    assert!(!kinds.iter().any(|kind| kind == "verified_open_pr"));
+    assert!(!kinds.iter().any(|kind| kind == "attempt_exit"));
+    let connection = rusqlite::Connection::open(config.state_root.join("state.sqlite3")).unwrap();
+    let outcome: Option<String> = connection
+        .query_row(
+            "SELECT outcome FROM attempts WHERE id='attempt-real'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(outcome, None);
+
+    drop(store);
+    let mut reopened = StateStore::open(&config.state_root, config.capacity).unwrap();
+    let mut startup_prs = ExitPr {
+        matching: prs.matching.clone(),
+        ..ExitPr::default()
+    };
+    let startup =
+        luthor::coordinator::startup_reconcile_all(&mut reopened, &mut startup_prs).unwrap();
+    assert!(matches!(
+        startup.attempts[0].review,
+        luthor::coordinator::AttemptReview::Held(_)
+    ));
+    assert_eq!(startup_prs.reads, 0);
+    assert_eq!(
+        reopened.task_phase("task").unwrap().as_deref(),
+        Some("held")
+    );
+    assert_eq!(reopened.reservation_count().unwrap(), 1);
+    assert!(matches!(
+        reopened.ensure_dispatch_capacity(),
+        Err(StateError::Capacity { .. })
+    ));
+    assert!(
+        !reopened
+            .evidence_kinds("task")
+            .unwrap()
+            .iter()
+            .any(|kind| kind == "attempt_exit")
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn stopped_exit_matching_pr_is_proved_and_persisted() {
