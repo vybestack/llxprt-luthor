@@ -36,6 +36,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             luthor::supervisor::supervise(std::path::Path::new(&root), &attempt)?;
             Ok(())
         }
+        #[cfg(unix)]
+        Some("__worker_gate") => {
+            let plan = args.next().ok_or("missing gate plan")?;
+            if args.next().is_some() {
+                return Err("unexpected argument".into());
+            }
+            luthor::supervisor::worker_gate(std::path::Path::new(&plan))?;
+            Ok(())
+        }
         Some("status" | "show" | "logs") => operator(args),
         Some(command @ ("pause" | "reconcile")) => mutate(command, args.collect()),
         Some("discover") => discover(args.collect()),

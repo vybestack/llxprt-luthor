@@ -4,7 +4,7 @@ use luthor::{
     state::{StateError, StateStore, WorktreeIdentity, WorktreeIntent},
     supervisor::{
         Reconciliation, SupervisorError, execute_with_binary, prepare_initial, prepare_resume,
-        reconcile_attempt, request_stop, run_gated_child,
+        reconcile_attempt, request_stop, run_gated_child_with_binary,
     },
 };
 use std::{fs, io::Cursor, path::Path};
@@ -287,7 +287,12 @@ fn gate_eof_never_spawns_and_does_not_write_receipt() {
         },
     };
     assert!(matches!(
-        run_gated_child(&plan, Cursor::new(Vec::<u8>::new()), dir.path()),
+        run_gated_child_with_binary(
+            &plan,
+            Cursor::new(Vec::<u8>::new()),
+            dir.path(),
+            Path::new(env!("CARGO_BIN_EXE_luthor"))
+        ),
         Err(SupervisorError::GateClosed)
     ));
     assert!(!marker.exists());
@@ -301,7 +306,13 @@ fn released_gate_captures_durable_logs_and_receipts_real_exit() {
         let dir = tempfile::tempdir().unwrap();
         let attempt = format!("exit-{code}");
         let plan = fake_plan(dir.path(), &attempt, code);
-        let status = run_gated_child(&plan, Cursor::new(b"R"), dir.path()).unwrap();
+        let status = run_gated_child_with_binary(
+            &plan,
+            Cursor::new(b"R"),
+            dir.path(),
+            Path::new(env!("CARGO_BIN_EXE_luthor")),
+        )
+        .unwrap();
         assert_eq!(status.code(), Some(code));
         let stdout_path = dir.path().join(format!("{attempt}.stdout.log"));
         let stderr_path = dir.path().join(format!("{attempt}.stderr.log"));
@@ -623,7 +634,7 @@ fn reused_child_pid_with_contradictory_start_identity_keeps_slot() {
     });
     assert!(
         matches!(reconcile_attempt(&mut store, "task", "attempt-real").unwrap(),
-        Reconciliation::Held { reason } if reason == "child identity mismatch")
+        Reconciliation::Held { reason } if reason == "receipt identity or shape mismatch")
     );
     assert_eq!(store.reservation_count().unwrap(), 1);
 }
@@ -664,6 +675,23 @@ fn gate_release_decision_reconciles_without_gate_sent_evidence() {
 
 #[cfg(unix)]
 #[test]
+fn missing_child_registration_holds_even_with_valid_receipt() {
+    let (_dir, config, mut store) = dispatched_fixture(0);
+    let db = rusqlite::Connection::open(config.state_root.join("state.sqlite3")).unwrap();
+    db.execute(
+        "DELETE FROM evidence WHERE attempt_id='attempt-real' AND kind='child_registered'",
+        [],
+    )
+    .unwrap();
+    assert!(matches!(
+        reconcile_attempt(&mut store, "task", "attempt-real").unwrap(),
+        Reconciliation::Held { reason } if reason == "missing child registration"
+    ));
+    assert_eq!(store.reservation_count().unwrap(), 1);
+}
+
+#[cfg(unix)]
+#[test]
 fn live_child_group_is_not_released() {
     use std::os::unix::process::CommandExt;
     let (_dir, config, mut store) = dispatched_fixture(0);
@@ -681,7 +709,7 @@ fn live_child_group_is_not_released() {
     });
     assert!(
         matches!(reconcile_attempt(&mut store, "task", "attempt-real").unwrap(),
-        Reconciliation::Held { reason } if reason == "child process group is alive")
+        Reconciliation::Held { reason } if reason == "receipt identity or shape mismatch")
     );
     assert_eq!(store.reservation_count().unwrap(), 1);
     live.kill().unwrap();
@@ -733,6 +761,120 @@ fn same_binary_ready_without_release_does_not_launch_worker() {
     assert!(!marker.exists());
     assert!(attempts.join("attempt-real.supervisor-error.json").exists());
     assert_eq!(store.reservation_count().unwrap(), 1);
+}
+#[cfg(unix)]
+#[test]
+fn registered_shim_stays_gated_and_survives_supervisor_crash_after_release() {
+    use std::{
+        io::Write,
+        os::unix::fs::{DirBuilderExt, OpenOptionsExt},
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (config, mut store, plan, marker) = prepared_fake_worker(&dir);
+    fs::write(
+        &plan.executable,
+        format!(
+            "#!/bin/sh\necho started > '{}'\nsleep 2\n",
+            marker.display()
+        ),
+    )
+    .unwrap();
+    let attempts = config.state_root.join("attempts");
+    fs::DirBuilder::new().mode(0o700).create(&attempts).unwrap();
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(attempts.join("attempt-real.plan.json"))
+        .unwrap();
+    serde_json::to_writer(&mut file, &plan).unwrap();
+    file.sync_all().unwrap();
+    fs::File::open(&attempts).unwrap().sync_all().unwrap();
+    store
+        .begin_supervision(
+            "task",
+            "attempt-real",
+            &serde_json::to_string(&plan).unwrap(),
+        )
+        .unwrap();
+    let mut supervisor = Command::new(env!("CARGO_BIN_EXE_luthor"))
+        .args([
+            "__supervise",
+            config.state_root.to_str().unwrap(),
+            "attempt-real",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut ready = String::new();
+    std::io::BufReader::new(supervisor.stdout.take().unwrap())
+        .read_line(&mut ready)
+        .unwrap();
+    assert_eq!(ready, "READY\n");
+    let identity_path = attempts.join("attempt-real.child.json");
+    let identity: serde_json::Value =
+        serde_json::from_slice(&fs::read(&identity_path).unwrap()).unwrap();
+    let pid = identity["pid"].as_i64().unwrap() as i32;
+    assert_eq!(identity["group_id"].as_i64().unwrap(), i64::from(pid));
+    assert_eq!(unsafe { libc::getpgid(pid) }, pid);
+    assert!(!marker.exists());
+    store
+        .record_evidence(
+            "task",
+            Some("attempt-real"),
+            "child_registered",
+            fs::read_to_string(&identity_path).unwrap().trim(),
+        )
+        .unwrap();
+    assert!(!marker.exists());
+    let (boot, start) = test_process_identity(supervisor.id());
+    let process =
+        serde_json::json!({"pid":supervisor.id(),"boot_identity":boot,"start_identity":start});
+    store
+        .record_evidence(
+            "task",
+            Some("attempt-real"),
+            "supervisor_ready",
+            &process.to_string(),
+        )
+        .unwrap();
+    store
+        .record_intent(
+            "gate-attempt-real",
+            "task",
+            Some("attempt-real"),
+            "gate_release",
+            &process.to_string(),
+        )
+        .unwrap();
+    assert!(!marker.exists());
+    supervisor.stdin.take().unwrap().write_all(b"R").unwrap();
+    for _ in 0..100 {
+        if marker.exists() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(marker.exists());
+    supervisor.kill().unwrap();
+    supervisor.wait().unwrap();
+    let (boot, start) = test_process_identity(pid as u32);
+    assert_eq!(identity["boot_identity"], boot);
+    assert_eq!(identity["start_identity"], start);
+    assert_eq!(unsafe { libc::getpgid(pid) }, pid);
+    assert_eq!(
+        identity,
+        serde_json::from_slice::<serde_json::Value>(&fs::read(identity_path).unwrap()).unwrap()
+    );
+    assert!(!attempts.join("attempt-real.receipt.json").exists());
+    assert!(matches!(
+        reconcile_attempt(&mut store, "task", "attempt-real").unwrap(),
+        Reconciliation::Held { .. }
+    ));
+    assert_eq!(store.reservation_count().unwrap(), 1);
+    thread::sleep(Duration::from_secs(3));
 }
 
 #[cfg(unix)]

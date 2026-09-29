@@ -16,7 +16,10 @@ use std::{
 };
 #[cfg(unix)]
 use std::{
-    os::unix::net::{UnixListener, UnixStream},
+    os::unix::{
+        net::{UnixListener, UnixStream},
+        process::CommandExt,
+    },
     process::Child,
 };
 use thiserror::Error;
@@ -594,7 +597,50 @@ pub fn run_gated_child<R: Read>(
     gate: R,
     store_root: &Path,
 ) -> Result<ExitStatus, SupervisorError> {
-    run_gated_child_control(plan, gate, store_root, None)
+    run_gated_child_with_binary(plan, gate, store_root, &env::current_exe()?)
+}
+
+#[cfg(unix)]
+pub fn run_gated_child_with_binary<R: Read>(
+    plan: &LaunchPlan,
+    gate: R,
+    store_root: &Path,
+    binary: &Path,
+) -> Result<ExitStatus, SupervisorError> {
+    run_gated_child_control(plan, gate, store_root, None, binary)
+}
+
+#[cfg(unix)]
+pub fn worker_gate(plan_path: &Path) -> Result<(), SupervisorError> {
+    let plan: LaunchPlan = serde_json::from_slice(&fs::read(plan_path)?)?;
+    let mut byte = [0];
+    std::io::stdin()
+        .read_exact(&mut byte)
+        .map_err(|_| SupervisorError::GateClosed)?;
+    if byte != *b"R" {
+        return Err(SupervisorError::GateClosed);
+    }
+    let mut command = Command::new(&plan.executable);
+    command.args(&plan.args).current_dir(&plan.worktree);
+    configure_session(&mut command, &plan.session_environment);
+    Err(command.exec().into())
+}
+
+#[cfg(unix)]
+fn configure_session(command: &mut Command, session: &SessionEnvironment) {
+    command.env("HOME", &session.home);
+    for (name, value) in [
+        ("XDG_CONFIG_HOME", &session.xdg_config_home),
+        ("XDG_DATA_HOME", &session.xdg_data_home),
+        ("XDG_STATE_HOME", &session.xdg_state_home),
+        ("LLXPRT_CONFIG_HOME", &session.llxprt_config_home),
+    ] {
+        if let Some(value) = value {
+            command.env(name, value);
+        } else {
+            command.env_remove(name);
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -603,13 +649,9 @@ fn run_gated_child_control<R: Read>(
     mut gate: R,
     store_root: &Path,
     control: Option<&UnixListener>,
+    binary: &Path,
 ) -> Result<ExitStatus, SupervisorError> {
-    let mut release = [0u8; 1];
-    if gate.read(&mut release)? != 1 || release[0] != b'R' {
-        return Err(SupervisorError::GateClosed);
-    }
-    if plan.attempt_id.is_empty() || plan.attempt_id.contains('/') || plan.attempt_id.contains('\\')
-    {
+    if !valid_attempt(&plan.attempt_id) {
         return Err(SupervisorError::Conflict);
     }
     fs::create_dir_all(store_root)?;
@@ -617,34 +659,88 @@ fn run_gated_child_control<R: Read>(
     let stderr_path = store_root.join(format!("{}.stderr.log", plan.attempt_id));
     let stdout_file = private_file(&stdout_path)?;
     let stderr_file = private_file(&stderr_path)?;
-    let mut command = Command::new(&plan.executable);
+    let plan_path = store_root.join(format!("{}.plan.json", plan.attempt_id));
+    if control.is_none() {
+        write_private_json(&plan_path, plan)?;
+    }
+    let mut command = Command::new(binary);
     command
-        .env("HOME", &plan.session_environment.home)
-        .args(&plan.args)
+        .arg("__worker_gate")
+        .arg(&plan_path)
         .current_dir(&plan.worktree)
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    for (name, value) in [
-        ("XDG_CONFIG_HOME", &plan.session_environment.xdg_config_home),
-        ("XDG_DATA_HOME", &plan.session_environment.xdg_data_home),
-        ("XDG_STATE_HOME", &plan.session_environment.xdg_state_home),
-        (
-            "LLXPRT_CONFIG_HOME",
-            &plan.session_environment.llxprt_config_home,
-        ),
-    ] {
-        if let Some(value) = value {
-            command.env(name, value);
-        } else {
-            command.env_remove(name);
-        }
-    }
-    // Unix-only: a dedicated process group is required for independent reconciliation.
-    use std::os::unix::process::CommandExt;
+    configure_session(&mut command, &plan.session_environment);
     command.process_group(0);
     let mut child = command.spawn()?;
+    let mut shim_gate = child.stdin.take().expect("piped shim gate");
+    let registered = (|| -> Result<ChildIdentity, SupervisorError> {
+        let (boot_identity, start_identity) = identity(child.id())?;
+        let pid = i32::try_from(child.id()).map_err(|_| SupervisorError::IdentityUnavailable)?;
+        if unsafe { libc::getpgid(pid) } != pid {
+            return Err(SupervisorError::IdentityUnavailable);
+        }
+        let identity = ChildIdentity {
+            pid: child.id(),
+            boot_identity,
+            start_identity,
+            group_id: child.id(),
+        };
+        write_private_json_atomic(
+            &store_root.join(format!("{}.child.json", plan.attempt_id)),
+            &identity,
+        )?;
+        if control.is_some() {
+            println!("READY");
+            let mut poll = libc::pollfd {
+                fd: 0,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            if unsafe { libc::poll(&mut poll, 1, 5000) } <= 0 {
+                return Err(SupervisorError::GateClosed);
+            }
+        }
+        let mut release = [0];
+        if gate.read(&mut release)? != 1 || release != *b"R" {
+            return Err(SupervisorError::GateClosed);
+        }
+        if control.is_some() {
+            let connection = Connection::open_with_flags(
+                store_root
+                    .parent()
+                    .ok_or(SupervisorError::Conflict)?
+                    .join("state.sqlite3"),
+                OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )?;
+            let registered: i64 = connection.query_row(
+                "SELECT COUNT(*) FROM evidence WHERE task_id=?1 AND attempt_id=?2 AND kind='child_registered' AND payload=?3",
+                params![plan.task_id, plan.attempt_id, serde_json::to_string(&identity)?],
+                |row| row.get(0),
+            )?;
+            let released: i64 = connection.query_row(
+                "SELECT COUNT(*) FROM intents WHERE task_id=?1 AND attempt_id=?2 AND kind='gate_release'",
+                params![plan.task_id, plan.attempt_id], |row| row.get(0),
+            )?;
+            if registered != 1 || released != 1 {
+                return Err(SupervisorError::Conflict);
+            }
+        }
+        shim_gate.write_all(b"R")?;
+        Ok(identity)
+    })();
+    let registered = match registered {
+        Ok(identity) => identity,
+        Err(error) => {
+            drop(shim_gate);
+            child.wait()?;
+            return Err(error);
+        }
+    };
     let pid = child.id();
-    let (boot_identity, child_start_identity) = identity(pid)?;
+    let boot_identity = registered.boot_identity;
+    let child_start_identity = registered.start_identity;
     let stdout = child.stdout.take().expect("piped stdout");
     let stderr = child.stderr.take().expect("piped stderr");
     let out_thread = thread::spawn(move || -> Result<u64, std::io::Error> {
@@ -709,6 +805,15 @@ fn run_gated_child_control<R: Read>(
     write_receipt(store_root, &plan.attempt_id, &receipt)?;
     Ok(status)
 }
+#[cfg(unix)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct ChildIdentity {
+    pid: u32,
+    boot_identity: String,
+    start_identity: String,
+    group_id: u32,
+}
+
 #[cfg(unix)]
 #[derive(Debug, Deserialize, PartialEq, Eq)]
 struct ProcessIdentity {
@@ -823,6 +928,27 @@ pub fn reconcile_attempt(
     if claim.trim().is_empty() || claim != selection.effective_config.assignment_login {
         return Ok(held("claim identity mismatch"));
     }
+    let Some(child_file) = private_bytes(&attempts.join(format!("{attempt_id}.child.json")))
+        .and_then(|bytes| serde_json::from_slice::<ChildIdentity>(&bytes).ok())
+    else {
+        return Ok(held("missing or invalid child identity"));
+    };
+    let Some(child_evidence) =
+        store.evidence_payload(task_id, Some(attempt_id), "child_registered")?
+    else {
+        return Ok(held("missing child registration"));
+    };
+    if serde_json::from_str::<ChildIdentity>(&child_evidence)
+        .ok()
+        .as_ref()
+        != Some(&child_file)
+        || child_file.pid == 0
+        || child_file.group_id != child_file.pid
+        || child_file.boot_identity.is_empty()
+        || child_file.start_identity.is_empty()
+    {
+        return Ok(held("child registration mismatch"));
+    }
     let receipt: ExitReceipt =
         match private_bytes(&attempts.join(format!("{attempt_id}.receipt.json")))
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
@@ -833,6 +959,9 @@ pub fn reconcile_attempt(
     let stdout = attempts.join(format!("{attempt_id}.stdout.log"));
     let stderr = attempts.join(format!("{attempt_id}.stderr.log"));
     if receipt.attempt_id != attempt_id
+        || receipt.child_pid != child_file.pid
+        || receipt.boot_identity != child_file.boot_identity
+        || receipt.child_start_identity != child_file.start_identity
         || receipt.child_pid == 0
         || i32::try_from(receipt.child_pid).is_err()
         || receipt.boot_identity.trim().is_empty()
@@ -973,6 +1102,18 @@ fn write_private_json<T: Serialize>(path: &Path, value: &T) -> Result<(), Superv
     Ok(())
 }
 
+#[cfg(unix)]
+fn write_private_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(), SupervisorError> {
+    let temp = path.with_extension("child.tmp");
+    let mut file = private_file(&temp)?;
+    serde_json::to_writer(&mut file, value)?;
+    file.write_all(b"\n")?;
+    file.sync_all()?;
+    fs::rename(&temp, path)?;
+    File::open(path.parent().ok_or(SupervisorError::Conflict)?)?.sync_all()?;
+    Ok(())
+}
+
 /// The child opens SQLite read-only, without taking the coordinator's process lock.
 /// It verifies the exact launch plan, reservation and verified claim/worktree before READY.
 pub fn supervise(root: &Path, attempt: &str) -> Result<(), SupervisorError> {
@@ -1027,30 +1168,16 @@ pub fn supervise(root: &Path, attempt: &str) -> Result<(), SupervisorError> {
             listener.set_nonblocking(true)?;
             listener
         };
-        let mut stdout = std::io::stdout().lock();
-        stdout.write_all(b"READY\n")?;
-        stdout.flush()?;
-        drop(stdout);
-        let mut gate = [0u8; 1];
-        if std::io::stdin().read(&mut gate)? != 1 || gate[0] != b'R' {
-            return Err(SupervisorError::GateClosed);
-        }
-        let release: i64 = connection.query_row(
-            "SELECT COUNT(*) FROM intents WHERE attempt_id=?1 AND task_id=?2 AND kind='gate_release'",
-            params![attempt, plan.task_id], |row| row.get(0)
-        )?;
-        if release != 1 {
-            return Err(SupervisorError::Conflict);
-        }
         #[cfg(unix)]
         run_gated_child_control(
             &plan,
-            std::io::Cursor::new(gate),
+            std::io::stdin(),
             &attempts,
             Some(&listener),
+            &env::current_exe()?,
         )?;
         #[cfg(not(unix))]
-        run_gated_child(&plan, std::io::Cursor::new(gate), &attempts)?;
+        run_gated_child(&plan, std::io::stdin(), &attempts)?;
         Ok(())
     })();
     if let Err(error) = &result {
@@ -1116,6 +1243,29 @@ pub fn execute_with_binary(
     }
     let (boot, start) = identity(child.id())?;
     let process = serde_json::json!({"pid":child.id(),"boot_identity":boot,"start_identity":start});
+    let registered: ChildIdentity =
+        private_bytes(&attempts.join(format!("{}.child.json", plan.attempt_id)))
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .ok_or(SupervisorError::IdentityUnavailable)?;
+    let child_pid =
+        i32::try_from(registered.pid).map_err(|_| SupervisorError::IdentityUnavailable)?;
+    if registered.pid == child.id()
+        || registered.pid != registered.group_id
+        || unsafe { libc::getpgid(child_pid) } != child_pid
+        || identity(registered.pid).ok().as_ref()
+            != Some(&(
+                registered.boot_identity.clone(),
+                registered.start_identity.clone(),
+            ))
+    {
+        return Err(SupervisorError::IdentityUnavailable);
+    }
+    store.record_evidence(
+        &plan.task_id,
+        Some(&plan.attempt_id),
+        "child_registered",
+        &serde_json::to_string(&registered)?,
+    )?;
     store.record_evidence(
         &plan.task_id,
         Some(&plan.attempt_id),
