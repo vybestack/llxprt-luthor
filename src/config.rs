@@ -374,10 +374,7 @@ fn validate_command(command: &CommandTemplate) -> Result<(), ConfigError> {
                     | "attempt.id"
                     | "worktree"
             ) {
-                return Err(ConfigError::Invalid(format!(
-                    "unsupported template variable {{{}}}",
-                    &tail[..end]
-                )));
+                return Err(ConfigError::Invalid("unsupported template variable".into()));
             }
             rest = &tail[end + 1..];
         }

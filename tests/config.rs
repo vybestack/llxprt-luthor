@@ -47,13 +47,11 @@ fn rejects_unknown_template_and_shell_expansion() {
             .to_string()
             .contains("shell")
     );
-    let json = valid().replace("{task.issue_number}", "{task.secret}");
-    assert!(
-        Config::from_json(&json)
-            .unwrap_err()
-            .to_string()
-            .contains("unsupported")
-    );
+    let sentinel = "PRIVATE_SENTINEL_SECRET_BYTES";
+    let json = valid().replace("{task.issue_number}", &format!("{{{sentinel}}}"));
+    let error = Config::from_json(&json).unwrap_err().to_string();
+    assert!(error.contains("unsupported"));
+    assert!(!error.contains(sentinel));
 }
 
 #[test]
