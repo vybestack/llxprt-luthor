@@ -1,4 +1,4 @@
-use luthor::config::Config;
+use luthor::config::{CommandTemplate, Config, TaskValues};
 
 fn valid() -> &'static str {
     r#"{"state_root":"/private/state","worktree_root":"/private/worktrees","capacity":2,"sources":[{"project_id":"PVT_1","repositories":["org/tracker"],"ready_marker":{"kind":"label","name":"luthor-ready"},"milestone":"0.12.0"}],"mappings":[{"tracker_repository":"org/tracker","code_repository":"org/code","checkout":"/src/code","base_branch":"main"}],"initial":{"executable":"/bin/agent","args":["--issue","{task.issue_number}"]},"resume":{"executable":"/bin/agent","args":["--issue","{task.issue_number}","--attempt","{attempt.id}"]}}"#
@@ -81,6 +81,55 @@ fn rejects_secret_flags_bad_braces_and_accepts_benign_prompt() {
     assert!(
         Config::from_json(&valid().replace("{task.issue_number}", "Please fix this issue")).is_ok()
     );
+}
+
+fn task_values() -> TaskValues {
+    TaskValues {
+        task_issue_number: "42".into(),
+        task_repository: "org/repo".into(),
+        task_issue_url: "https://example.test/issues/42".into(),
+        task_id: "task-1".into(),
+        attempt_id: "attempt-2".into(),
+        worktree: "/tmp/worktree".into(),
+    }
+}
+
+#[test]
+fn renders_multiple_placeholders_as_literal_argv() {
+    let template = CommandTemplate {
+        executable: "/bin/agent".into(),
+        args: vec!["{task.repository}#{task.issue_number}:{task.repository}".into()],
+    };
+    let rendered = template.render(&task_values()).unwrap();
+    assert_eq!(rendered.executable, std::path::PathBuf::from("/bin/agent"));
+    assert_eq!(rendered.args, ["org/repo#42:org/repo"]);
+}
+
+#[test]
+fn substituted_braces_are_literal() {
+    let template = CommandTemplate {
+        executable: "/bin/agent".into(),
+        args: vec!["{task.issue_url}".into()],
+    };
+    let mut values = task_values();
+    values.task_issue_url = "https://example.test/{literal}".into();
+    assert_eq!(
+        template.render(&values).unwrap().args,
+        ["https://example.test/{literal}"]
+    );
+}
+
+#[test]
+fn missing_template_value_fails_without_exposing_values() {
+    let template = CommandTemplate {
+        executable: "/bin/agent".into(),
+        args: vec!["{attempt.id}".into()],
+    };
+    let mut values = task_values();
+    values.attempt_id.clear();
+    let error = template.render(&values).unwrap_err().to_string();
+    assert!(error.contains("missing template value"));
+    assert!(!error.contains("42"));
 }
 
 #[test]

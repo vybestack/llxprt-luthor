@@ -54,6 +54,73 @@ pub struct CommandTemplate {
     pub args: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskValues {
+    pub task_issue_number: String,
+    pub task_repository: String,
+    pub task_issue_url: String,
+    pub task_id: String,
+    pub attempt_id: String,
+    pub worktree: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenderedCommand {
+    pub executable: PathBuf,
+    pub args: Vec<String>,
+}
+
+impl CommandTemplate {
+    pub fn render(&self, values: &TaskValues) -> Result<RenderedCommand, ConfigError> {
+        let args = self
+            .args
+            .iter()
+            .map(|arg| render_argument(arg, values))
+            .collect::<Result<_, _>>()?;
+        Ok(RenderedCommand {
+            executable: self.executable.clone(),
+            args,
+        })
+    }
+}
+
+fn render_argument(argument: &str, values: &TaskValues) -> Result<String, ConfigError> {
+    let mut rendered = String::with_capacity(argument.len());
+    let mut rest = argument;
+    while let Some(start) = rest.find(['{', '}']) {
+        rendered.push_str(&rest[..start]);
+        if rest.as_bytes()[start] == b'}' {
+            return Err(ConfigError::Invalid("unmatched template delimiter".into()));
+        }
+        let tail = &rest[start + 1..];
+        let Some(end) = tail.find(['{', '}']) else {
+            return Err(ConfigError::Invalid("unclosed template variable".into()));
+        };
+        if tail.as_bytes()[end] != b'}' {
+            return Err(ConfigError::Invalid("nested template delimiter".into()));
+        }
+        let name = &tail[..end];
+        let value = match name {
+            "task.issue_number" => Some(&values.task_issue_number),
+            "task.repository" => Some(&values.task_repository),
+            "task.issue_url" => Some(&values.task_issue_url),
+            "task.id" => Some(&values.task_id),
+            "attempt.id" => Some(&values.attempt_id),
+            "worktree" => Some(&values.worktree),
+            _ => return Err(ConfigError::Invalid("unsupported template variable".into())),
+        }
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| ConfigError::Invalid("missing template value".into()))?;
+        rendered.push_str(value);
+        rest = &tail[end + 1..];
+    }
+    if rest.contains('}') {
+        return Err(ConfigError::Invalid("unmatched template delimiter".into()));
+    }
+    rendered.push_str(rest);
+    Ok(rendered)
+}
+
 impl Config {
     pub fn from_json(json: &str) -> Result<Self, ConfigError> {
         let config: Self = serde_json::from_str(json)?;
