@@ -462,6 +462,7 @@ fn status(conn: &Connection, root: &Path) -> Result<Value, CliError> {
         .query_map([], |r| {
             let active_attempt = r.get::<_, Option<String>>(6)?;
             let output = active_attempt.as_deref().and_then(|id| output_time(root, id));
+            let (observed_bytes, observed_unavailable) = active_attempt.as_deref().map(|id| observed_log_bytes(root, id)).unwrap_or((None, Some("no reserved attempt")));
             let current = now();
             let start = r.get::<_, Option<i64>>(11)?
                 .and_then(|epoch| u64::try_from(epoch).ok())
@@ -483,6 +484,10 @@ fn status(conn: &Connection, root: &Path) -> Result<Value, CliError> {
                 "last_output_age_seconds":age,
                 "output_age_unavailable_reason":unavailable_reason,
                 "output_log_status":output_log_status,
+                "observed_stdout_bytes":observed_bytes.map(|bytes| bytes[0]),
+                "observed_stderr_bytes":observed_bytes.map(|bytes| bytes[1]),
+                "observed_bytes_unavailable_reason":observed_unavailable,
+                "observed_at_utc":observed_bytes.and_then(|_| utc_now()),
                 "output_silence_warning":age.is_some_and(|seconds| seconds >= SILENCE_WARNING_THRESHOLD_SECONDS),
                 "silence_warning_threshold_seconds":SILENCE_WARNING_THRESHOLD_SECONDS,
                 "latest_attempt_id":r.get::<_,Option<String>>(7)?,
@@ -681,6 +686,10 @@ fn show(conn: &Connection, root: &Path, task: &str) -> Result<Value, CliError> {
         .iter()
         .rev()
         .find(|a| a["reservation"] == "reserved");
+    let (observed_bytes, observed_unavailable) = active_attempt
+        .and_then(|a| a["id"].as_str())
+        .map(|id| observed_log_bytes(root, id))
+        .unwrap_or((None, Some("no reserved attempt")));
     let (last_output_age_seconds, output_age_unavailable_reason) = match active_attempt {
         None => (None, Some("no reserved attempt")),
         Some(attempt) => {
@@ -745,6 +754,11 @@ fn show(conn: &Connection, root: &Path, task: &str) -> Result<Value, CliError> {
         "worktree":worktree.and_then(|v|serde_json::from_str::<Value>(&v).ok()),
         "last_output_age_seconds":last_output_age_seconds,
         "output_age_unavailable_reason":output_age_unavailable_reason,
+        "observed_stdout_bytes":observed_bytes.map(|bytes| bytes[0]),
+        "observed_stderr_bytes":observed_bytes.map(|bytes| bytes[1]),
+        "observed_bytes_unavailable_reason":observed_unavailable,
+        "observed_at_utc":observed_bytes.and_then(|_| utc_now()),
+        "byte_counts_are_observational":true,
         "output_log_status":if last_output_age_seconds.is_some(){"available"}else{"unavailable"},
         "output_silence_warning":output_silence_warning,
         "silence_warning_threshold_seconds":SILENCE_WARNING_THRESHOLD_SECONDS,
@@ -865,6 +879,34 @@ fn log_paths(
         return Err(CliError::UnsafeLog);
     }
     Ok(paths)
+}
+
+fn observed_log_bytes(root: &Path, attempt: &str) -> (Option<[u64; 2]>, Option<&'static str>) {
+    if !valid_attempt(attempt) {
+        return (None, Some("invalid attempt id"));
+    }
+    let result = (|| {
+        let dir = attempts_dir(root)?;
+        let paths = log_paths(&dir, attempt, None)?;
+        let (_, stdout) = private_file(&paths[0])?;
+        let (_, stderr) = private_file(&paths[1])?;
+        Ok::<_, CliError>([stdout.len(), stderr.len()])
+    })();
+    match result {
+        Ok(bytes) => (Some(bytes), None),
+        Err(_) => (None, Some("active attempt log files are missing or unsafe")),
+    }
+}
+
+fn utc_now() -> Option<String> {
+    let seconds = i64::try_from(now()).ok()?;
+    let conn = Connection::open_in_memory().ok()?;
+    conn.query_row(
+        "SELECT strftime('%Y-%m-%dT%H:%M:%SZ', ?1, 'unixepoch')",
+        [seconds],
+        |r| r.get(0),
+    )
+    .ok()
 }
 
 fn output_time(root: &Path, attempt: &str) -> Option<u64> {
