@@ -138,6 +138,70 @@ impl From<&Config> for EffectiveConfigSnapshot {
     }
 }
 
+fn resume_context(
+    connection: &Connection,
+    task_id: &str,
+) -> Result<(String, String, String), StateError> {
+    let latest: Option<(String, String, String)> = connection.query_row(
+        "SELECT a.id, i.detail, e.payload FROM attempts a
+         JOIN tasks t ON t.id=a.task_id
+         JOIN reservations r ON r.attempt_id=a.id AND r.task_id=a.task_id
+         JOIN intents i ON i.attempt_id=a.id AND i.task_id=a.task_id AND i.kind='launch'
+         JOIN evidence e ON e.attempt_id=a.id AND e.task_id=a.task_id AND e.kind='attempt_exit'
+         WHERE a.task_id=?1 AND t.state='paused' AND a.lifecycle='completed'
+           AND a.outcome IS NOT NULL AND r.status='released'
+           AND (SELECT COUNT(*) FROM evidence WHERE attempt_id=a.id AND kind='attempt_exit')=1
+           AND (SELECT COUNT(*) FROM intents WHERE attempt_id=a.id AND kind='launch')=1
+           AND (SELECT COUNT(*) FROM intents WHERE task_id=?1 AND attempt_id=a.id AND kind='stop')=1
+           AND (SELECT COUNT(*) FROM reservations WHERE task_id=?1 AND status='reserved')=0
+           AND (SELECT COUNT(*) FROM attempts WHERE task_id=?1 AND (lifecycle!='completed' OR outcome IS NULL))=0
+           AND (SELECT COUNT(*) FROM evidence WHERE task_id=?1 AND kind='claim_verified')=1
+           AND (SELECT COUNT(*) FROM evidence WHERE task_id=?1 AND kind='worktree_created')=1
+         ORDER BY a.rowid DESC LIMIT 1",
+        [task_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+    ).optional()?;
+    let (latest_id, latest_plan, exit) = latest.ok_or(StateError::LaunchBlocked)?;
+    let actual_latest: Option<String> = connection
+        .query_row(
+            "SELECT id FROM attempts WHERE task_id=?1 ORDER BY rowid DESC LIMIT 1",
+            [task_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if actual_latest.as_deref() != Some(&latest_id) {
+        return Err(StateError::LaunchBlocked);
+    }
+    let initial: Vec<String> = connection
+        .prepare(
+            "SELECT i.detail FROM attempts a JOIN intents i ON i.attempt_id=a.id
+         WHERE a.task_id=?1 AND i.task_id=?1 AND i.kind='launch'
+         ORDER BY a.rowid LIMIT 1",
+        )?
+        .query_map([task_id], |row| row.get(0))?
+        .collect::<Result<_, _>>()?;
+    let first_plan = initial
+        .into_iter()
+        .next()
+        .ok_or(StateError::LaunchBlocked)?;
+    let receipt: crate::supervisor::ExitReceipt = serde_json::from_str(&exit)?;
+    let outcome: String = connection.query_row(
+        "SELECT outcome FROM attempts WHERE id=?1",
+        [&latest_id],
+        |row| row.get(0),
+    )?;
+    if receipt.attempt_id != latest_id
+        || receipt.stop_signals.is_empty()
+        || outcome
+            != format!(
+                "exit_code={:?};signal={:?}",
+                receipt.exit_code, receipt.signal
+            )
+    {
+        return Err(StateError::LaunchBlocked);
+    }
+    Ok((first_plan, latest_plan, exit))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct SelectionEvidence {
     pub candidate: Candidate,
@@ -621,6 +685,15 @@ impl StateStore {
         Ok(())
     }
 
+    /// Returns the first and latest launch plans and the verified latest exit only
+    /// when a paused task has no outstanding worker or reservation.
+    pub(crate) fn resume_context(
+        &self,
+        task_id: &str,
+    ) -> Result<(String, String, String), StateError> {
+        resume_context(&self.connection, task_id)
+    }
+
     /// Persists a plan without granting permission to start a process.
     pub fn hold_launch_intent(
         &mut self,
@@ -657,7 +730,19 @@ impl StateStore {
             [task_id],
             |row| row.get(0),
         )?;
-        if phase.as_deref() != Some("claimed") || claims != 1 || worktrees != 1 || attempts != 0 {
+        match phase.as_deref() {
+            Some("claimed") if attempts == 0 && claims == 1 && worktrees == 1 => {}
+            Some("paused") if claims == 1 && worktrees == 1 => {
+                resume_context(&tx, task_id)?;
+            }
+            _ => return Err(StateError::LaunchBlocked),
+        }
+        let prior_intents: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM intents WHERE attempt_id=?1",
+            [attempt_id],
+            |row| row.get(0),
+        )?;
+        if prior_intents != 0 {
             return Err(StateError::LaunchBlocked);
         }
         let capacity: usize = tx.query_row(

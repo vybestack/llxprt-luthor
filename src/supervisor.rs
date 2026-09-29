@@ -156,6 +156,79 @@ pub fn prepare_initial(
     Ok(plan)
 }
 
+/// Renders a continuation for a verified paused task without starting a worker.
+/// The new attempt must preserve the original session and verified worktree.
+pub fn prepare_resume(
+    store: &mut StateStore,
+    task_id: &str,
+    attempt_id: &str,
+) -> Result<LaunchPlan, SupervisorError> {
+    let (first, latest, _) = store.resume_context(task_id)?;
+    let first: LaunchPlan = serde_json::from_str(&first)?;
+    let latest: LaunchPlan = serde_json::from_str(&latest)?;
+    let selection = store
+        .selection_evidence(task_id)?
+        .ok_or(SupervisorError::Conflict)?;
+    let record = store
+        .worktree_record(task_id)?
+        .ok_or(SupervisorError::Conflict)?;
+    let identity = record.identity.ok_or(SupervisorError::Conflict)?;
+    if first.task_id != task_id
+        || latest.task_id != task_id
+        || first.session_id != task_id
+        || latest.session_id != task_id
+        || first.worktree != identity.path
+        || latest.worktree != identity.path
+        || first.config_revision != selection.config_revision
+        || latest.config_revision != selection.config_revision
+        || identity.path != record.intent.path
+        || identity.repository != selection.candidate.mapping.code_repository
+        || identity.path != fs::canonicalize(&identity.path)?
+    {
+        return Err(SupervisorError::Conflict);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = fs::metadata(&identity.path)?;
+        if metadata.dev() != identity.device || metadata.ino() != identity.inode {
+            return Err(SupervisorError::Conflict);
+        }
+    }
+    let worktree = identity.path;
+    let cwd = worktree.to_str().ok_or(SupervisorError::Conflict)?;
+    let values = TaskValues {
+        task_issue_number: selection.candidate.issue_number.to_string(),
+        task_repository: selection.candidate.repository.clone(),
+        task_issue_url: selection.candidate.issue_url.clone(),
+        task_id: task_id.to_owned(),
+        attempt_id: attempt_id.to_owned(),
+        worktree: cwd.to_owned(),
+    };
+    let RenderedCommand { executable, args } = selection.effective_config.resume.render(&values)?;
+    let continuation = prompt(&args).ok_or(SupervisorError::Conflict)?;
+    if selection.effective_config.resume.args == selection.effective_config.initial.args
+        || !requires_pair(&args, "--session", task_id)
+        || !requires_pair(&args, "--cwd", cwd)
+        || continuation.trim().is_empty()
+        || prompt(&first.args) == Some(continuation)
+        || prompt(&latest.args) == Some(continuation)
+    {
+        return Err(SupervisorError::Conflict);
+    }
+    let plan = LaunchPlan {
+        task_id: task_id.to_owned(),
+        attempt_id: attempt_id.to_owned(),
+        session_id: task_id.to_owned(),
+        worktree,
+        executable,
+        args,
+        config_revision: selection.config_revision,
+    };
+    store.hold_launch_intent(task_id, attempt_id, &serde_json::to_string(&plan)?)?;
+    Ok(plan)
+}
+
 fn private_file(path: &Path) -> Result<File, SupervisorError> {
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);

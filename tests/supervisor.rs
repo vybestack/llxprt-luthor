@@ -3,8 +3,8 @@ use luthor::{
     eligibility::Candidate,
     state::{StateError, StateStore, WorktreeIdentity, WorktreeIntent},
     supervisor::{
-        Reconciliation, SupervisorError, execute_with_binary, prepare_initial, reconcile_attempt,
-        request_stop, run_gated_child,
+        Reconciliation, SupervisorError, execute_with_binary, prepare_initial, prepare_resume,
+        reconcile_attempt, request_stop, run_gated_child,
     },
 };
 use std::{fs, io::Cursor, path::Path};
@@ -53,7 +53,17 @@ fn configured(root: &Path) -> (Config, Candidate) {
         sources: vec![source.clone()],
         mappings: vec![mapping.clone()],
         initial: initial.clone(),
-        resume: initial,
+        resume: CommandTemplate {
+            executable: initial.executable.clone(),
+            args: vec![
+                "--session".into(),
+                "{task.id}".into(),
+                "--cwd".into(),
+                "{worktree}".into(),
+                "--prompt".into(),
+                "Continue {task.issue_url} for {attempt.id}".into(),
+            ],
+        },
     };
     let candidate = Candidate {
         project_id: "project".into(),
@@ -765,4 +775,139 @@ fn absent_supervisor_and_wrong_identity_never_signal_unrelated_process() {
     ));
     unrelated.kill().unwrap();
     unrelated.wait().unwrap();
+}
+
+#[cfg(unix)]
+fn paused_fixture() -> (
+    tempfile::TempDir,
+    Config,
+    StateStore,
+    luthor::supervisor::LaunchPlan,
+) {
+    let (dir, config, mut store) = dispatched_fixture(0);
+    let initial =
+        serde_json::from_str(&store.launch_intent("attempt-real").unwrap().unwrap()).unwrap();
+    store.record_stop_intent("task", "attempt-real").unwrap();
+    edit_receipt(&config, |receipt| {
+        receipt.stop_signals = vec![libc::SIGTERM]
+    });
+    assert!(matches!(
+        reconcile_attempt(&mut store, "task", "attempt-real").unwrap(),
+        Reconciliation::Completed { .. }
+    ));
+    assert_eq!(store.task_phase("task").unwrap().as_deref(), Some("paused"));
+    (dir, config, store, initial)
+}
+
+#[cfg(unix)]
+#[test]
+fn paused_attempt_prepares_distinct_continuation_after_reopen() {
+    let (_dir, config, store, initial) = paused_fixture();
+    drop(store);
+    let mut store = StateStore::open(&config.state_root, config.capacity).unwrap();
+    let plan = prepare_resume(&mut store, "task", "attempt-next").unwrap();
+    assert_eq!(plan.task_id, initial.task_id);
+    assert_eq!(plan.session_id, initial.session_id);
+    assert_eq!(plan.worktree, initial.worktree);
+    assert_eq!(plan.config_revision, initial.config_revision);
+    assert_eq!(plan.attempt_id, "attempt-next");
+    assert!(plan.args.windows(2).any(|p| p
+        == [
+            "--prompt",
+            "Continue https://github.com/org/tracker/issues/7 for attempt-next"
+        ]));
+    assert_eq!(
+        store.latest_attempt("task").unwrap().as_deref(),
+        Some("attempt-next")
+    );
+    assert_eq!(store.reservation_count().unwrap(), 1);
+    assert_eq!(store.task_phase("task").unwrap().as_deref(), Some("held"));
+    assert_eq!(
+        serde_json::from_str::<luthor::supervisor::LaunchPlan>(
+            &store.launch_intent("attempt-real").unwrap().unwrap()
+        )
+        .unwrap(),
+        initial
+    );
+    assert_eq!(
+        serde_json::from_str::<luthor::supervisor::LaunchPlan>(
+            &store.launch_intent("attempt-next").unwrap().unwrap()
+        )
+        .unwrap(),
+        plan
+    );
+    drop(store);
+    let store = StateStore::open(&config.state_root, config.capacity).unwrap();
+    assert_eq!(store.reservation_count().unwrap(), 1);
+    assert_eq!(
+        store.launch_intent("attempt-next").unwrap().unwrap(),
+        serde_json::to_string(&plan).unwrap()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn resume_requires_paused_verified_exit_and_unused_attempt_id() {
+    let (_dir, config, mut store, _) = paused_fixture();
+    assert!(prepare_resume(&mut store, "task", "attempt-real").is_err());
+    assert_eq!(store.reservation_count().unwrap(), 0);
+    store.set_task_phase("task", "held").unwrap();
+    assert!(prepare_resume(&mut store, "task", "fresh").is_err());
+    assert_eq!(store.reservation_count().unwrap(), 0);
+    store.set_task_phase("task", "paused").unwrap();
+    let db = rusqlite::Connection::open(config.state_root.join("state.sqlite3")).unwrap();
+    db.execute(
+        "DELETE FROM evidence WHERE kind='attempt_exit' AND task_id='task'",
+        [],
+    )
+    .unwrap();
+    assert!(prepare_resume(&mut store, "task", "fresh").is_err());
+    assert_eq!(store.reservation_count().unwrap(), 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn resume_rejects_same_prompt_and_tampered_session_or_inode_before_reservation() {
+    for alteration in ["same-prompt", "session", "inode"] {
+        let (_dir, config, mut store, initial) = paused_fixture();
+        let db = rusqlite::Connection::open(config.state_root.join("state.sqlite3")).unwrap();
+        match alteration {
+            "same-prompt" => {
+                let mut selection = store.selection_evidence("task").unwrap().unwrap();
+                selection.effective_config.resume.args =
+                    selection.effective_config.initial.args.clone();
+                db.execute(
+                    "UPDATE evidence SET payload=?1 WHERE task_id='task' AND kind='selection'",
+                    [serde_json::to_string(&selection).unwrap()],
+                )
+                .unwrap();
+            }
+            "session" => {
+                let mut prior = initial;
+                prior.session_id = "other-task".into();
+                db.execute(
+                    "UPDATE intents SET detail=?1 WHERE task_id='task' AND kind='launch'",
+                    [serde_json::to_string(&prior).unwrap()],
+                )
+                .unwrap();
+            }
+            "inode" => {
+                let mut identity = store
+                    .worktree_record("task")
+                    .unwrap()
+                    .unwrap()
+                    .identity
+                    .unwrap();
+                identity.inode += 1;
+                db.execute("UPDATE evidence SET payload=?1 WHERE task_id='task' AND kind='worktree_created'", [serde_json::to_string(&identity).unwrap()]).unwrap();
+            }
+            _ => unreachable!(),
+        }
+        assert!(
+            prepare_resume(&mut store, "task", "fresh").is_err(),
+            "{alteration}"
+        );
+        assert_eq!(store.reservation_count().unwrap(), 0, "{alteration}");
+        assert!(store.launch_intent("fresh").unwrap().is_none());
+    }
 }
