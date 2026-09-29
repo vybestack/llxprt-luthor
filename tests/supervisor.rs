@@ -2,7 +2,10 @@ use luthor::{
     config::{CommandTemplate, Config, Mapping, Marker, Source},
     eligibility::Candidate,
     state::{StateError, StateStore, WorktreeIdentity, WorktreeIntent},
-    supervisor::{SupervisorError, execute_with_binary, prepare_initial, run_gated_child},
+    supervisor::{
+        Reconciliation, SupervisorError, execute_with_binary, prepare_initial, reconcile_attempt,
+        request_stop, run_gated_child,
+    },
 };
 use std::{fs, io::Cursor, path::Path};
 #[cfg(unix)]
@@ -80,7 +83,7 @@ fn claimed(store: &mut StateStore, config: &Config, candidate: &Candidate, root:
         .record_claim_intent("task", "operator", "org/tracker", 7)
         .unwrap();
     store
-        .record_evidence("task", None, "claim_verified", "sole assignee")
+        .record_evidence("task", None, "claim_verified", "operator")
         .unwrap();
     store.set_task_phase("task", "claimed").unwrap();
     let path = root.join("worktrees");
@@ -333,12 +336,278 @@ fn detached_same_binary_dispatch_records_gate_and_worker_receipt() {
     assert_eq!(fs::read(receipt.stdout_path).unwrap(), b"worker stdout\n");
     assert_eq!(fs::read(receipt.stderr_path).unwrap(), b"worker stderr\n");
     assert_eq!(store.reservation_count().unwrap(), 1);
+    let reconciled = reconcile_attempt(&mut store, "task", "attempt-real").unwrap();
+    assert_eq!(
+        reconciled,
+        Reconciliation::Completed {
+            exit_code: Some(0),
+            signal: None
+        }
+    );
+    assert_eq!(store.reservation_count().unwrap(), 0);
+    drop(store);
+    let mut store = StateStore::open(&config.state_root, 1).unwrap();
+    assert_eq!(
+        reconcile_attempt(&mut store, "task", "attempt-real").unwrap(),
+        Reconciliation::Completed {
+            exit_code: Some(0),
+            signal: None
+        }
+    );
+    assert_eq!(store.reservation_count().unwrap(), 0);
     let kinds = store.evidence_kinds("task").unwrap();
     assert!(kinds.contains(&"supervisor_ready".into()));
     assert!(kinds.contains(&"gate_sent".into()));
     assert!(
         execute_with_binary(&mut store, &plan, Path::new(env!("CARGO_BIN_EXE_luthor"))).is_err()
     );
+}
+#[cfg(target_os = "macos")]
+fn test_process_identity(pid: u32) -> (String, String) {
+    let boot = Command::new("/usr/sbin/sysctl")
+        .args(["-n", "kern.boottime"])
+        .output()
+        .unwrap();
+    let start = Command::new("/bin/ps")
+        .args(["-o", "lstart=", "-p", &pid.to_string()])
+        .output()
+        .unwrap();
+    (
+        String::from_utf8(boot.stdout).unwrap().trim().into(),
+        String::from_utf8(start.stdout).unwrap().trim().into(),
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn test_process_identity(pid: u32) -> (String, String) {
+    let boot = fs::read_to_string("/proc/sys/kernel/random/boot_id").unwrap();
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+    let start = stat
+        .rsplit_once(')')
+        .unwrap()
+        .1
+        .split_whitespace()
+        .nth(19)
+        .unwrap()
+        .to_owned();
+    (boot.trim().into(), start)
+}
+
+#[cfg(unix)]
+fn dispatched_fixture(code: i32) -> (tempfile::TempDir, Config, StateStore) {
+    let dir = tempfile::tempdir().unwrap();
+    let (config, mut store, plan, _) = prepared_fake_worker(&dir);
+    if code != 0 {
+        fs::write(
+            &plan.executable,
+            format!(
+                "#!/bin/sh\nprintf 'worker stdout\\n'\nprintf 'worker stderr\\n' >&2\nexit {code}\n"
+            ),
+        )
+        .unwrap();
+    }
+    execute_with_binary(&mut store, &plan, Path::new(env!("CARGO_BIN_EXE_luthor"))).unwrap();
+    let receipt = config.state_root.join("attempts/attempt-real.receipt.json");
+    for _ in 0..200 {
+        if receipt.exists() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(receipt.exists());
+    (dir, config, store)
+}
+
+#[cfg(unix)]
+fn receipt_path(config: &Config) -> std::path::PathBuf {
+    config.state_root.join("attempts/attempt-real.receipt.json")
+}
+
+#[cfg(unix)]
+fn hold_slot(store: &mut StateStore) {
+    assert!(matches!(
+        reconcile_attempt(store, "task", "attempt-real").unwrap(),
+        Reconciliation::Held { .. }
+    ));
+    assert_eq!(store.reservation_count().unwrap(), 1);
+    assert!(
+        !store
+            .evidence_kinds("task")
+            .unwrap()
+            .contains(&"attempt_exit".into())
+    );
+}
+
+#[cfg(unix)]
+fn edit_receipt(config: &Config, change: impl FnOnce(&mut luthor::supervisor::ExitReceipt)) {
+    let path = receipt_path(config);
+    let mut receipt: luthor::supervisor::ExitReceipt =
+        serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    change(&mut receipt);
+    fs::write(path, serde_json::to_vec(&receipt).unwrap()).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn verified_exit_seven_releases_once_and_survives_restart() {
+    let (_dir, config, mut store) = dispatched_fixture(7);
+    let expected = Reconciliation::Completed {
+        exit_code: Some(7),
+        signal: None,
+    };
+    assert_eq!(
+        reconcile_attempt(&mut store, "task", "attempt-real").unwrap(),
+        expected
+    );
+    assert_eq!(store.reservation_count().unwrap(), 0);
+    drop(store);
+    let mut store = StateStore::open(&config.state_root, 1).unwrap();
+    assert_eq!(
+        reconcile_attempt(&mut store, "task", "attempt-real").unwrap(),
+        expected
+    );
+    assert_eq!(
+        store
+            .evidence_kinds("task")
+            .unwrap()
+            .iter()
+            .filter(|k| *k == "attempt_exit")
+            .count(),
+        1
+    );
+    assert_eq!(store.reservation_count().unwrap(), 0);
+    edit_receipt(&config, |r| r.exit_code = Some(0));
+    assert!(reconcile_attempt(&mut store, "task", "attempt-real").is_err());
+    assert_eq!(
+        store
+            .evidence_kinds("task")
+            .unwrap()
+            .iter()
+            .filter(|k| *k == "attempt_exit")
+            .count(),
+        1
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn absent_and_corrupt_receipt_keep_reservation() {
+    let (_dir, config, mut store) = dispatched_fixture(0);
+    let receipt = receipt_path(&config);
+    fs::remove_file(&receipt).unwrap();
+    hold_slot(&mut store);
+    fs::write(&receipt, b"{partial").unwrap();
+    hold_slot(&mut store);
+}
+
+#[cfg(unix)]
+#[test]
+fn plan_without_persisted_launch_intent_keeps_slot() {
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    let dir = tempfile::tempdir().unwrap();
+    let (config, candidate) = configured(dir.path());
+    let mut store = StateStore::open(&config.state_root, 1).unwrap();
+    store
+        .create_task("task", &candidate, "rev", &config)
+        .unwrap();
+    store.reserve("task", "attempt-real").unwrap();
+    let attempts = config.state_root.join("attempts");
+    fs::DirBuilder::new().mode(0o700).create(&attempts).unwrap();
+    let mut plan = fake_plan(dir.path(), "attempt-real", 0);
+    plan.session_id = "task".into();
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(attempts.join("attempt-real.plan.json"))
+        .unwrap();
+    serde_json::to_writer(file, &plan).unwrap();
+    assert!(
+        matches!(reconcile_attempt(&mut store, "task", "attempt-real").unwrap(),
+        Reconciliation::Held { reason } if reason == "missing launch intent")
+    );
+    assert_eq!(store.reservation_count().unwrap(), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn missing_receipt_after_dispatch_before_worker_start_keeps_reservation() {
+    let dir = tempfile::tempdir().unwrap();
+    let (config, mut store, plan, _) = prepared_fake_worker(&dir);
+    assert!(execute_with_binary(&mut store, &plan, &dir.path().join("missing-binary")).is_err());
+    assert!(!receipt_path(&config).exists());
+    hold_slot(&mut store);
+}
+
+#[cfg(unix)]
+#[test]
+fn incomplete_or_nonregular_logs_keep_reservation() {
+    let (_dir, config, mut store) = dispatched_fixture(0);
+    let stdout = config.state_root.join("attempts/attempt-real.stdout.log");
+    let original = fs::read(&stdout).unwrap();
+    fs::write(&stdout, &original[..original.len() - 1]).unwrap();
+    hold_slot(&mut store);
+    fs::remove_file(&stdout).unwrap();
+    std::os::unix::fs::symlink(receipt_path(&config), &stdout).unwrap();
+    hold_slot(&mut store);
+}
+
+#[cfg(unix)]
+#[test]
+fn contradictory_identity_and_malformed_receipts_keep_reservation() {
+    let (_dir, _config, mut store) = dispatched_fixture(0);
+    let fake = serde_json::json!({"pid":std::process::id(),"boot_identity":"fake","start_identity":"fake"});
+    store
+        .record_evidence("task", Some("attempt-real"), "gate_sent", &fake.to_string())
+        .unwrap();
+    assert!(reconcile_attempt(&mut store, "task", "attempt-real").is_err());
+    assert_eq!(store.reservation_count().unwrap(), 1);
+    let (_other_dir, config, mut other_store) = dispatched_fixture(0);
+    edit_receipt(&config, |r| r.signal = Some(9));
+    hold_slot(&mut other_store);
+}
+
+#[cfg(unix)]
+#[test]
+fn reused_child_pid_with_contradictory_start_identity_keeps_slot() {
+    let (_dir, config, mut store) = dispatched_fixture(0);
+    let (boot, _) = test_process_identity(std::process::id());
+    edit_receipt(&config, |r| {
+        r.child_pid = std::process::id();
+        r.boot_identity = boot;
+        r.child_start_identity = "not this process start".into();
+    });
+    assert!(
+        matches!(reconcile_attempt(&mut store, "task", "attempt-real").unwrap(),
+        Reconciliation::Held { reason } if reason == "child identity mismatch")
+    );
+    assert_eq!(store.reservation_count().unwrap(), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn live_child_group_is_not_released() {
+    use std::os::unix::process::CommandExt;
+    let (_dir, config, mut store) = dispatched_fixture(0);
+    let mut live = Command::new("/bin/sleep")
+        .arg("10")
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    assert_eq!(unsafe { libc::kill(-(live.id() as i32), 0) }, 0);
+    let (boot, start) = test_process_identity(live.id());
+    edit_receipt(&config, |r| {
+        r.child_pid = live.id();
+        r.boot_identity = boot;
+        r.child_start_identity = start;
+    });
+    assert!(
+        matches!(reconcile_attempt(&mut store, "task", "attempt-real").unwrap(),
+        Reconciliation::Held { reason } if reason == "child process group is alive")
+    );
+    assert_eq!(store.reservation_count().unwrap(), 1);
+    live.kill().unwrap();
+    live.wait().unwrap();
 }
 
 #[cfg(unix)]
@@ -386,4 +655,102 @@ fn same_binary_ready_without_release_does_not_launch_worker() {
     assert!(!marker.exists());
     assert!(attempts.join("attempt-real.supervisor-error.json").exists());
     assert_eq!(store.reservation_count().unwrap(), 1);
+}
+
+#[cfg(unix)]
+fn running_worker(script: &str) -> (tempfile::TempDir, Config, StateStore) {
+    let dir = tempfile::tempdir().unwrap();
+    let (config, mut store, plan, _) = prepared_fake_worker(&dir);
+    fs::write(&plan.executable, script).unwrap();
+    execute_with_binary(&mut store, &plan, Path::new(env!("CARGO_BIN_EXE_luthor"))).unwrap();
+    let started = config.state_root.join("attempts/attempt-real.stdout.log");
+    for _ in 0..200 {
+        if fs::read_to_string(&started).is_ok_and(|output| output.contains("started")) {
+            return (dir, config, store);
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    panic!("worker failed to start");
+}
+
+#[cfg(unix)]
+fn stopped_receipt(config: &Config) -> luthor::supervisor::ExitReceipt {
+    for _ in 0..200 {
+        if let Ok(bytes) = fs::read(receipt_path(config)) {
+            return serde_json::from_slice(&bytes).unwrap();
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    panic!("missing stopped worker receipt");
+}
+
+#[cfg(unix)]
+#[test]
+fn stop_term_has_durable_intent_and_keeps_slot_until_reconcile() {
+    let (_dir, config, mut store) =
+        running_worker("#!/bin/sh\necho started\ntrap 'exit 0' TERM\nwhile :; do :; done\n");
+    request_stop(&mut store, "task", "attempt-real").unwrap();
+    assert!(store.stop_intent("task", "attempt-real").unwrap().is_some());
+    let receipt = stopped_receipt(&config);
+    assert_eq!(receipt.stop_signals, vec![libc::SIGTERM]);
+    assert_eq!(store.reservation_count().unwrap(), 1);
+    assert!(matches!(
+        reconcile_attempt(&mut store, "task", "attempt-real").unwrap(),
+        Reconciliation::Completed { .. }
+    ));
+    assert_eq!(store.reservation_count().unwrap(), 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn stop_escalates_only_on_live_matching_child() {
+    let (_dir, config, mut store) =
+        running_worker("#!/bin/sh\necho started\ntrap '' TERM\nwhile :; do :; done\n");
+    request_stop(&mut store, "task", "attempt-real").unwrap();
+    let receipt = stopped_receipt(&config);
+    assert_eq!(receipt.stop_signals, vec![libc::SIGTERM, libc::SIGKILL]);
+    assert_eq!(receipt.signal, Some(libc::SIGKILL));
+    assert_eq!(store.reservation_count().unwrap(), 1);
+    assert!(matches!(
+        reconcile_attempt(&mut store, "task", "attempt-real").unwrap(),
+        Reconciliation::Completed { .. }
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn absent_supervisor_and_wrong_identity_never_signal_unrelated_process() {
+    use std::os::unix::process::CommandExt;
+    let dir = tempfile::tempdir().unwrap();
+    let (config, mut store, _plan, _) = prepared_fake_worker(&dir);
+    let mut unrelated = Command::new("/bin/sleep")
+        .arg("30")
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    assert!(request_stop(&mut store, "task", "attempt-real").is_err());
+    assert!(store.stop_intent("task", "attempt-real").unwrap().is_some());
+    assert!(unrelated.try_wait().unwrap().is_none());
+    assert_eq!(store.reservation_count().unwrap(), 1);
+    assert!(!receipt_path(&config).exists());
+    let (boot, _) = test_process_identity(unrelated.id());
+    let fake =
+        serde_json::json!({"pid":unrelated.id(),"boot_identity":boot,"start_identity":"wrong"});
+    store
+        .record_evidence(
+            "task",
+            Some("attempt-real"),
+            "supervisor_ready",
+            &fake.to_string(),
+        )
+        .unwrap();
+    assert!(request_stop(&mut store, "task", "attempt-real").is_err());
+    assert!(unrelated.try_wait().unwrap().is_none());
+    assert_eq!(store.reservation_count().unwrap(), 1);
+    assert!(matches!(
+        reconcile_attempt(&mut store, "task", "attempt-real").unwrap(),
+        Reconciliation::Held { .. }
+    ));
+    unrelated.kill().unwrap();
+    unrelated.wait().unwrap();
 }

@@ -469,6 +469,51 @@ impl StateStore {
         Ok(self.connection.last_insert_rowid())
     }
 
+    /// A reserved attempt remains reserved even if the supervisor is unreachable.
+    /// Repeated requests reuse the first durable intent rather than adding a new one.
+    pub fn record_stop_intent(
+        &mut self,
+        task_id: &str,
+        attempt_id: &str,
+    ) -> Result<(), StateError> {
+        let tx = self.connection.transaction()?;
+        let active: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM attempts a JOIN reservations r ON r.attempt_id=a.id
+             JOIN tasks t ON t.id=a.task_id
+             WHERE a.id=?1 AND a.task_id=?2 AND a.lifecycle='launch_intended'
+               AND a.outcome IS NULL AND r.task_id=?2 AND r.status='reserved' AND t.state='held'
+               AND (SELECT COUNT(*) FROM intents WHERE attempt_id=?1 AND task_id=?2 AND kind='launch')=1",
+            params![attempt_id, task_id], |row| row.get(0)
+        )?;
+        if active != 1 {
+            return Err(StateError::LaunchBlocked);
+        }
+        let prior: Vec<String> = tx
+            .prepare("SELECT detail FROM intents WHERE attempt_id=?1 AND kind='stop'")?
+            .query_map([attempt_id], |row| row.get(0))?
+            .collect::<Result<_, _>>()?;
+        let detail = serde_json::json!({"task_id":task_id,"attempt_id":attempt_id}).to_string();
+        if prior.is_empty() {
+            tx.execute(
+                "INSERT INTO intents(id,task_id,attempt_id,kind,detail)
+                 VALUES(?1,?2,?3,'stop',?4)",
+                params![format!("stop-{attempt_id}"), task_id, attempt_id, detail],
+            )?;
+        } else if prior != [detail] {
+            return Err(StateError::LaunchBlocked);
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn stop_intent(
+        &self,
+        task_id: &str,
+        attempt_id: &str,
+    ) -> Result<Option<String>, StateError> {
+        self.intent_payload(task_id, attempt_id, "stop")
+    }
+
     pub fn reserve(&mut self, task_id: &str, attempt_id: &str) -> Result<(), StateError> {
         let tx = self.connection.transaction()?;
         let capacity: usize = tx.query_row(
@@ -629,6 +674,170 @@ impl StateStore {
             [attempt_id],
         )?;
         Ok(self.connection.changes() as usize)
+    }
+
+    pub(crate) fn reconciled_exit(
+        &self,
+        task_id: &str,
+        attempt_id: &str,
+        evidence: &str,
+        outcome: &str,
+    ) -> Result<bool, StateError> {
+        let row: Option<(String, Option<String>, String)> = self
+            .connection
+            .query_row(
+                "SELECT a.lifecycle,a.outcome,r.status FROM attempts a
+             JOIN reservations r ON r.attempt_id=a.id
+             WHERE a.id=?1 AND a.task_id=?2 AND r.task_id=?2",
+                params![attempt_id, task_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        let Some((lifecycle, persisted_outcome, reservation)) = row else {
+            return Err(StateError::LaunchBlocked);
+        };
+        let exits: Vec<(String, String)> = self
+            .connection
+            .prepare(
+                "SELECT task_id,payload FROM evidence WHERE attempt_id=?1 AND kind='attempt_exit'",
+            )?
+            .query_map([attempt_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<Result<_, _>>()?;
+        if lifecycle == "launch_intended"
+            && persisted_outcome.is_none()
+            && reservation == "reserved"
+            && exits.is_empty()
+        {
+            return Ok(false);
+        }
+        if lifecycle == "completed"
+            && persisted_outcome.as_deref() == Some(outcome)
+            && reservation == "released"
+            && exits == [(task_id.to_owned(), evidence.to_owned())]
+        {
+            return Ok(true);
+        }
+        Err(StateError::LaunchBlocked)
+    }
+
+    pub(crate) fn reconcile_verified_exit(
+        &mut self,
+        task_id: &str,
+        attempt_id: &str,
+        evidence: &str,
+        outcome: &str,
+    ) -> Result<(), StateError> {
+        let tx = self.connection.transaction()?;
+        let current: Option<(String, Option<String>, String)> = tx
+            .query_row(
+                "SELECT a.lifecycle,a.outcome,r.status FROM attempts a
+             JOIN reservations r ON r.attempt_id=a.id
+             WHERE a.id=?1 AND a.task_id=?2 AND r.task_id=?2",
+                params![attempt_id, task_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        if let Some((ref lifecycle, ref persisted, ref reservation)) = current
+            && lifecycle == "completed"
+        {
+            let exits: Vec<(String, String)> = tx.prepare(
+                "SELECT task_id,payload FROM evidence WHERE attempt_id=?1 AND kind='attempt_exit'"
+            )?.query_map([attempt_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<Result<_, _>>()?;
+            if persisted.as_deref() == Some(outcome)
+                && reservation == "released"
+                && exits == [(task_id.to_owned(), evidence.to_owned())]
+            {
+                tx.commit()?;
+                return Ok(());
+            }
+            return Err(StateError::LaunchBlocked);
+        }
+        if !matches!(current, Some((ref lifecycle, None, ref reservation))
+            if lifecycle == "launch_intended" && reservation == "reserved")
+        {
+            return Err(StateError::LaunchBlocked);
+        }
+        let valid: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM attempts a JOIN reservations r ON r.attempt_id=a.id
+             JOIN tasks t ON t.id=a.task_id
+             WHERE a.id=?1 AND a.task_id=?2 AND a.lifecycle='launch_intended'
+               AND a.outcome IS NULL AND r.task_id=?2 AND r.status='reserved' AND t.state='held'
+               AND (SELECT COUNT(*) FROM intents WHERE attempt_id=?1 AND task_id=?2 AND kind='launch')=1
+               AND (SELECT COUNT(*) FROM intents WHERE attempt_id=?1 AND task_id=?2 AND kind='supervisor_dispatch')=1
+               AND (SELECT COUNT(*) FROM intents WHERE attempt_id=?1 AND task_id=?2 AND kind='gate_release')=1
+               AND (SELECT COUNT(*) FROM evidence WHERE attempt_id=?1 AND task_id=?2 AND kind='supervisor_ready')=1
+               AND (SELECT COUNT(*) FROM evidence WHERE attempt_id=?1 AND task_id=?2 AND kind='gate_sent')=1
+               AND (SELECT COUNT(*) FROM evidence WHERE task_id=?2 AND kind='claim_verified')=1
+               AND (SELECT COUNT(*) FROM evidence WHERE task_id=?2 AND kind='worktree_created')=1
+               AND (SELECT COUNT(*) FROM evidence WHERE attempt_id=?1 AND kind='attempt_exit')=0",
+            params![attempt_id, task_id], |row| row.get(0)
+        )?;
+        if valid != 1 {
+            return Err(StateError::LaunchBlocked);
+        }
+        tx.execute(
+            "INSERT INTO evidence(task_id,attempt_id,kind,payload) VALUES(?1,?2,'attempt_exit',?3)",
+            params![task_id, attempt_id, evidence],
+        )?;
+        tx.execute("UPDATE attempts SET lifecycle='completed',outcome=?3 WHERE id=?1 AND task_id=?2 AND lifecycle='launch_intended' AND outcome IS NULL", params![attempt_id, task_id, outcome])?;
+        if tx.changes() != 1 {
+            return Err(StateError::LaunchBlocked);
+        }
+        tx.execute("UPDATE reservations SET status='released' WHERE attempt_id=?1 AND task_id=?2 AND status='reserved'", params![attempt_id, task_id])?;
+        if tx.changes() != 1 {
+            return Err(StateError::LaunchBlocked);
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub(crate) fn evidence_payload(
+        &self,
+        task_id: &str,
+        attempt_id: Option<&str>,
+        kind: &str,
+    ) -> Result<Option<String>, StateError> {
+        self.unique_payload(true, task_id, attempt_id, kind)
+    }
+
+    pub(crate) fn intent_payload(
+        &self,
+        task_id: &str,
+        attempt_id: &str,
+        kind: &str,
+    ) -> Result<Option<String>, StateError> {
+        self.unique_payload(false, task_id, Some(attempt_id), kind)
+    }
+
+    fn unique_payload(
+        &self,
+        evidence: bool,
+        task_id: &str,
+        attempt_id: Option<&str>,
+        kind: &str,
+    ) -> Result<Option<String>, StateError> {
+        let sql = match (evidence, attempt_id) {
+            (true, Some(_)) => {
+                "SELECT payload FROM evidence WHERE task_id=?1 AND attempt_id=?2 AND kind=?3"
+            }
+            (true, None) => {
+                "SELECT payload FROM evidence WHERE task_id=?1 AND attempt_id IS ?2 AND kind=?3"
+            }
+            (false, _) => {
+                "SELECT detail FROM intents WHERE task_id=?1 AND attempt_id=?2 AND kind=?3"
+            }
+        };
+        let values: Vec<String> = self
+            .connection
+            .prepare(sql)?
+            .query_map(params![task_id, attempt_id, kind], |row| row.get(0))?
+            .collect::<Result<_, _>>()?;
+        match values.len() {
+            0 => Ok(None),
+            1 => Ok(values.into_iter().next()),
+            _ => Err(StateError::LaunchBlocked),
+        }
     }
 
     pub fn reservation_count(&self) -> Result<usize, StateError> {

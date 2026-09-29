@@ -12,6 +12,12 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, ExitStatus, Stdio},
     thread,
+    time::{Duration, Instant},
+};
+#[cfg(unix)]
+use std::{
+    os::unix::net::{UnixListener, UnixStream},
+    process::Child,
 };
 use thiserror::Error;
 
@@ -33,6 +39,8 @@ pub enum SupervisorError {
     ExecutionUnavailable,
     #[error("process gate closed without release")]
     GateClosed,
+    #[error("stop cannot prove ownership; reservation held")]
+    StopUnavailable,
     #[error("cannot establish process identity")]
     IdentityUnavailable,
 }
@@ -48,6 +56,17 @@ pub struct LaunchPlan {
     pub config_revision: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reconciliation {
+    Completed {
+        exit_code: Option<i32>,
+        signal: Option<i32>,
+    },
+    Held {
+        reason: String,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExitReceipt {
     pub attempt_id: String,
@@ -60,6 +79,8 @@ pub struct ExitReceipt {
     pub stdout_bytes: u64,
     pub stderr_path: PathBuf,
     pub stderr_bytes: u64,
+    #[serde(default)]
+    pub stop_signals: Vec<i32>,
 }
 
 fn requires_pair(args: &[String], flag: &str, value: &str) -> bool {
@@ -201,14 +222,189 @@ fn write_receipt(root: &Path, attempt: &str, receipt: &ExitReceipt) -> Result<()
     Ok(())
 }
 
+#[cfg(unix)]
+fn stop_socket(root: &Path, attempt: &str) -> PathBuf {
+    root.join(format!("{attempt}.stop.sock"))
+}
+
+#[cfg(unix)]
+fn peer_pid(stream: &UnixStream) -> Result<u32, SupervisorError> {
+    use std::os::fd::AsRawFd;
+    let fd = stream.as_raw_fd();
+    #[cfg(target_os = "macos")]
+    {
+        let mut pid: libc::pid_t = 0;
+        let mut len = std::mem::size_of_val(&pid) as libc::socklen_t;
+        if unsafe {
+            libc::getsockopt(
+                fd,
+                libc::SOL_LOCAL,
+                libc::LOCAL_PEERPID,
+                (&raw mut pid).cast(),
+                &raw mut len,
+            )
+        } != 0
+            || len as usize != std::mem::size_of_val(&pid)
+            || pid <= 0
+        {
+            return Err(SupervisorError::StopUnavailable);
+        }
+        Ok(pid as u32)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
+        let mut len = std::mem::size_of_val(&cred) as libc::socklen_t;
+        if unsafe {
+            libc::getsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_PEERCRED,
+                (&raw mut cred).cast(),
+                &raw mut len,
+            )
+        } != 0
+            || len as usize != std::mem::size_of_val(&cred)
+            || cred.pid <= 0
+        {
+            return Err(SupervisorError::StopUnavailable);
+        }
+        Ok(cred.pid as u32)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    Err(SupervisorError::StopUnavailable)
+}
+
+/// Persist the request before contacting the supervisor. The coordinator never signals a PID.
+#[cfg(unix)]
+pub fn request_stop(
+    store: &mut StateStore,
+    task_id: &str,
+    attempt_id: &str,
+) -> Result<(), SupervisorError> {
+    if !valid_attempt(attempt_id) {
+        return Err(SupervisorError::Conflict);
+    }
+    store.record_stop_intent(task_id, attempt_id)?;
+    let recorded = store
+        .evidence_payload(task_id, Some(attempt_id), "supervisor_ready")?
+        .as_deref()
+        .and_then(recorded_process)
+        .ok_or(SupervisorError::StopUnavailable)?;
+    if identity(recorded.pid).ok().as_ref()
+        != Some(&(recorded.boot_identity, recorded.start_identity))
+    {
+        return Err(SupervisorError::StopUnavailable);
+    }
+    let path = stop_socket(&store.root().join("attempts"), attempt_id);
+    let mut stream = UnixStream::connect(path).map_err(|_| SupervisorError::StopUnavailable)?;
+    stream.set_read_timeout(Some(Duration::from_secs(3)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(3)))?;
+    if peer_pid(&stream)? != recorded.pid {
+        return Err(SupervisorError::StopUnavailable);
+    }
+    stream.write_all(format!("{task_id}\n{attempt_id}\n").as_bytes())?;
+    let mut answer = [0];
+    if stream.read_exact(&mut answer).is_err() || answer[0] != b'Y' {
+        return Err(SupervisorError::StopUnavailable);
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub fn request_stop(
+    store: &mut StateStore,
+    task_id: &str,
+    attempt_id: &str,
+) -> Result<(), SupervisorError> {
+    store.record_stop_intent(task_id, attempt_id)?;
+    Err(SupervisorError::StopUnavailable)
+}
+
+#[cfg(unix)]
+fn handle_stop(
+    stream: &mut UnixStream,
+    plan: &LaunchPlan,
+    store_root: &Path,
+    child: &mut Child,
+    boot: &str,
+    start: &str,
+    signals: &mut Vec<i32>,
+) -> Result<(), SupervisorError> {
+    stream.set_read_timeout(Some(Duration::from_millis(500)))?;
+    stream.set_write_timeout(Some(Duration::from_millis(500)))?;
+    let mut request = [0u8; 512];
+    let size = stream.read(&mut request).unwrap_or(0);
+    let expected = format!("{}\n{}\n", plan.task_id, plan.attempt_id);
+    let connection = Connection::open_with_flags(
+        store_root
+            .parent()
+            .ok_or(SupervisorError::Conflict)?
+            .join("state.sqlite3"),
+        OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?;
+    let persisted: Vec<String> = connection
+        .prepare("SELECT detail FROM intents WHERE kind='stop' AND task_id=?1 AND attempt_id=?2")?
+        .query_map(params![plan.task_id, plan.attempt_id], |row| row.get(0))?
+        .collect::<Result<_, _>>()?;
+    let intended =
+        serde_json::json!({"task_id":plan.task_id,"attempt_id":plan.attempt_id}).to_string();
+    let pid = i32::try_from(child.id()).map_err(|_| SupervisorError::StopUnavailable)?;
+    if request[..size] != *expected.as_bytes()
+        || persisted != [intended]
+        || child.try_wait()?.is_some()
+        || identity(child.id()).ok().as_ref() != Some(&(boot.to_owned(), start.to_owned()))
+        || unsafe { libc::getpgid(pid) } != pid
+    {
+        stream.write_all(b"N")?;
+        return Ok(());
+    }
+    // The unreaped Child owns this PID. Signal its verified dedicated group only.
+    if unsafe { libc::kill(-pid, libc::SIGTERM) } != 0 {
+        stream.write_all(b"N")?;
+        return Ok(());
+    }
+    signals.push(libc::SIGTERM);
+    let deadline = Instant::now() + Duration::from_millis(400);
+    while Instant::now() < deadline {
+        if child.try_wait()?.is_some() {
+            stream.write_all(b"Y")?;
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    if child.try_wait()?.is_none()
+        && identity(child.id()).ok().as_ref() == Some(&(boot.to_owned(), start.to_owned()))
+        && unsafe { libc::getpgid(pid) } == pid
+    {
+        if unsafe { libc::kill(-pid, libc::SIGKILL) } != 0 {
+            stream.write_all(b"N")?;
+            return Ok(());
+        }
+        signals.push(libc::SIGKILL);
+    }
+    stream.write_all(b"Y")?;
+    Ok(())
+}
+
 /// Waits for one explicit `R` byte before starting the worker. EOF keeps the
 /// already-reserved attempt held and launches nothing. Unix process groups are
 /// used so later reconciliation can independently prove group termination.
 #[cfg(unix)]
 pub fn run_gated_child<R: Read>(
     plan: &LaunchPlan,
+    gate: R,
+    store_root: &Path,
+) -> Result<ExitStatus, SupervisorError> {
+    run_gated_child_control(plan, gate, store_root, None)
+}
+
+#[cfg(unix)]
+fn run_gated_child_control<R: Read>(
+    plan: &LaunchPlan,
     mut gate: R,
     store_root: &Path,
+    control: Option<&UnixListener>,
 ) -> Result<ExitStatus, SupervisorError> {
     let mut release = [0u8; 1];
     if gate.read(&mut release)? != 1 || release[0] != b'R' {
@@ -249,7 +445,30 @@ pub fn run_gated_child<R: Read>(
         file.sync_all()?;
         Ok(bytes)
     });
-    let status = child.wait()?;
+    let mut stop_signals = Vec::new();
+    let status = if let Some(listener) = control {
+        loop {
+            if let Some(status) = child.try_wait()? {
+                break status;
+            }
+            match listener.accept() {
+                Ok((mut stream, _)) => handle_stop(
+                    &mut stream,
+                    plan,
+                    store_root,
+                    &mut child,
+                    &boot_identity,
+                    &child_start_identity,
+                    &mut stop_signals,
+                )?,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(error) => return Err(error.into()),
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+    } else {
+        child.wait()?
+    };
     let stdout_bytes = out_thread
         .join()
         .map_err(|_| SupervisorError::ExecutionUnavailable)??;
@@ -271,9 +490,227 @@ pub fn run_gated_child<R: Read>(
         stdout_bytes,
         stderr_path,
         stderr_bytes,
+        stop_signals,
     };
     write_receipt(store_root, &plan.attempt_id, &receipt)?;
     Ok(status)
+}
+#[cfg(unix)]
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+struct ProcessIdentity {
+    pid: u32,
+    boot_identity: String,
+    start_identity: String,
+}
+
+#[cfg(unix)]
+fn recorded_process(payload: &str) -> Option<ProcessIdentity> {
+    let value: ProcessIdentity = serde_json::from_str(payload).ok()?;
+    (value.pid > 0
+        && i32::try_from(value.pid).is_ok()
+        && !value.boot_identity.trim().is_empty()
+        && !value.start_identity.trim().is_empty())
+    .then_some(value)
+}
+
+#[cfg(unix)]
+fn private_bytes(path: &Path) -> Option<Vec<u8>> {
+    use std::os::unix::fs::PermissionsExt;
+    let metadata = fs::symlink_metadata(path).ok()?;
+    if !metadata.file_type().is_file() || metadata.permissions().mode() & 0o077 != 0 {
+        return None;
+    }
+    fs::read(path).ok()
+}
+
+#[cfg(unix)]
+fn private_log_size(path: &Path) -> Option<u64> {
+    use std::os::unix::fs::PermissionsExt;
+    let metadata = fs::symlink_metadata(path).ok()?;
+    (metadata.file_type().is_file() && metadata.permissions().mode() & 0o077 == 0)
+        .then_some(metadata.len())
+}
+
+/// Only an exact durable exit with a proven absent process group releases capacity.
+#[cfg(unix)]
+pub fn reconcile_attempt(
+    store: &mut StateStore,
+    task_id: &str,
+    attempt_id: &str,
+) -> Result<Reconciliation, SupervisorError> {
+    if !valid_attempt(attempt_id) {
+        return Err(SupervisorError::Conflict);
+    }
+    let held = |reason: &str| Reconciliation::Held {
+        reason: reason.into(),
+    };
+    let attempts = store.root().join("attempts");
+    use std::os::unix::fs::PermissionsExt;
+    let Ok(dir) = fs::symlink_metadata(&attempts) else {
+        return Ok(held("missing attempts directory"));
+    };
+    if !dir.file_type().is_dir() || dir.permissions().mode() & 0o777 != 0o700 {
+        return Ok(held("unsafe attempts directory"));
+    }
+    let plan: LaunchPlan = match private_bytes(&attempts.join(format!("{attempt_id}.plan.json")))
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+    {
+        Some(plan) => plan,
+        None => return Ok(held("missing or invalid plan")),
+    };
+    if plan.task_id != task_id
+        || plan.attempt_id != attempt_id
+        || plan.session_id != task_id
+        || plan.config_revision.is_empty()
+    {
+        return Ok(held("plan identity mismatch"));
+    }
+    let Some(persisted) = store.intent_payload(task_id, attempt_id, "launch")? else {
+        return Ok(held("missing launch intent"));
+    };
+    if serde_json::from_str::<LaunchPlan>(&persisted).ok().as_ref() != Some(&plan) {
+        return Ok(held("launch intent mismatch"));
+    }
+    let Some(dispatch) = store.intent_payload(task_id, attempt_id, "supervisor_dispatch")? else {
+        return Ok(held("missing dispatch intent"));
+    };
+    if serde_json::from_str::<LaunchPlan>(&dispatch).ok().as_ref() != Some(&plan) {
+        return Ok(held("dispatch plan mismatch"));
+    }
+    let Some(worktree) = store.evidence_payload(task_id, None, "worktree_created")? else {
+        return Ok(held("missing worktree evidence"));
+    };
+    let Some(worktree) = serde_json::from_str::<WorktreeIdentity>(&worktree).ok() else {
+        return Ok(held("invalid worktree evidence"));
+    };
+    let record = store.worktree_record(task_id)?;
+    if worktree.path != plan.worktree
+        || record.as_ref().is_none_or(|r| {
+            r.identity.as_ref() != Some(&worktree)
+                || r.intent.path != worktree.path
+                || r.intent.branch != worktree.branch
+                || r.intent.base != worktree.base
+                || r.intent.repository != worktree.repository
+        })
+    {
+        return Ok(held("worktree identity mismatch"));
+    }
+    let Some(selection) = store.selection_evidence(task_id)? else {
+        return Ok(held("missing selection"));
+    };
+    if selection.config_revision != plan.config_revision
+        || selection.candidate.mapping.code_repository != worktree.repository
+    {
+        return Ok(held("selection mismatch"));
+    }
+    let Some(claim) = store.evidence_payload(task_id, None, "claim_verified")? else {
+        return Ok(held("missing claim evidence"));
+    };
+    if claim.trim().is_empty() || claim != selection.effective_config.assignment_login {
+        return Ok(held("claim identity mismatch"));
+    }
+    let receipt: ExitReceipt =
+        match private_bytes(&attempts.join(format!("{attempt_id}.receipt.json")))
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        {
+            Some(receipt) => receipt,
+            None => return Ok(held("missing or invalid receipt")),
+        };
+    let stdout = attempts.join(format!("{attempt_id}.stdout.log"));
+    let stderr = attempts.join(format!("{attempt_id}.stderr.log"));
+    if receipt.attempt_id != attempt_id
+        || receipt.child_pid == 0
+        || i32::try_from(receipt.child_pid).is_err()
+        || receipt.boot_identity.trim().is_empty()
+        || receipt.child_start_identity.trim().is_empty()
+        || receipt.exit_code.is_some() == receipt.signal.is_some()
+        || receipt.stdout_path != stdout
+        || receipt.stderr_path != stderr
+    {
+        return Ok(held("receipt identity or shape mismatch"));
+    }
+    if private_log_size(&stdout) != Some(receipt.stdout_bytes)
+        || private_log_size(&stderr) != Some(receipt.stderr_bytes)
+    {
+        return Ok(held("missing, unsafe or incomplete logs"));
+    }
+    let mut supervisor = None;
+    for (evidence, kind) in [
+        (true, "supervisor_ready"),
+        (false, "gate_release"),
+        (true, "gate_sent"),
+    ] {
+        let payload = if evidence {
+            store.evidence_payload(task_id, Some(attempt_id), kind)?
+        } else {
+            store.intent_payload(task_id, attempt_id, kind)?
+        };
+        let Some(process) = payload.as_deref().and_then(recorded_process) else {
+            return Ok(held("missing or invalid supervisor identity"));
+        };
+        if supervisor.as_ref().is_some_and(|prior| prior != &process) {
+            return Ok(held("supervisor identity contradiction"));
+        }
+        supervisor = Some(process);
+    }
+    let supervisor = supervisor.expect("three verified process identities");
+    if supervisor.pid == receipt.child_pid {
+        return Ok(held("supervisor and child identity contradiction"));
+    }
+    let evidence = serde_json::to_string(&receipt)?;
+    let outcome = format!(
+        "exit_code={:?};signal={:?}",
+        receipt.exit_code, receipt.signal
+    );
+    let completed = Reconciliation::Completed {
+        exit_code: receipt.exit_code,
+        signal: receipt.signal,
+    };
+    if store.reconciled_exit(task_id, attempt_id, &evidence, &outcome)? {
+        return Ok(completed);
+    }
+    match identity(supervisor.pid) {
+        Ok((boot, start))
+            if boot != supervisor.boot_identity || start != supervisor.start_identity =>
+        {
+            return Ok(held("supervisor identity mismatch"));
+        }
+        Err(_) => {
+            let supervisor_group =
+                i32::try_from(supervisor.pid).map_err(|_| SupervisorError::IdentityUnavailable)?;
+            if unsafe { libc::kill(-supervisor_group, 0) } == 0
+                || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+            {
+                return Ok(held("supervisor identity unavailable"));
+            }
+        }
+        Ok(_) => {}
+    }
+    if let Ok((boot, start)) = identity(receipt.child_pid)
+        && (boot != receipt.boot_identity || start != receipt.child_start_identity)
+    {
+        return Ok(held("child identity mismatch"));
+    }
+    let pgid =
+        i32::try_from(receipt.child_pid).map_err(|_| SupervisorError::IdentityUnavailable)?;
+    // The negative argument probes the whole child group, never a bare PID.
+    if unsafe { libc::kill(-pgid, 0) } == 0 {
+        return Ok(held("child process group is alive"));
+    }
+    if std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH) {
+        return Ok(held("child process group absence is unproven"));
+    }
+    store.reconcile_verified_exit(task_id, attempt_id, &evidence, &outcome)?;
+    Ok(completed)
+}
+
+#[cfg(not(unix))]
+pub fn reconcile_attempt(
+    _store: &mut StateStore,
+    _task_id: &str,
+    _attempt_id: &str,
+) -> Result<Reconciliation, SupervisorError> {
+    Err(SupervisorError::ExecutionUnavailable)
 }
 
 /// Non-Unix execution is intentionally unavailable until process-group semantics exist.
@@ -372,6 +809,13 @@ pub fn supervise(root: &Path, attempt: &str) -> Result<(), SupervisorError> {
                 return Err(SupervisorError::Conflict);
             }
         }
+        #[cfg(unix)]
+        let listener = {
+            let socket = stop_socket(&attempts, attempt);
+            let listener = UnixListener::bind(socket)?;
+            listener.set_nonblocking(true)?;
+            listener
+        };
         let mut stdout = std::io::stdout().lock();
         stdout.write_all(b"READY\n")?;
         stdout.flush()?;
@@ -387,6 +831,14 @@ pub fn supervise(root: &Path, attempt: &str) -> Result<(), SupervisorError> {
         if release != 1 {
             return Err(SupervisorError::Conflict);
         }
+        #[cfg(unix)]
+        run_gated_child_control(
+            &plan,
+            std::io::Cursor::new(gate),
+            &attempts,
+            Some(&listener),
+        )?;
+        #[cfg(not(unix))]
         run_gated_child(&plan, std::io::Cursor::new(gate), &attempts)?;
         Ok(())
     })();
