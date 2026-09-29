@@ -1,7 +1,7 @@
 {
-  "event_count": 51,
-  "last_event_id": "01M3P5C9MD8NB2W4XNQC123FB6",
-  "materialized_at": "2026-09-29T08:44:24.077548+00:00",
+  "event_count": 52,
+  "last_event_id": "01M3P5CKZS0QHMSEMXYZR89TSJ",
+  "materialized_at": "2026-09-29T08:44:34.681421+00:00",
   "mission_number": "",
   "mission_slug": "luthor-issue-to-pr-daemon-01M3N2VK",
   "mission_type": "software-dev",
@@ -11,8 +11,8 @@
     "canceled": 0,
     "claimed": 0,
     "done": 0,
-    "for_review": 0,
-    "in_progress": 1,
+    "for_review": 1,
+    "in_progress": 0,
     "in_review": 0,
     "planned": 3
   },
@@ -54,9 +54,9 @@
       "agent_profile": "__resolved_profile_absent__",
       "agent_profile_version": "__resolved_profile_version_absent__",
       "force_count": 6,
-      "lane": "in_progress",
-      "last_event_id": "01M3P5C9MD8NB2W4XNQC123FB6",
-      "last_transition_at": "2026-09-29T08:44:24.077548+00:00",
+      "lane": "for_review",
+      "last_event_id": "01M3P5CKZS0QHMSEMXYZR89TSJ",
+      "last_transition_at": "2026-09-29T08:44:34.681421+00:00",
       "model": "__resolved_model_absent__",
       "notes": [
         "Date GraphQL selection omits date scalar needed by the parser; unrelated Date blocks eligible Status discovery"
