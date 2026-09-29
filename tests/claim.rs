@@ -478,3 +478,155 @@ impl luthor::claim::AssignmentWriter for ClaimWriter {
         Ok(())
     }
 }
+
+#[test]
+fn source_reconcile_observes_claim_intent_without_attempt_or_assignment() {
+    let (dir, candidate, mut projects, writer, mut store) = claim_fixture();
+    store
+        .record_claim_intent("task", "bot", &candidate.repository, candidate.issue_number)
+        .unwrap();
+    store.hold_task("task", "interrupted claim").unwrap();
+    projects.assignees.borrow_mut().push("bot".into());
+    let report = luthor::coordinator::reconcile_source(&mut store, "task", &mut projects).unwrap();
+    assert_eq!(report.status, "held");
+    assert_eq!(report.project_membership, Some(true));
+    assert_eq!(report.marker_present, Some(true));
+    assert_eq!(report.assignees, Some(vec!["bot".into()]));
+    assert!(report.reasons.contains(&"claim_intent_unverified"));
+    assert_eq!(writer.calls, 0);
+    assert_eq!(store.latest_attempt("task").unwrap(), None);
+    assert_eq!(store.task_phase("task").unwrap().as_deref(), Some("held"));
+    assert!(
+        store
+            .unresolved_sources()
+            .unwrap()
+            .iter()
+            .any(|(_, kind)| kind == "claim_assignment")
+    );
+    let db = Connection::open(dir.path().join("state.sqlite3")).unwrap();
+    let observed: String = db
+        .query_row(
+            "SELECT payload FROM evidence WHERE task_id='task' AND kind='source_observation'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&observed).unwrap()["status"],
+        "held"
+    );
+}
+
+#[test]
+fn source_reconcile_partial_worktree_and_source_errors_stay_held() {
+    let (dir, candidate, mut projects, writer, mut store) = claim_fixture();
+    store
+        .record_claim_intent("task", "bot", &candidate.repository, candidate.issue_number)
+        .unwrap();
+    store
+        .record_evidence("task", None, "claim_verified", "bot")
+        .unwrap();
+    store.set_task_phase("task", "claimed").unwrap();
+    let root = dir.path().join("worktrees");
+    std::fs::create_dir_all(root.join("task")).unwrap();
+    store
+        .begin_worktree(
+            "task",
+            &luthor::state::WorktreeIntent {
+                path: std::fs::canonicalize(&root).unwrap().join("task"),
+                branch: "luthor/task".into(),
+                base: "main".into(),
+                repository: "org/code".into(),
+            },
+        )
+        .unwrap();
+    store.hold_task("task", "interrupted worktree").unwrap();
+    let report = luthor::coordinator::reconcile_source(&mut store, "task", &mut projects).unwrap();
+    assert_eq!(
+        report.worktree,
+        Some(luthor::worktree::WorktreeInspection::UnverifiedPathPresent),
+        "{report:?}"
+    );
+    assert!(report.reasons.contains(&"worktree_unverified"));
+    projects.item.item_id = "other".into();
+    let mismatch =
+        luthor::coordinator::reconcile_source(&mut store, "task", &mut projects).unwrap();
+    assert!(mismatch.reasons.contains(&"project_membership_mismatch"));
+    projects.failed_issue_read = Some(projects.issue_reads + 1);
+    projects.item.item_id = candidate.item_id;
+    let unreadable =
+        luthor::coordinator::reconcile_source(&mut store, "task", &mut projects).unwrap();
+    assert!(unreadable.reasons.contains(&"source_read_failed"));
+    assert_eq!(writer.calls, 0);
+    assert_eq!(store.latest_attempt("task").unwrap(), None);
+    assert_eq!(store.task_phase("task").unwrap().as_deref(), Some("held"));
+    assert!(
+        store
+            .unresolved_sources()
+            .unwrap()
+            .iter()
+            .any(|(_, kind)| kind == "worktree_create")
+    );
+    assert!(store.ensure_dispatch_capacity().is_err());
+}
+
+#[test]
+fn fully_recorded_source_without_attempt_still_blocks_new_selection() {
+    let (dir, candidate, mut projects, writer, mut store) = claim_fixture();
+    store
+        .record_claim_intent("task", "bot", &candidate.repository, candidate.issue_number)
+        .unwrap();
+    store
+        .record_evidence("task", None, "claim_verified", "bot")
+        .unwrap();
+    store.set_task_phase("task", "claimed").unwrap();
+    let root = dir.path().join("worktrees");
+    std::fs::create_dir_all(root.join("task")).unwrap();
+    let path = std::fs::canonicalize(&root).unwrap().join("task");
+    store
+        .begin_worktree(
+            "task",
+            &luthor::state::WorktreeIntent {
+                path: path.clone(),
+                branch: "luthor/task".into(),
+                base: "main".into(),
+                repository: "org/code".into(),
+            },
+        )
+        .unwrap();
+    store
+        .finish_worktree(
+            "task",
+            &luthor::state::WorktreeIdentity {
+                path,
+                device: 1,
+                inode: 1,
+                branch: "luthor/task".into(),
+                base: "main".into(),
+                head: "bogus".into(),
+                repository: "org/code".into(),
+                git_directory: root,
+                remote: "origin".into(),
+            },
+        )
+        .unwrap();
+    assert!(
+        store
+            .unresolved_sources()
+            .unwrap()
+            .iter()
+            .any(|(_, kind)| kind == "prelaunch")
+    );
+    let report = luthor::coordinator::reconcile_source(&mut store, "task", &mut projects).unwrap();
+    assert_eq!(report.status, "held");
+    assert!(report.reasons.contains(&"worktree_read_failed"));
+    assert_eq!(writer.calls, 0);
+    assert_eq!(store.latest_attempt("task").unwrap(), None);
+    assert!(
+        store
+            .unresolved_sources()
+            .unwrap()
+            .iter()
+            .any(|(_, kind)| kind == "prelaunch")
+    );
+}

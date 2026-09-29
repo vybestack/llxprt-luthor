@@ -1,6 +1,6 @@
 use crate::{
     config::Mapping,
-    state::{StateError, StateStore, WorktreeIdentity, WorktreeIntent},
+    state::{StateError, StateStore, WorktreeIdentity, WorktreeIntent, WorktreeRecord},
 };
 use std::{
     fs,
@@ -29,6 +29,51 @@ pub enum WorktreeError {
 pub enum WorktreeResult {
     Created(WorktreeIdentity),
     Existing(WorktreeIdentity),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorktreeInspection {
+    UnverifiedPathPresent,
+    UnverifiedPathAbsent,
+    IdentityMatches,
+    IdentityMismatch,
+}
+
+/// Read-only inspection never turns an unfinished intent into a verified worktree.
+pub fn inspect_record(
+    record: &WorktreeRecord,
+    mapping: &Mapping,
+) -> Result<WorktreeInspection, WorktreeError> {
+    let intent = &record.intent;
+    if intent.branch
+        != format!(
+            "luthor/{}",
+            intent
+                .path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default()
+        )
+        || intent.base != mapping.base_branch
+        || intent.repository != mapping.code_repository
+    {
+        return Ok(WorktreeInspection::IdentityMismatch);
+    }
+    if let Some(expected) = &record.identity {
+        let (_, git_dir, remote) = validate_checkout(mapping)?;
+        return Ok(match identity(&intent.path, intent, &git_dir, &remote) {
+            Ok(actual) if &actual == expected => WorktreeInspection::IdentityMatches,
+            _ => WorktreeInspection::IdentityMismatch,
+        });
+    }
+    match fs::symlink_metadata(&intent.path) {
+        Ok(_) => Ok(WorktreeInspection::UnverifiedPathPresent),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok(WorktreeInspection::UnverifiedPathAbsent)
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn git(dir: &Path, args: &[&str]) -> Result<Output, WorktreeError> {

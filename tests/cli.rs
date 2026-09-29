@@ -468,4 +468,51 @@ mod resume_cli {
         );
         assert!(!h.log.exists());
     }
+    #[test]
+    fn reconcile_prelaunch_claim_uses_only_read_only_gh_and_pause_still_needs_attempt() {
+        let h = Harness::new();
+        h.seed_held_task();
+        let mut store = StateStore::open(&h.state, 2).unwrap();
+        store
+            .record_claim_intent("task", "agent", "org/tracker", 7)
+            .unwrap();
+        drop(store);
+        let gh = h._dir.path().join("gh");
+        fs::write(&gh, format!(r#"#!/bin/sh
+printf '%s\n' "$*" >> '{}'
+case "$*" in
+  *graphql*) printf '%s\n' '{{"data":{{"node":{{"items":{{"nodes":[{{"id":"ITEM","content":{{"__typename":"Issue","id":"ISSUE","number":7,"repository":{{"id":"REPO","nameWithOwner":"org/tracker"}}}},"fieldValues":{{"nodes":[],"pageInfo":{{"hasNextPage":false}}}}}}],"pageInfo":{{"hasNextPage":false,"endCursor":null}}}}}}}}}}' ;;
+  *repos/org/tracker/issues/7*) printf '%s\n' '{{"node_id":"ISSUE","number":7,"repository_url":"https://api.github.com/repos/org/tracker","html_url":"https://github.com/org/tracker/issues/7","state":"open","assignees":[{{"login":"agent"}}],"labels":[{{"name":"ready"}}],"milestone":null}}' ;;
+  *repos/org/tracker*) printf '%s\n' '{{"node_id":"REPO"}}' ;;
+  *) exit 91 ;;
+esac
+"#, h.log.display())).unwrap();
+        fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).unwrap();
+        let config = h.config.to_str().unwrap();
+        let output = h.run(&["reconcile", "task", "--config", config]);
+        assert!(output.status.success(), "{}", stderr(&output));
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["status"], "held");
+        assert_eq!(report["project_membership"], true);
+        assert_eq!(report["marker_present"], true);
+        assert_eq!(report["assignees"], serde_json::json!(["agent"]));
+        assert!(
+            report["reasons"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("claim_intent_unverified"))
+        );
+        let calls = fs::read_to_string(&h.log).unwrap();
+        assert_eq!(calls.lines().count(), 3);
+        assert!(calls.lines().all(|line| line.starts_with("api ")
+            && !line.contains("-X")
+            && !line.contains("POST")));
+        let pause = h.run(&["pause", "task", "--config", config]);
+        assert!(!pause.status.success());
+        assert!(stderr(&pause).contains("attempt not found"));
+        let store = StateStore::open(&h.state, 2).unwrap();
+        assert_eq!(store.latest_attempt("task").unwrap(), None);
+        assert_eq!(store.task_phase("task").unwrap().as_deref(), Some("held"));
+        assert_eq!(store.unresolved_sources().unwrap()[0].1, "claim_assignment");
+    }
 }

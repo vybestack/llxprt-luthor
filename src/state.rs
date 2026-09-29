@@ -503,6 +503,9 @@ impl StateStore {
         let mut statement = self.connection.prepare(
             "SELECT t.id, 'selection' FROM tasks t WHERE t.state='preparing'
              UNION ALL
+             SELECT t.id, 'prelaunch' FROM tasks t WHERE t.state NOT IN ('preparing','completed')
+               AND NOT EXISTS (SELECT 1 FROM attempts a WHERE a.task_id=t.id)
+             UNION ALL
              SELECT i.task_id, i.kind FROM intents i JOIN tasks t ON t.id=i.task_id
              WHERE t.state!='completed' AND (
                (i.kind='claim_assignment' AND NOT EXISTS
@@ -620,6 +623,10 @@ impl StateStore {
     pub fn claim_assignment_login(&self, task_id: &str) -> Result<Option<String>, StateError> {
         let evidence = self.selection_evidence(task_id)?;
         Ok(evidence.map(|evidence| evidence.effective_config.assignment_login))
+    }
+
+    pub fn source_claim_intent(&self, task_id: &str) -> Result<Option<String>, StateError> {
+        self.unique_payload(false, task_id, None, "claim_assignment")
     }
 
     pub fn record_claim_intent(
@@ -1143,7 +1150,10 @@ impl StateStore {
             (true, None) => {
                 "SELECT payload FROM evidence WHERE task_id=?1 AND attempt_id IS ?2 AND kind=?3"
             }
-            (false, _) => {
+            (false, None) => {
+                "SELECT detail FROM intents WHERE task_id=?1 AND attempt_id IS ?2 AND kind=?3"
+            }
+            (false, Some(_)) => {
                 "SELECT detail FROM intents WHERE task_id=?1 AND attempt_id=?2 AND kind=?3"
             }
         };

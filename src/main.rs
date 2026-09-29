@@ -130,9 +130,16 @@ fn mutate(command: &str, mut values: Vec<String>) -> Result<(), Box<dyn std::err
     if store.task_phase(&task_id)?.is_none() {
         return Err("task not found".into());
     }
+    let latest = store.latest_attempt(&task_id)?;
+    if command == "reconcile" && latest.is_none() && attempt_id.is_none() {
+        let mut projects = GhProjectReader::new(PathBuf::from("gh"));
+        let report = luthor::coordinator::reconcile_source(&mut store, &task_id, &mut projects)?;
+        println!("{}", serde_json::to_string(&report)?);
+        return Ok(());
+    }
     let attempt = match attempt_id {
         Some(id) => id,
-        None => store.latest_attempt(&task_id)?.ok_or("attempt not found")?,
+        None => latest.ok_or("attempt not found")?,
     };
     if !store.has_attempt(&task_id, &attempt)? {
         return Err("attempt not found for task".into());

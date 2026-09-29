@@ -3,13 +3,14 @@ use crate::{
     config::Config,
     eligibility::Candidate,
     github::{
-        project::ProjectReader,
+        project::{ProjectReader, enumerate_target},
         pull_request::{LookupError, LookupResult, PullRequestReader, lookup},
     },
     state::{PausePrEvidence, PausePrStatus, StateError, StateStore},
     supervisor::{self, LaunchPlan, SupervisorError},
-    worktree::{self, WorktreeError},
+    worktree::{self, WorktreeError, WorktreeInspection},
 };
+use serde::Serialize;
 use std::{
     collections::HashSet,
     io::Read,
@@ -41,6 +42,143 @@ pub struct SourceHold {
 pub struct StartupReport {
     pub attempts: Vec<AttemptReport>,
     pub source_holds: Vec<SourceHold>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SourceReconciliation {
+    pub task_id: String,
+    pub status: &'static str,
+    pub reasons: Vec<&'static str>,
+    pub issue_state: Option<String>,
+    pub assignees: Option<Vec<String>>,
+    pub marker_present: Option<bool>,
+    pub project_membership: Option<bool>,
+    pub worktree: Option<WorktreeInspection>,
+}
+
+/// Observe unfinished source operations without verifying an intent, assigning,
+/// adopting a worktree, or releasing the task for scheduling.
+pub fn reconcile_source<P: ProjectReader>(
+    store: &mut StateStore,
+    task_id: &str,
+    projects: &mut P,
+) -> Result<SourceReconciliation, StateError> {
+    if store.task_phase(task_id)?.is_none() || store.latest_attempt(task_id)?.is_some() {
+        return Err(StateError::InvalidSelection);
+    }
+    let mut report = SourceReconciliation {
+        task_id: task_id.to_owned(),
+        status: "held",
+        reasons: vec![],
+        issue_state: None,
+        assignees: None,
+        marker_present: None,
+        project_membership: None,
+        worktree: None,
+    };
+    if let Some(selection) = store.selection_evidence(task_id)? {
+        let candidate = &selection.candidate;
+        match enumerate_target(
+            projects,
+            &candidate.project_id,
+            &candidate.repository,
+            candidate.issue_number,
+        ) {
+            Ok(items) => {
+                let matching = items
+                    .iter()
+                    .filter(|(item, _)| {
+                        item.item_id == candidate.item_id
+                            && item.issue_node_id == candidate.issue_node_id
+                            && item.tracker_repo_id == candidate.tracker_repo_id
+                    })
+                    .collect::<Vec<_>>();
+                report.project_membership = Some(matching.len() == 1 && items.len() == 1);
+                if let [(item, issue)] = matching.as_slice() {
+                    report.issue_state = Some(issue.state.clone());
+                    report.assignees = Some(issue.assignees.clone());
+                    let marker = match &candidate.marker {
+                        crate::config::Marker::Label { name } => issue.labels.contains(name),
+                        crate::config::Marker::ProjectField { name, value } => {
+                            !item.unsupported_fields.contains(name)
+                                && item.fields.contains(&(name.clone(), value.clone()))
+                        }
+                    };
+                    report.marker_present = Some(marker);
+                    if issue.node_id != candidate.issue_node_id
+                        || issue.repository != candidate.repository
+                        || issue.tracker_repo_id != candidate.tracker_repo_id
+                        || issue.url != candidate.issue_url
+                        || issue.milestone != candidate.source.milestone
+                        || issue.milestone_id != candidate.milestone_id
+                    {
+                        report.reasons.push("issue_identity_mismatch");
+                    }
+                    if issue.state != "open" {
+                        report.reasons.push("issue_not_open");
+                    }
+                    if !marker {
+                        report.reasons.push("marker_missing");
+                    }
+                    if issue.assignees != [selection.effective_config.assignment_login.as_str()]
+                        && !issue.assignees.is_empty()
+                    {
+                        report.reasons.push("assignees_unexpected");
+                    }
+                } else {
+                    report.reasons.push("project_membership_mismatch");
+                }
+                if report.project_membership == Some(false)
+                    && !report.reasons.contains(&"project_membership_mismatch")
+                {
+                    report.reasons.push("project_membership_mismatch");
+                }
+            }
+            Err(_) => report.reasons.push("source_read_failed"),
+        }
+        if let Some(detail) = store.source_claim_intent(task_id)? {
+            let expected = serde_json::json!({"principal": selection.effective_config.assignment_login,
+                "repository": candidate.repository, "number": candidate.issue_number});
+            if serde_json::from_str::<serde_json::Value>(&detail).ok() != Some(expected) {
+                report.reasons.push("claim_intent_mismatch");
+            }
+            if report.assignees.as_deref() == Some(&[][..]) {
+                report.reasons.push("assignment_not_observed");
+            }
+            report.reasons.push("claim_intent_unverified");
+        }
+        if let Some(record) = store.worktree_record(task_id)? {
+            let root = &selection.effective_config.worktree_root;
+            let expected_path = std::fs::canonicalize(root)
+                .unwrap_or_else(|_| root.clone())
+                .join(task_id);
+            if record.intent.path != expected_path {
+                report.reasons.push("worktree_intent_mismatch");
+            } else {
+                match worktree::inspect_record(&record, &candidate.mapping) {
+                    Ok(inspection) => {
+                        if inspection != WorktreeInspection::IdentityMatches {
+                            report.reasons.push("worktree_unverified");
+                        }
+                        report.worktree = Some(inspection);
+                    }
+                    Err(_) => report.reasons.push("worktree_read_failed"),
+                }
+            }
+        }
+    } else {
+        report.reasons.push("selection_missing");
+    }
+    if report.reasons.is_empty() {
+        report.reasons.push("prelaunch_not_verified");
+    }
+    store.record_evidence(
+        task_id,
+        None,
+        "source_observation",
+        &serde_json::to_string(&report)?,
+    )?;
+    Ok(report)
 }
 
 impl StartupReport {
