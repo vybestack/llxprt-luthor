@@ -1,5 +1,24 @@
 use luthor::config::{CommandTemplate, Config, TaskValues};
 
+#[test]
+fn documented_json_example_loads_and_round_trips() {
+    let docs = include_str!("../dev-docs/config-and-state.md");
+    let json = docs
+        .split("```json\n")
+        .nth(1)
+        .and_then(|example| example.split("\n```").next())
+        .expect("documentation contains a fenced JSON example");
+    let config = Config::from_json(json).unwrap();
+    let mapping = &config.mappings[0];
+    assert_eq!(mapping.push_remote, "git@github-acoliver:example/code.git");
+    assert_eq!(mapping.allowed_pr_head_repository, "example/code-fork");
+    assert_eq!(mapping.allowed_pr_author, "example-user");
+
+    let snapshot = serde_json::to_string(&config).unwrap();
+    let round_tripped = Config::from_json(&snapshot).unwrap();
+    assert_eq!(round_tripped.mappings[0], *mapping);
+}
+
 fn valid() -> &'static str {
     r#"{"state_root":"/private/state","worktree_root":"/private/worktrees","capacity":2,"sources":[{"project_id":"PVT_1","repositories":["org/tracker"],"ready_marker":{"kind":"label","name":"luthor-ready"},"milestone":"0.12.0"}],"mappings":[{"tracker_repository":"org/tracker","code_repository":"org/code","checkout":"/src/code","base_branch":"main","push_remote":"origin","allowed_pr_head_repository":"org/fork","allowed_pr_author":"alice"}],"initial":{"executable":"/bin/agent","args":["--issue","{task.issue_number}"]},"resume":{"executable":"/bin/agent","args":["--issue","{task.issue_number}","--attempt","{attempt.id}"]}}"#
 }
