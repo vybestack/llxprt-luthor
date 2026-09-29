@@ -66,13 +66,13 @@
         "reviewer": "deep-bug-investigator",
         "verdict": "changes_requested"
       },
-      "role": "reviewer",
-      "shell_pid": 77228,
-      "shell_pid_created_at": "1790669485.70285",
+      "role": "implementer",
+      "shell_pid": null,
+      "shell_pid_created_at": null,
       "subtasks": {
-        "T003": "done",
-        "T004": "done",
-        "T005": "done"
+        "T003": "planned",
+        "T004": "planned",
+        "T005": "planned"
       }
     },
     "WP03": {
