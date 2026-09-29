@@ -59,6 +59,7 @@ fn issue(state: &str, labels: Vec<&str>, assignees: Vec<&str>, milestone: Option
     Issue {
         node_id: "N7".into(),
         repository: "org/tracker".into(),
+        tracker_repo_id: "R1".into(),
         number: 7,
         state: state.into(),
         assignees: assignees.into_iter().map(str::to_string).collect(),
@@ -131,6 +132,34 @@ fn requires_membership_direct_open_unassigned_exact_label_and_milestone() {
         )
         .unwrap()
         .is_empty()
+    );
+}
+
+#[test]
+fn direct_issue_repository_id_must_match_project_item() {
+    let mut fake = Fake {
+        pages: vec![Page {
+            items: vec![item("I1", "N7", vec![])],
+            has_next_page: false,
+            end_cursor: None,
+        }],
+        issues: vec![issue("open", vec!["ready"], vec![], None)],
+        calls: 0,
+        fail_page: false,
+    };
+    fake.issues[0].tracker_repo_id = "different-repository-id".into();
+    assert!(
+        select(
+            &mut fake,
+            &[source(
+                Marker::Label {
+                    name: "ready".into()
+                },
+                None
+            )],
+            &[mapping()],
+        )
+        .is_err()
     );
 }
 

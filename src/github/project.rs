@@ -1,4 +1,8 @@
-use std::{collections::HashSet, path::PathBuf, process::Command};
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+    process::Command,
+};
 
 use serde_json::Value;
 use thiserror::Error;
@@ -17,6 +21,7 @@ pub struct ProjectItem {
 pub struct Issue {
     pub node_id: String,
     pub repository: String,
+    pub tracker_repo_id: String,
     pub number: u64,
     pub state: String,
     pub assignees: Vec<String>,
@@ -133,11 +138,15 @@ pub trait ProjectReader {
 
 pub struct GhProjectReader {
     pub executable: PathBuf,
+    repository_ids: HashMap<String, String>,
 }
 
 impl GhProjectReader {
     pub fn new(executable: PathBuf) -> Self {
-        Self { executable }
+        Self {
+            executable,
+            repository_ids: HashMap::new(),
+        }
     }
 
     fn api(&self, args: &[&str]) -> Result<Value, ProjectReadError> {
@@ -350,6 +359,19 @@ impl ProjectReader for GhProjectReader {
     }
 
     fn issue(&mut self, item: &ProjectItem) -> Result<Issue, ProjectReadError> {
+        let repository_id = if let Some(id) = self.repository_ids.get(&item.repository) {
+            id.clone()
+        } else {
+            let path = format!("repos/{}", item.repository);
+            let repository = self.api(&["api", &path])?;
+            let id = required_string(&repository, "node_id", "invalid-repository")?;
+            self.repository_ids
+                .insert(item.repository.clone(), id.clone());
+            id
+        };
+        if repository_id != item.tracker_repo_id {
+            return Err("identity-mismatch".to_owned().into());
+        }
         let path = format!(
             "repos/{}/issues/{}?per_page=100",
             item.repository, item.issue_number
@@ -372,6 +394,14 @@ impl ProjectReader for GhProjectReader {
             });
         }
         let node_id = required_string(&value, "node_id", "invalid-issue")?;
+        let repository_url = value
+            .pointer("/repository_url")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "identity-mismatch".to_owned())?;
+        let expected_repository_url = format!("https://api.github.com/repos/{}", item.repository);
+        if repository_url != expected_repository_url {
+            return Err("identity-mismatch".to_owned().into());
+        }
         let repository = value
             .pointer("/repository_url")
             .and_then(Value::as_str)
@@ -417,6 +447,7 @@ impl ProjectReader for GhProjectReader {
         Ok(Issue {
             node_id,
             repository: repository.to_owned(),
+            tracker_repo_id: repository_id,
             number,
             state,
             assignees,
@@ -458,6 +489,7 @@ pub fn enumerate<R: ProjectReader>(
             let issue = reader.issue(&item).map_err(ProjectError::IssueRead)?;
             if issue.node_id != item.issue_node_id
                 || issue.repository != item.repository
+                || issue.tracker_repo_id != item.tracker_repo_id
                 || issue.number != item.issue_number
             {
                 return Err(ProjectError::Inconsistent {
