@@ -17,6 +17,48 @@ fn documented_json_example_loads_and_round_trips() {
     let snapshot = serde_json::to_string(&config).unwrap();
     let round_tripped = Config::from_json(&snapshot).unwrap();
     assert_eq!(round_tripped.mappings[0], *mapping);
+
+    let initial_values = TaskValues {
+        task_issue_number: "7".into(),
+        task_repository: "example/tracker".into(),
+        task_issue_url: "https://github.com/example/tracker/issues/7".into(),
+        task_id: "task-7f3a".into(),
+        attempt_id: "attempt-initial".into(),
+        worktree: "/example/worktrees/task-7f3a".into(),
+    };
+    let resume_values = TaskValues {
+        attempt_id: "attempt-resume-02".into(),
+        ..initial_values.clone()
+    };
+    let initial = config.initial.render(&initial_values).unwrap();
+    let resume = config.resume.render(&resume_values).unwrap();
+
+    for rendered in [&initial, &resume] {
+        let session = rendered
+            .args
+            .windows(2)
+            .find(|pair| pair[0] == "--session")
+            .expect("documented command has a session flag");
+        assert_eq!(session[1], initial_values.task_id);
+        let cwd = rendered
+            .args
+            .windows(2)
+            .find(|pair| pair[0] == "--cwd")
+            .expect("documented command has a cwd flag");
+        assert_eq!(cwd[1], initial_values.worktree);
+    }
+
+    let initial_prompt = initial
+        .args
+        .last()
+        .expect("documented initial command has a prompt");
+    let resume_prompt = resume
+        .args
+        .last()
+        .expect("documented resume command has a prompt");
+    assert_ne!(initial_prompt, resume_prompt);
+    assert!(resume_prompt.contains(&resume_values.attempt_id));
+    assert!(resume_prompt.contains(&resume_values.task_issue_url));
 }
 
 fn valid() -> &'static str {

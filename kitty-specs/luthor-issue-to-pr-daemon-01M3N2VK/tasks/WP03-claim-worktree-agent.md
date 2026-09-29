@@ -55,6 +55,7 @@ owned_files:
 - tests/supervisor.rs
 - tests/coordinator.rs
 - tests/cli.rs
+- tests/config.rs
 - tests/daemon.rs
 - tests/state.rs
 - tests/eligibility.rs
