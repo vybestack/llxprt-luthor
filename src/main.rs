@@ -1,6 +1,13 @@
-use luthor::{config::Config, eligibility, github::project::GhProjectReader, supervisor};
+use luthor::{
+    claim::GhAssignmentWriter,
+    config::Config,
+    coordinator::{DispatchDependencies, ProductionLauncher, dispatch_one},
+    eligibility,
+    github::{project::GhProjectReader, pull_request::GhPullRequestReader},
+    state::StateStore,
+};
 use serde_json::json;
-use std::{env, fs, path::PathBuf, process::ExitCode};
+use std::{env, fs, io::Read, path::PathBuf, process::ExitCode};
 
 fn main() -> ExitCode {
     match run() {
@@ -21,48 +28,162 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             if args.next().is_some() {
                 return Err("unexpected argument".into());
             }
-            supervisor::supervise(std::path::Path::new(&root), &attempt)?;
-            return Ok(());
+            luthor::supervisor::supervise(std::path::Path::new(&root), &attempt)?;
+            Ok(())
         }
-        Some("discover") => {}
+        Some("discover") => discover(args.collect()),
+        Some("dispatch") => dispatch(args.collect()),
         Some("--help" | "-h") => {
-            println!("Usage: luthor discover --config <path>");
-            return Ok(());
+            println!(
+                "Usage: luthor discover --config <path>\n       luthor dispatch --config <path> --repository owner/repo --issue N --config-revision REV [--execute]"
+            );
+            Ok(())
         }
-        _ => return Err("expected `discover --config <path>`".into()),
+        _ => Err("expected `discover` or `dispatch`".into()),
     }
-    let first = args.next();
-    if matches!(first.as_deref(), Some("--help" | "-h")) {
+}
+
+fn option(args: &[String], name: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let positions: Vec<_> = args
+        .iter()
+        .enumerate()
+        .filter(|(_, arg)| *arg == name)
+        .collect();
+    if positions.len() != 1 {
+        return Err(format!("requires exactly one {name}").into());
+    }
+    let index = positions[0].0;
+    args.get(index + 1)
+        .filter(|v| !v.starts_with('-'))
+        .cloned()
+        .ok_or_else(|| format!("requires value for {name}").into())
+}
+
+fn discover(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
+    if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: luthor discover --config <path>");
         return Ok(());
     }
-    if first.as_deref() != Some("--config") {
+    if args.len() != 2 || args[0] != "--config" {
         return Err("discover requires --config <path>".into());
     }
-    let path = args.next().ok_or("discover requires a config path")?;
-    if args.next().is_some() {
-        return Err("unexpected argument".into());
-    }
-
-    let config = Config::from_json(&fs::read_to_string(path)?)?;
+    let config = Config::from_json(&fs::read_to_string(&args[1])?)?;
     let mut reader = GhProjectReader::new(PathBuf::from("gh"));
     let candidates = eligibility::select(&mut reader, &config.sources, &config.mappings)?;
-    let mut output_lines = Vec::with_capacity(candidates.len());
-    for candidate in candidates {
-        let output = json!({
-            "candidate": candidate,
-            "evidence": {
-                "state": candidate.observed_state,
-                "assignees": candidate.observed_assignees,
-                "labels": candidate.observed_labels,
-                "project_fields": candidate.observed_project_fields,
-                "eligibility": "selected",
-            }
-        });
-        output_lines.push(serde_json::to_string(&output)?);
-    }
-    for line in output_lines {
+    let lines = candidates.into_iter().map(|candidate| {
+        let output = json!({"candidate": candidate, "evidence": {"state": candidate.observed_state, "assignees": candidate.observed_assignees, "labels": candidate.observed_labels, "project_fields": candidate.observed_project_fields, "eligibility": "selected"}});
+        serde_json::to_string(&output)
+    }).collect::<Result<Vec<_>, _>>()?;
+    for line in lines {
         println!("{line}");
     }
     Ok(())
+}
+
+fn dispatch(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
+    let execute = args.iter().filter(|arg| *arg == "--execute").count();
+    if execute > 1
+        || args.len() != if execute == 1 { 9 } else { 8 }
+        || args.iter().any(|arg| {
+            arg.starts_with("--")
+                && ![
+                    "--execute",
+                    "--config",
+                    "--repository",
+                    "--issue",
+                    "--config-revision",
+                ]
+                .contains(&arg.as_str())
+        })
+    {
+        return Err("invalid dispatch arguments".into());
+    }
+    let path = option(&args, "--config")?;
+    let repository = option(&args, "--repository")?;
+    let issue: u64 = option(&args, "--issue")?.parse()?;
+    if issue == 0 {
+        return Err("issue number must be positive".into());
+    }
+    let revision = option(&args, "--config-revision")?;
+    if revision.trim().is_empty() || revision.starts_with('-') {
+        return Err("invalid config revision".into());
+    }
+    let config = Config::from_json(&fs::read_to_string(path)?)?;
+    let mut projects = GhProjectReader::new(PathBuf::from("gh"));
+    let candidates = eligibility::select_target(
+        &mut projects,
+        &config.sources,
+        &config.mappings,
+        &repository,
+        issue,
+    )?;
+    if candidates.len() != 1 {
+        return Err(format!(
+            "target selected {} eligible candidates; exactly one required",
+            candidates.len()
+        )
+        .into());
+    }
+    let candidate = &candidates[0];
+    if execute == 0 {
+        return Err("dispatch held: pass --execute to authorize GitHub writes".into());
+    }
+    let (task_id, attempt_id) = (random_id()?, random_id()?);
+    let mut store = StateStore::open(&config.state_root, config.capacity)?;
+    let mut prs = GhPullRequestReader::new(PathBuf::from("gh"));
+    let mut assignments = GhAssignmentWriter {
+        executable: PathBuf::from("gh"),
+    };
+    let mut launcher = ProductionLauncher;
+    match dispatch_one(
+        &mut store,
+        candidate,
+        DispatchDependencies {
+            config: &config,
+            config_revision: &revision,
+            task_id: &task_id,
+            attempt_id: &attempt_id,
+            projects: &mut projects,
+            prs: &mut prs,
+            assignments: &mut assignments,
+            launcher: &mut launcher,
+        },
+    ) {
+        Ok(_) => println!(
+            "{}",
+            json!({"task_id": task_id, "attempt_id": attempt_id, "status": "dispatched"})
+        ),
+        Err(error) => {
+            let status = if store.task_phase(&task_id)?.as_deref() == Some("held") {
+                "held"
+            } else {
+                "failed"
+            };
+            println!(
+                "{}",
+                json!({"task_id": task_id, "attempt_id": attempt_id, "status": status})
+            );
+            return Err(format!("dispatch {status}: {}", safe_error_stage(&error)).into());
+        }
+    }
+    Ok(())
+}
+
+fn safe_error_stage(error: &luthor::coordinator::DispatchError) -> &'static str {
+    use luthor::coordinator::DispatchError;
+    match error {
+        DispatchError::State(_) => "state transition failed",
+        DispatchError::Claim(_) => "claim failed",
+        DispatchError::Worktree(_) => "worktree failed",
+        DispatchError::ChangedClaim => "claim changed",
+        DispatchError::ExistingPr => "pull request exists",
+        DispatchError::PullRequest(_) => "pull request lookup failed",
+        DispatchError::Supervisor(_) => "worker launch failed",
+    }
+}
+
+fn random_id() -> Result<String, std::io::Error> {
+    let mut bytes = [0u8; 16];
+    fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
 }

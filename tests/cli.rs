@@ -1,3 +1,46 @@
+#[test]
+fn dispatch_without_execute_stops_before_write_and_state_creation() {
+    let dir = tempdir().unwrap();
+    let config = dir.path().join("config.json");
+    let response = project(
+        r#"{"__typename":"Issue","id":"ISSUE_NODE","number":7,"repository":{"id":"REPO_NODE","nameWithOwner":"org/tracker"}}"#,
+    );
+    let _ = run_in(dir.path(), &response, 1);
+    let output = Command::new(env!("CARGO_BIN_EXE_luthor"))
+        .args([
+            "dispatch",
+            "--config",
+            config.to_str().unwrap(),
+            "--repository",
+            "org/tracker",
+            "--issue",
+            "7",
+            "--config-revision",
+            "r1",
+        ])
+        .env("PATH", format!("{}:/usr/bin:/bin", dir.path().display()))
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("pass --execute"));
+    assert!(!dir.path().join("state").exists());
+}
+
+#[test]
+fn dispatch_rejects_missing_target_arguments_without_github_access() {
+    let output = Command::new(env!("CARGO_BIN_EXE_luthor"))
+        .args([
+            "dispatch",
+            "--config",
+            "/nonexistent",
+            "--repository",
+            "org/tracker",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("invalid dispatch arguments"));
+}
 use serde_json::Value;
 use std::{fs, os::unix::fs::PermissionsExt, process::Command};
 use tempfile::tempdir;
