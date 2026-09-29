@@ -1,7 +1,10 @@
 use luthor::{
     claim::{AssignmentError, AssignmentWriter},
     config::{CommandTemplate, Config, Mapping, Marker, Source},
-    coordinator::{DispatchDependencies, DispatchError, SupervisorLauncher, dispatch_one},
+    coordinator::{
+        DispatchDependencies, DispatchError, ResumeDependencies, SupervisorLauncher, dispatch_one,
+        resume_one,
+    },
     eligibility::Candidate,
     github::{
         project::{Issue, Page, ProjectItem, ProjectReadError, ProjectReader},
@@ -84,7 +87,17 @@ impl Fixture {
             sources: vec![source.clone()],
             mappings: vec![mapping.clone()],
             initial: command.clone(),
-            resume: command,
+            resume: CommandTemplate {
+                executable: command.executable.clone(),
+                args: vec![
+                    "--session".into(),
+                    "{task.id}".into(),
+                    "--cwd".into(),
+                    "{worktree}".into(),
+                    "-p".into(),
+                    "continue {task.issue_url} {attempt.id}".into(),
+                ],
+            },
         };
         let candidate = Candidate {
             project_id: "project".into(),
@@ -140,12 +153,80 @@ impl Fixture {
         github.prs = prs;
         result
     }
+
+    fn pause(&mut self) {
+        let c = self.candidate.clone();
+        let mut github = FakeGithub::new(&c);
+        self.run(
+            "task-a",
+            &c,
+            &mut github,
+            &mut FakeWriter::default(),
+            &mut FakeLauncher::default(),
+        )
+        .unwrap();
+        let attempt = "attempt-task-a";
+        self.store.record_stop_intent("task-a", attempt).unwrap();
+        // Seed the already-reconciled exit. The supervisor integration tests cover
+        // receipt and process verification; this fixture exercises the coordinator gate.
+        let receipt = json!({
+            "attempt_id": attempt, "child_pid": 123, "boot_identity": "boot",
+            "child_start_identity": "start", "exit_code": null, "signal": 15,
+            "stdout_path": "stdout", "stdout_bytes": 0,
+            "stderr_path": "stderr", "stderr_bytes": 0, "stop_signals": [15]
+        });
+        let connection =
+            rusqlite::Connection::open(self.config.state_root.join("state.sqlite3")).unwrap();
+        connection
+            .execute(
+                "INSERT INTO evidence(task_id,attempt_id,kind,payload) VALUES('task-a',?1,'attempt_exit',?2)",
+                rusqlite::params![attempt, receipt.to_string()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE attempts SET lifecycle='completed',outcome='exit_code=None;signal=Some(15)' WHERE id=?1",
+                [attempt],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE reservations SET status='released' WHERE attempt_id=?1",
+                [attempt],
+            )
+            .unwrap();
+        connection
+            .execute("UPDATE tasks SET state='paused' WHERE id='task-a'", [])
+            .unwrap();
+        assert_eq!(self.store.reservation_count().unwrap(), 0);
+    }
+
+    fn resume(
+        &mut self,
+        github: &mut FakeGithub,
+        launcher: &mut FakeLauncher,
+    ) -> Result<LaunchPlan, DispatchError> {
+        let mut prs = std::mem::take(&mut github.prs);
+        let result = resume_one(
+            &mut self.store,
+            ResumeDependencies {
+                task_id: "task-a",
+                attempt_id: "attempt-next",
+                projects: github,
+                prs: &mut prs,
+                launcher,
+            },
+        );
+        github.prs = prs;
+        result
+    }
 }
 
 struct FakeGithub {
     candidate: Candidate,
     reads: usize,
     change_on: Option<usize>,
+    assigned: bool,
     prs: FakePr,
 }
 impl FakeGithub {
@@ -154,6 +235,7 @@ impl FakeGithub {
             candidate: candidate.clone(),
             reads: 0,
             change_on: None,
+            assigned: false,
             prs: FakePr::default(),
         }
     }
@@ -180,7 +262,7 @@ impl ProjectReader for FakeGithub {
         let c = &self.candidate;
         let assignees = if self.change_on == Some(self.reads) {
             vec!["other".into()]
-        } else if self.reads > 1 {
+        } else if self.reads > 1 || self.assigned {
             vec!["bot".into()]
         } else {
             vec![]
@@ -426,4 +508,157 @@ fn distinct_tasks_keep_selection_and_repository_issue_uniqueness() {
     assert_eq!(launcher.plans.len(), 2);
     assert_ne!(launcher.plans[0].session_id, launcher.plans[1].session_id);
     assert_eq!(f.store.reservation_count().unwrap(), 2);
+}
+
+#[test]
+fn paused_resume_uses_stored_selection_and_launches_one_continuation() {
+    let mut f = Fixture::new(1);
+    f.pause();
+    let mut github = FakeGithub::new(&f.candidate);
+    github.assigned = true;
+    f.config.assignment_login = "other".into();
+    f.config.resume.args.clear();
+    let mut launcher = FakeLauncher::default();
+    let plan = f.resume(&mut github, &mut launcher).unwrap();
+    assert_eq!(github.reads, 1);
+    assert_eq!(github.prs.lookups, 1);
+    assert_eq!(launcher.plans.as_slice(), std::slice::from_ref(&plan));
+    assert_eq!(plan.attempt_id, "attempt-next");
+    assert_eq!(plan.session_id, "task-a");
+    assert_eq!(plan.config_revision, "revision");
+    let selection = f.store.selection_evidence("task-a").unwrap().unwrap();
+    assert_eq!(selection.candidate.source, f.candidate.source);
+    assert_eq!(selection.effective_config.assignment_login, "bot");
+    assert!(plan.args.iter().any(|arg| arg.contains("continue")));
+    assert_eq!(f.store.reservation_count().unwrap(), 1);
+    assert_eq!(
+        f.store.latest_attempt("task-a").unwrap().as_deref(),
+        Some("attempt-next")
+    );
+    assert_eq!(
+        f.store.task_phase("task-a").unwrap().as_deref(),
+        Some("held")
+    );
+    assert!(matches!(
+        f.resume(&mut github, &mut launcher),
+        Err(DispatchError::State(StateError::LaunchBlocked))
+    ));
+    assert_eq!(launcher.plans.len(), 1);
+}
+
+#[test]
+fn resume_pr_present_or_failed_lookup_holds_without_new_attempt() {
+    for fail in [false, true] {
+        let mut f = Fixture::new(1);
+        f.pause();
+        let mut github = FakeGithub::new(&f.candidate);
+        github.assigned = true;
+        if fail {
+            github.prs.fail_on = Some(1);
+        } else {
+            github.prs.present_on = Some(1);
+        }
+        let mut launcher = FakeLauncher::default();
+        let result = f.resume(&mut github, &mut launcher);
+        assert!(if fail {
+            matches!(result, Err(DispatchError::PullRequest(_)))
+        } else {
+            matches!(result, Err(DispatchError::ExistingPr))
+        });
+        assert_eq!(
+            f.store.held_reason("task-a").unwrap().as_deref(),
+            Some(if fail {
+                "resume PR read failed"
+            } else {
+                "resume PR present"
+            })
+        );
+        assert_eq!(f.store.reservation_count().unwrap(), 0);
+        assert_eq!(
+            f.store.latest_attempt("task-a").unwrap().as_deref(),
+            Some("attempt-task-a")
+        );
+        assert!(launcher.plans.is_empty());
+    }
+}
+
+#[test]
+fn resume_changed_claim_holds_without_new_attempt() {
+    let mut f = Fixture::new(1);
+    f.pause();
+    let mut github = FakeGithub::new(&f.candidate);
+    github.change_on = Some(1);
+    let mut launcher = FakeLauncher::default();
+    assert!(matches!(
+        f.resume(&mut github, &mut launcher),
+        Err(DispatchError::ChangedClaim)
+    ));
+    assert_eq!(github.prs.lookups, 0);
+    assert_eq!(
+        f.store.held_reason("task-a").unwrap().as_deref(),
+        Some("resume claim changed")
+    );
+    assert_eq!(f.store.reservation_count().unwrap(), 0);
+    assert_eq!(
+        f.store.latest_attempt("task-a").unwrap().as_deref(),
+        Some("attempt-task-a")
+    );
+    assert!(launcher.plans.is_empty());
+}
+
+#[test]
+fn resume_without_paused_reconciled_state_cannot_create_attempt() {
+    let mut f = Fixture::new(1);
+    let mut github = FakeGithub::new(&f.candidate);
+    let mut launcher = FakeLauncher::default();
+    assert!(matches!(
+        f.resume(&mut github, &mut launcher),
+        Err(DispatchError::State(StateError::LaunchBlocked))
+    ));
+    assert_eq!(f.store.task_count().unwrap(), 0);
+    f.pause();
+    f.store.set_task_phase("task-a", "held").unwrap();
+    assert!(matches!(
+        f.resume(&mut github, &mut launcher),
+        Err(DispatchError::State(StateError::LaunchBlocked))
+    ));
+    assert_eq!(github.reads, 0);
+    assert_eq!(github.prs.lookups, 0);
+    assert_eq!(f.store.reservation_count().unwrap(), 0);
+    assert_eq!(
+        f.store.latest_attempt("task-a").unwrap().as_deref(),
+        Some("attempt-task-a")
+    );
+    assert!(launcher.plans.is_empty());
+}
+
+#[test]
+fn failed_resume_dispatch_retains_reservation_and_never_retries() {
+    let mut f = Fixture::new(1);
+    f.pause();
+    let mut github = FakeGithub::new(&f.candidate);
+    github.assigned = true;
+    let mut launcher = FakeLauncher {
+        fail: true,
+        ..Default::default()
+    };
+    assert!(matches!(
+        f.resume(&mut github, &mut launcher),
+        Err(DispatchError::Supervisor(_))
+    ));
+    assert_eq!(launcher.plans.len(), 1);
+    assert_eq!(
+        f.store.held_reason("task-a").unwrap().as_deref(),
+        Some("resume preparation or dispatch failed")
+    );
+    assert_eq!(f.store.reservation_count().unwrap(), 1);
+    assert_eq!(
+        f.store.latest_attempt("task-a").unwrap().as_deref(),
+        Some("attempt-next")
+    );
+    assert!(matches!(
+        f.resume(&mut github, &mut launcher),
+        Err(DispatchError::State(StateError::LaunchBlocked))
+    ));
+    assert_eq!(launcher.plans.len(), 1);
 }

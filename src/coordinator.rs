@@ -120,3 +120,72 @@ where
     }
     result
 }
+
+pub struct ResumeDependencies<'a, P, Q, L> {
+    pub task_id: &'a str,
+    pub attempt_id: &'a str,
+    pub projects: &'a mut P,
+    pub prs: &'a mut Q,
+    pub launcher: &'a mut L,
+}
+
+/// Continues a previously reconciled, paused task using only its stored selection.
+/// Failed evidence checks hold the task without reserving another attempt.
+pub fn resume_one<P, Q, L>(
+    store: &mut StateStore,
+    dependencies: ResumeDependencies<'_, P, Q, L>,
+) -> Result<LaunchPlan, DispatchError>
+where
+    P: ProjectReader,
+    Q: PullRequestReader,
+    L: SupervisorLauncher,
+{
+    let ResumeDependencies {
+        task_id,
+        attempt_id,
+        projects,
+        prs,
+        launcher,
+    } = dependencies;
+    // Do not change the phase of an active or unverified task to held.
+    store.resume_context(task_id)?;
+    let result = (|| {
+        let selection = store
+            .selection_evidence(task_id)?
+            .ok_or(StateError::InvalidSelection)?;
+        let candidate = &selection.candidate;
+        let (_, issue) = claim::fresh(projects, candidate)?;
+        if selection
+            .effective_config
+            .assignment_login
+            .trim()
+            .is_empty()
+            || issue.assignees != [selection.effective_config.assignment_login.as_str()]
+        {
+            return Err(DispatchError::ChangedClaim);
+        }
+        if lookup(
+            prs,
+            &candidate.mapping.code_repository,
+            &candidate.issue_url,
+        )? != LookupResult::Absent
+        {
+            return Err(DispatchError::ExistingPr);
+        }
+        let plan = supervisor::prepare_resume(store, task_id, attempt_id)?;
+        launcher.launch(store, &plan)?;
+        Ok(plan)
+    })();
+    if let Err(error) = &result {
+        let reason = match error {
+            DispatchError::Claim(_) | DispatchError::ChangedClaim => "resume claim changed",
+            DispatchError::ExistingPr => "resume PR present",
+            DispatchError::PullRequest(_) => "resume PR read failed",
+            DispatchError::Supervisor(_) => "resume preparation or dispatch failed",
+            DispatchError::State(_) => "resume state transition failed",
+            DispatchError::Worktree(_) => "resume worktree failed",
+        };
+        store.hold_task(task_id, reason)?;
+    }
+    result
+}
