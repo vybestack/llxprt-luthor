@@ -39,3 +39,9 @@ tmp/
 kitty-ops/ops-index.jsonl
 kitty-ops/lifecycle.jsonl
 kitty-specs/*/.kittify/dossiers/
+
+# Rust build artifacts
+/target/
+
+# Spec Kitty lane runtime metadata
+/.spec-kitty/
