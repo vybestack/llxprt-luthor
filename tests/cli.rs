@@ -196,7 +196,24 @@ fn status_and_show_work_while_coordinator_owns_lock() {
     assert_eq!(status["capacity"]["limit"], 2);
     assert_eq!(status["tasks"][0]["phase"], "held");
     assert_eq!(status["tasks"][0]["reserved_slot"], false);
+    assert_eq!(status["tasks"][0]["latest_attempt_id"], Value::Null);
+    assert_eq!(status["tasks"][0]["latest_attempt_outcome"], Value::Null);
+    assert_eq!(status["tasks"][0]["pr_state"], "unavailable");
+    assert!(
+        status["tasks"][0]["pr_unavailable_reason"]
+            .as_str()
+            .is_some()
+    );
+    assert_eq!(status["reserved_slot_count"], 0);
+    assert_eq!(status["latest_telemetry"], Value::Null);
     let shown = f.run(&["show", "task"]).unwrap();
+    assert_eq!(shown["pr_state"], "unavailable");
+    assert_eq!(shown["last_observed_pr"], Value::Null);
+    assert_eq!(
+        shown["last_observed_pr_unavailable_reason"],
+        "no verified stored PR proof"
+    );
+    assert_eq!(shown["output_log_status"], "unavailable");
     assert_eq!(shown["last_output_age_seconds"], Value::Null);
     assert_eq!(
         shown["output_age_unavailable_reason"],

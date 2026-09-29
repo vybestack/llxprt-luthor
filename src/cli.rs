@@ -9,6 +9,8 @@ use std::{
 };
 use thiserror::Error;
 
+const SILENCE_WARNING_THRESHOLD_SECONDS: u64 = 300;
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum CliError {
     #[error("invalid command arguments")]
@@ -61,20 +63,35 @@ fn status(conn: &Connection) -> Result<Value, CliError> {
         .map_err(|_| CliError::Database)?;
     let mut stmt = conn.prepare("SELECT t.id,t.state,t.repository,t.issue_number,
         EXISTS(SELECT 1 FROM reservations r WHERE r.task_id=t.id AND r.status='reserved'),
-        (SELECT payload FROM evidence e WHERE e.task_id=t.id AND e.kind='held_reason' ORDER BY sequence DESC LIMIT 1)
+        (SELECT payload FROM evidence e WHERE e.task_id=t.id AND e.kind='held_reason' ORDER BY sequence DESC LIMIT 1),
+        (SELECT a.id FROM attempts a WHERE a.task_id=t.id ORDER BY a.rowid DESC LIMIT 1),
+        (SELECT a.outcome FROM attempts a WHERE a.task_id=t.id ORDER BY a.rowid DESC LIMIT 1),
+        (SELECT a.lifecycle FROM attempts a WHERE a.task_id=t.id ORDER BY a.rowid DESC LIMIT 1),
+        (SELECT e.payload FROM evidence e WHERE e.task_id=t.id AND e.kind='pause_pr_lookup' ORDER BY e.sequence DESC LIMIT 1)
         FROM tasks t ORDER BY t.created_at,t.id").map_err(|_| CliError::Database)?;
     let tasks = stmt
         .query_map([], |r| {
             Ok(json!({
                 "task_id":r.get::<_,String>(0)?, "phase":r.get::<_,String>(1)?,
                 "repository":r.get::<_,String>(2)?, "issue_number":r.get::<_,i64>(3)?,
-                "reserved_slot":r.get::<_,bool>(4)?, "reason":r.get::<_,Option<String>>(5)?
+                "reserved_slot":r.get::<_,bool>(4)?, "reason":r.get::<_,Option<String>>(5)?,
+                "latest_attempt_id":r.get::<_,Option<String>>(6)?,
+                "latest_attempt_outcome":r.get::<_,Option<String>>(7)?,
+                "latest_attempt_outcome_unavailable_reason":if r.get::<_,Option<String>>(7)?.is_none(){Some("attempt has no verified exit outcome")}else{None},
+                "latest_attempt_lifecycle":r.get::<_,Option<String>>(8)?,
+                "pr_state":"unavailable",
+                "pr_unavailable_reason":"status does not perform a fresh exhaustive PR read",
+                "last_observed_pr":r.get::<_,Option<String>>(9)?
             }))
         })
         .map_err(|_| CliError::Database)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| CliError::Database)?;
-    Ok(json!({"tasks":tasks,"capacity":{"reserved":reserved,"limit":capacity}}))
+    Ok(
+        json!({"tasks":tasks,"capacity":{"reserved":reserved,"limit":capacity},
+        "reserved_slot_count":reserved,"latest_telemetry":null,
+        "telemetry_unavailable_reason":"no telemetry evidence recorded"}),
+    )
 }
 
 fn events(conn: &Connection, table: &str, task: &str) -> Result<Vec<Value>, CliError> {
@@ -203,6 +220,16 @@ fn show(conn: &Connection, root: &Path, task: &str) -> Result<Value, CliError> {
         .rev()
         .find(|e| e["kind"] == "held_reason")
         .and_then(|e| e["detail"].as_str());
+    let latest_attempt = attempts.last();
+    let latest_attempt_id = latest_attempt.and_then(|a| a["id"].as_str());
+    let latest_attempt_outcome = latest_attempt.and_then(|a| a["outcome"].as_str());
+    let output_silence_warning =
+        last_output_age_seconds.is_some_and(|age| age >= SILENCE_WARNING_THRESHOLD_SECONDS);
+    let last_observed_pr = evidence
+        .iter()
+        .rev()
+        .find(|e| e["kind"] == "pause_pr_lookup")
+        .map(|event| json!({"proof":event["detail"],"observed_at":event["created_at"]}));
     Ok(
         json!({"task":{"id":task,"repository":repository,"issue_number":number,
         "issue_url":candidate.as_ref().and_then(|v|v.get("issue_url")),
@@ -212,7 +239,17 @@ fn show(conn: &Connection, root: &Path, task: &str) -> Result<Value, CliError> {
         "intents":intents,"evidence":evidence,"session":session,
         "worktree":worktree.and_then(|v|serde_json::from_str::<Value>(&v).ok()),
         "last_output_age_seconds":last_output_age_seconds,
-        "output_age_unavailable_reason":output_age_unavailable_reason}),
+        "output_age_unavailable_reason":output_age_unavailable_reason,
+        "output_log_status":if last_output_age_seconds.is_some(){"available"}else{"unavailable"},
+        "output_silence_warning":output_silence_warning,
+        "silence_warning_threshold_seconds":SILENCE_WARNING_THRESHOLD_SECONDS,
+        "latest_attempt_id":latest_attempt_id,
+        "latest_attempt_outcome":latest_attempt_outcome,
+        "latest_attempt_outcome_unavailable_reason":if latest_attempt_outcome.is_none(){Some("attempt has no verified exit outcome")}else{None},
+        "pr_state":"unavailable",
+        "pr_unavailable_reason":"show does not perform a fresh exhaustive PR read",
+        "last_observed_pr":last_observed_pr,
+        "last_observed_pr_unavailable_reason":if last_observed_pr.is_none(){Some("no verified stored PR proof")}else{None}}),
     )
 }
 
