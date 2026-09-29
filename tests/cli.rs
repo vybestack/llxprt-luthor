@@ -200,6 +200,54 @@ fn show_reports_events_issue_mapping_session_and_receipt_without_secrets() {
 }
 
 #[test]
+fn status_and_show_report_missing_or_unsafe_active_logs_as_unavailable() {
+    let f = Fixture::new();
+    f.task("task");
+    f.attempt("task", "attempt", "session");
+
+    let status = f.run(&["status"]).unwrap();
+    let task = &status["tasks"][0];
+    assert_eq!(task["observed_stdout_bytes"], Value::Null);
+    assert_eq!(task["observed_stderr_bytes"], Value::Null);
+    assert_eq!(
+        task["observed_bytes_unavailable_reason"],
+        "active attempt log files are missing or unsafe"
+    );
+    assert_eq!(task["byte_counts_are_observational"], true);
+
+    let shown = f.run(&["show", "task"]).unwrap();
+    assert_eq!(shown["observed_stdout_bytes"], Value::Null);
+    assert_eq!(shown["observed_stderr_bytes"], Value::Null);
+    assert_eq!(
+        shown["observed_bytes_unavailable_reason"],
+        "active attempt log files are missing or unsafe"
+    );
+
+    let (stdout, stderr) = f.logs("attempt");
+    #[cfg(unix)]
+    {
+        fs::remove_file(&stdout).unwrap();
+        std::os::unix::fs::symlink(f.root().join("outside"), &stdout).unwrap();
+        fs::write(f.root().join("outside"), "unsafe").unwrap();
+        let status = f.run(&["status"]).unwrap();
+        assert_eq!(status["tasks"][0]["observed_stdout_bytes"], Value::Null);
+        assert_eq!(status["tasks"][0]["observed_stderr_bytes"], Value::Null);
+        assert_eq!(
+            status["tasks"][0]["observed_bytes_unavailable_reason"],
+            "active attempt log files are missing or unsafe"
+        );
+        let shown = f.run(&["show", "task"]).unwrap();
+        assert_eq!(shown["observed_stdout_bytes"], Value::Null);
+        assert_eq!(shown["observed_stderr_bytes"], Value::Null);
+        assert_eq!(
+            shown["observed_bytes_unavailable_reason"],
+            "active attempt log files are missing or unsafe"
+        );
+    }
+    let _ = stderr;
+}
+
+#[test]
 fn status_and_show_work_while_coordinator_owns_lock() {
     let f = Fixture::new();
     f.task("task");

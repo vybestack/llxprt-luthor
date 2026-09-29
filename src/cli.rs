@@ -487,6 +487,7 @@ fn status(conn: &Connection, root: &Path) -> Result<Value, CliError> {
                 "observed_stdout_bytes":observed_bytes.map(|bytes| bytes[0]),
                 "observed_stderr_bytes":observed_bytes.map(|bytes| bytes[1]),
                 "observed_bytes_unavailable_reason":observed_unavailable,
+                "byte_counts_are_observational":true,
                 "observed_at_utc":observed_bytes.and_then(|_| utc_now()),
                 "output_silence_warning":age.is_some_and(|seconds| seconds >= SILENCE_WARNING_THRESHOLD_SECONDS),
                 "silence_warning_threshold_seconds":SILENCE_WARNING_THRESHOLD_SECONDS,
