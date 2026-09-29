@@ -285,3 +285,31 @@ fn pagination_failure_is_not_an_empty_candidate_set() {
         .is_err()
     );
 }
+
+#[test]
+fn non_issue_item_aborts_discovery_even_when_an_issue_is_eligible() {
+    let mut fake = Fake {
+        pages: vec![Page {
+            items: vec![item("I1", "N7", vec![]), item("I2", "", vec![])],
+            has_next_page: false,
+            end_cursor: None,
+        }],
+        issues: vec![issue("open", vec!["ready"], vec![], None)],
+        calls: 0,
+        fail_page: false,
+    };
+    let result = select(
+        &mut fake,
+        &[source(
+            Marker::Label {
+                name: "ready".into(),
+            },
+            None,
+        )],
+        &[mapping()],
+    );
+    assert!(matches!(
+        result,
+        Err(luthor::eligibility::EligibilityError::Project(_))
+    ));
+}

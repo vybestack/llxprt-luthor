@@ -44,6 +44,8 @@ pub enum ProjectError {
     Inconsistent { item_id: String, issue_id: String },
     #[error("duplicate issue identity {0}")]
     Duplicate(String),
+    #[error("Project item {0} has an empty issue identity")]
+    InvalidItem(String),
 }
 
 pub trait ProjectReader {
@@ -124,9 +126,18 @@ impl ProjectReader for GhProjectReader {
             let item_id = required_string(node, "id", "invalid-project-item")?;
             let content = node
                 .get("content")
-                .ok_or_else(|| "missing-project-content".to_owned())?;
-            if content.get("__typename").and_then(Value::as_str) != Some("Issue") {
-                continue;
+                .ok_or_else(|| format!("project item {item_id} has missing content"))?;
+            if content.is_null() {
+                return Err(format!("project item {item_id} has null content"));
+            }
+            let typename = content
+                .get("__typename")
+                .and_then(Value::as_str)
+                .ok_or_else(|| format!("project item {item_id} is missing content typename"))?;
+            if typename != "Issue" {
+                return Err(format!(
+                    "project item {item_id} has unsupported content type {typename}"
+                ));
             }
             let issue_node_id = required_string(content, "id", "invalid-project-issue")?;
             let number = content
@@ -284,7 +295,7 @@ pub fn enumerate<R: ProjectReader>(
                 return Err(ProjectError::Duplicate(item.item_id));
             }
             if item.issue_node_id.is_empty() {
-                continue;
+                return Err(ProjectError::InvalidItem(item.item_id));
             }
             let issue = reader
                 .issue(&item)

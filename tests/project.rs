@@ -72,8 +72,18 @@ fn graphql_errors_and_incomplete_field_values_fail() {
     );
 }
 #[test]
-fn skips_non_issue_nodes() {
-    let json = r#"{"data":{"node":{"items":{"nodes":[{"id":"PVTI2","content":{"__typename":"DraftIssue","title":"draft"},"fieldValues":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}"#;
-    let (_dir, mut r) = reader(json);
-    assert!(r.page("P", None).unwrap().items.is_empty());
+fn rejects_non_issue_project_items_with_item_identity() {
+    for content in [
+        r#"{"__typename":"DraftIssue","title":"draft"}"#,
+        r#"{"__typename":"PullRequest","number":4}"#,
+        "null",
+        "{}",
+    ] {
+        let json = format!(
+            r#"{{"data":{{"node":{{"items":{{"nodes":[{{"id":"PVTI2","content":{content},"fieldValues":{{"nodes":[],"pageInfo":{{"hasNextPage":false,"endCursor":null}}}}}}],"pageInfo":{{"hasNextPage":false,"endCursor":null}}}}}}}}}}"#
+        );
+        let (_dir, mut r) = reader(&json);
+        let error = r.page("P", None).unwrap_err();
+        assert!(error.contains("PVTI2"), "{error}");
+    }
 }
