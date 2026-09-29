@@ -533,3 +533,71 @@ fn configured_milestone_selection_is_persisted() {
         candidate
     );
 }
+
+#[test]
+fn verified_open_pr_requires_a_terminal_attempt() {
+    use luthor::{
+        github::pull_request::PullRequestEvidence,
+        pr_evidence::{ExpectedPr, VerifiedOpenPr},
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = StateStore::open(dir.path(), 1).unwrap();
+    store
+        .create_task("task", &candidate("issue", 4), "rev", &config())
+        .unwrap();
+
+    let expected = ExpectedPr {
+        issue_url: "https://github.com/org/tracker/issues/4".into(),
+        repository_id: 10,
+        repository: "org/code".into(),
+        base_branch: "main".into(),
+        head_repository_id: 11,
+        head_repository: "bot/fork".into(),
+        task_branch: "luthor/task-4".into(),
+        allowed_author: "bot".into(),
+        current_identity: "bot".into(),
+    };
+    let proof = VerifiedOpenPr::from_matching(
+        PullRequestEvidence {
+            id: 9,
+            number: 4,
+            url: "https://github.com/org/code/pull/4".into(),
+            repository_id: 10,
+            repository: "org/code".into(),
+            base_repository_id: 10,
+            base_repository: "org/code".into(),
+            base_branch: "main".into(),
+            head_repository_id: 11,
+            head_repository: "bot/fork".into(),
+            head_branch: "luthor/task-4".into(),
+            author: "bot".into(),
+            draft: false,
+            tracker_issue_url: "https://github.com/org/tracker/issues/4".into(),
+            body: "Tracker-Issue: https://github.com/org/tracker/issues/4".into(),
+            checks: vec![],
+            created_at: "2026-09-29T00:00:00Z".into(),
+            commit_sha: "abc123".into(),
+        },
+        &expected,
+        "bot",
+        "attempt-1",
+        42,
+    )
+    .unwrap();
+
+    assert!(matches!(
+        store.record_verified_open_pr("task", "attempt-1", &proof),
+        Err(StateError::LaunchBlocked)
+    ));
+    assert_ne!(
+        store.task_phase("task").unwrap().as_deref(),
+        Some("pr_complete")
+    );
+    assert!(
+        !store
+            .evidence_kinds("task")
+            .unwrap()
+            .contains(&"verified_open_pr".to_owned())
+    );
+}
