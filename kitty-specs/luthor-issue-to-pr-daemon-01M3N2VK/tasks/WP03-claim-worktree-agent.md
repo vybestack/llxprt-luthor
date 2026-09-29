@@ -56,6 +56,8 @@ owned_files:
 - tests/coordinator.rs
 - tests/cli.rs
 - tests/daemon.rs
+- tests/state.rs
+- tests/eligibility.rs
 tags: []
 tracker_refs: []
 ---
