@@ -1,7 +1,7 @@
 {
-  "event_count": 42,
-  "last_event_id": "01M3P45B0XM6DHQPCJ792KWCSM",
-  "materialized_at": "2026-09-29T08:23:07.549782+00:00",
+  "event_count": 43,
+  "last_event_id": "01M3P486MPNJ5XB7DQC331DF6S",
+  "materialized_at": "2026-09-29T08:24:41.366370+00:00",
   "mission_number": "",
   "mission_slug": "luthor-issue-to-pr-daemon-01M3N2VK",
   "mission_type": "software-dev",
@@ -11,9 +11,9 @@
     "canceled": 0,
     "claimed": 0,
     "done": 0,
-    "for_review": 1,
+    "for_review": 0,
     "in_progress": 0,
-    "in_review": 0,
+    "in_review": 1,
     "planned": 3
   },
   "work_packages": {
@@ -54,9 +54,9 @@
       "agent_profile": "__resolved_profile_absent__",
       "agent_profile_version": "__resolved_profile_version_absent__",
       "force_count": 4,
-      "lane": "for_review",
-      "last_event_id": "01M3P45B0XM6DHQPCJ792KWCSM",
-      "last_transition_at": "2026-09-29T08:23:07.549782+00:00",
+      "lane": "in_review",
+      "last_event_id": "01M3P486MPNJ5XB7DQC331DF6S",
+      "last_transition_at": "2026-09-29T08:24:41.366370+00:00",
       "model": "__resolved_model_absent__",
       "provider": "__resolved_provider_absent__",
       "review": null,
@@ -66,9 +66,9 @@
         "reviewer": "deep-bug-investigator",
         "verdict": "changes_requested"
       },
-      "role": "implementer",
-      "shell_pid": null,
-      "shell_pid_created_at": null,
+      "role": "reviewer",
+      "shell_pid": 91727,
+      "shell_pid_created_at": "1790670278.578609",
       "subtasks": {
         "T003": "done",
         "T004": "done",
