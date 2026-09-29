@@ -13,7 +13,11 @@ pub struct Candidate {
     pub issue_node_id: String,
     pub issue_number: u64,
     pub issue_url: String,
+    pub tracker_repo_id: String,
     pub milestone_id: Option<String>,
+    pub milestone_title: Option<String>,
+    pub observed_at_unix_secs: u64,
+    pub marker: Marker,
     pub mapping: Mapping,
     pub source: Source,
 }
@@ -68,7 +72,11 @@ pub fn select<R: ProjectReader>(
                 issue_node_id: issue.node_id.clone(),
                 issue_number: issue.number,
                 issue_url: issue.url.clone(),
+                tracker_repo_id: issue.tracker_repo_id.clone(),
                 milestone_id: issue.milestone_id.clone(),
+                milestone_title: issue.milestone.clone(),
+                observed_at_unix_secs: issue.observed_at_unix_secs,
+                marker: source.ready_marker.clone(),
                 mapping: (*mapping).clone(),
                 source: source.clone(),
             };

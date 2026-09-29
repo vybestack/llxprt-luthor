@@ -2,6 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
     process::Command,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use serde_json::Value;
@@ -29,6 +30,7 @@ pub struct Issue {
     pub labels: Vec<String>,
     pub milestone: Option<String>,
     pub milestone_id: Option<String>,
+    pub observed_at_unix_secs: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -445,6 +447,10 @@ impl ProjectReader for GhProjectReader {
             .iter()
             .map(|label| required_string(label, "name", "invalid-issue-labels"))
             .collect::<Result<Vec<_>, _>>()?;
+        let observed_at_unix_secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| format!("system clock precedes Unix epoch: {error}"))?
+            .as_secs();
         let (milestone, milestone_id) = match value.get("milestone") {
             Some(Value::Null) => (None, None),
             Some(milestone) => (
@@ -472,6 +478,7 @@ impl ProjectReader for GhProjectReader {
             labels,
             milestone,
             milestone_id,
+            observed_at_unix_secs,
         })
     }
 }

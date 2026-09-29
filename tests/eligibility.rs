@@ -67,6 +67,7 @@ fn issue(state: &str, labels: Vec<&str>, assignees: Vec<&str>, milestone: Option
         labels: labels.into_iter().map(str::to_string).collect(),
         milestone: milestone.map(str::to_string),
         milestone_id: milestone.map(|_| "MILESTONE1".to_string()),
+        observed_at_unix_secs: 1_700_000_000,
     }
 }
 fn source(marker: Marker, milestone: Option<&str>) -> Source {
@@ -121,6 +122,15 @@ fn requires_membership_direct_open_unassigned_exact_label_and_milestone() {
         "https://github.com/org/tracker/issues/7"
     );
     assert_eq!(candidates[0].milestone_id.as_deref(), Some("MILESTONE1"));
+    assert_eq!(candidates[0].milestone_title.as_deref(), Some("0.12.0"));
+    assert_eq!(candidates[0].tracker_repo_id, "R1");
+    assert_eq!(candidates[0].observed_at_unix_secs, 1_700_000_000);
+    assert_eq!(
+        candidates[0].marker,
+        Marker::Label {
+            name: "luthor-ready".into()
+        }
+    );
     let mut wrong = Fake {
         issues: vec![issue("open", vec!["OK for Luther"], vec![], Some("0.12.0"))],
         calls: 0,
@@ -140,6 +150,47 @@ fn requires_membership_direct_open_unassigned_exact_label_and_milestone() {
         .unwrap()
         .is_empty()
     );
+}
+
+#[test]
+fn same_issue_number_in_two_repositories_keeps_distinct_stable_ids() {
+    let mut first_item = item("I1", "N7-A", vec![]);
+    first_item.issue_number = 7;
+    let mut second_item = item("I2", "N7-B", vec![]);
+    second_item.repository = "org/other".into();
+    second_item.tracker_repo_id = "R2".into();
+    second_item.issue_number = 7;
+    let mut first_issue = issue("open", vec!["ready"], vec![], None);
+    first_issue.node_id = "N7-A".into();
+    let mut second_issue = first_issue.clone();
+    second_issue.node_id = "N7-B".into();
+    second_issue.repository = "org/other".into();
+    second_issue.tracker_repo_id = "R2".into();
+    second_issue.url = "https://github.com/org/other/issues/7".into();
+    let mut fake = Fake {
+        pages: vec![Page {
+            items: vec![first_item, second_item],
+            has_next_page: false,
+            end_cursor: None,
+        }],
+        issues: vec![first_issue, second_issue],
+        calls: 0,
+        fail_page: false,
+    };
+    let mut both_repos = source(
+        Marker::Label {
+            name: "ready".into(),
+        },
+        None,
+    );
+    both_repos.repositories.push("org/other".into());
+    let mut second_mapping = mapping();
+    second_mapping.tracker_repository = "org/other".into();
+    let candidates = select(&mut fake, &[both_repos], &[mapping(), second_mapping]).unwrap();
+    assert_eq!(candidates.len(), 2);
+    assert_eq!(candidates[0].issue_number, candidates[1].issue_number);
+    assert_ne!(candidates[0].issue_node_id, candidates[1].issue_node_id);
+    assert_ne!(candidates[0].repository, candidates[1].repository);
 }
 
 #[test]
