@@ -36,7 +36,7 @@ pub fn execute(root: &Path, args: &[String]) -> Result<String, CliError> {
     let command = args.first().ok_or(CliError::Arguments)?;
     let conn = database(root)?;
     let output = match command.as_str() {
-        "status" if args.len() == 1 => status(&conn)?,
+        "status" if args.len() == 1 => status(&conn, root)?,
         "show" if args.len() == 2 => show(&conn, root, &args[1])?,
         "logs" if args.len() == 2 || args.len() == 4 && args[2] == "--attempt" => {
             logs(&conn, root, &args[1], args.get(3).map(String::as_str))?
@@ -46,7 +46,7 @@ pub fn execute(root: &Path, args: &[String]) -> Result<String, CliError> {
     serde_json::to_string(&output).map_err(|_| CliError::Serialization)
 }
 
-fn status(conn: &Connection) -> Result<Value, CliError> {
+fn status(conn: &Connection, root: &Path) -> Result<Value, CliError> {
     let capacity: i64 = conn
         .query_row(
             "SELECT value FROM state_meta WHERE key='capacity'",
@@ -64,6 +64,8 @@ fn status(conn: &Connection) -> Result<Value, CliError> {
     let mut stmt = conn.prepare("SELECT t.id,t.state,t.repository,t.issue_number,
         EXISTS(SELECT 1 FROM reservations r WHERE r.task_id=t.id AND r.status='reserved'),
         (SELECT payload FROM evidence e WHERE e.task_id=t.id AND e.kind='held_reason' ORDER BY sequence DESC LIMIT 1),
+        (SELECT a.id FROM attempts a JOIN reservations r ON r.attempt_id=a.id
+         WHERE a.task_id=t.id AND r.status='reserved' ORDER BY a.rowid DESC LIMIT 1),
         (SELECT a.id FROM attempts a WHERE a.task_id=t.id ORDER BY a.rowid DESC LIMIT 1),
         (SELECT a.outcome FROM attempts a WHERE a.task_id=t.id ORDER BY a.rowid DESC LIMIT 1),
         (SELECT a.lifecycle FROM attempts a WHERE a.task_id=t.id ORDER BY a.rowid DESC LIMIT 1),
@@ -75,13 +77,18 @@ fn status(conn: &Connection) -> Result<Value, CliError> {
                 "task_id":r.get::<_,String>(0)?, "phase":r.get::<_,String>(1)?,
                 "repository":r.get::<_,String>(2)?, "issue_number":r.get::<_,i64>(3)?,
                 "reserved_slot":r.get::<_,bool>(4)?, "reason":r.get::<_,Option<String>>(5)?,
-                "latest_attempt_id":r.get::<_,Option<String>>(6)?,
-                "latest_attempt_outcome":r.get::<_,Option<String>>(7)?,
-                "latest_attempt_outcome_unavailable_reason":if r.get::<_,Option<String>>(7)?.is_none(){Some("attempt has no verified exit outcome")}else{None},
-                "latest_attempt_lifecycle":r.get::<_,Option<String>>(8)?,
+                "last_output_age_seconds":r.get::<_,Option<String>>(6)?.as_deref().and_then(|id| output_time(root,id)).map(|timestamp| now().saturating_sub(timestamp)),
+                "output_age_unavailable_reason":if r.get::<_,Option<String>>(6)?.is_none(){Some("no reserved attempt")}else if r.get::<_,Option<String>>(6)?.as_deref().and_then(|id| output_time(root,id)).is_none(){Some("no verified output log data")}else{None},
+                "output_log_status":if r.get::<_,Option<String>>(6)?.as_deref().and_then(|id| output_time(root,id)).is_some(){"available"}else{"unavailable"},
+                "output_silence_warning":r.get::<_,Option<String>>(6)?.as_deref().and_then(|id| output_time(root,id)).is_some_and(|timestamp| now().saturating_sub(timestamp)>=SILENCE_WARNING_THRESHOLD_SECONDS),
+                "silence_warning_threshold_seconds":SILENCE_WARNING_THRESHOLD_SECONDS,
+                "latest_attempt_id":r.get::<_,Option<String>>(7)?,
+                "latest_attempt_outcome":r.get::<_,Option<String>>(8)?,
+                "latest_attempt_outcome_unavailable_reason":if r.get::<_,Option<String>>(8)?.is_none(){Some("attempt has no verified exit outcome")}else{None},
+                "latest_attempt_lifecycle":r.get::<_,Option<String>>(9)?,
                 "pr_state":"unavailable",
                 "pr_unavailable_reason":"status does not perform a fresh exhaustive PR read",
-                "last_observed_pr":r.get::<_,Option<String>>(9)?
+                "last_observed_pr":r.get::<_,Option<String>>(10)?
             }))
         })
         .map_err(|_| CliError::Database)?

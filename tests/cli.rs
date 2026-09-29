@@ -206,6 +206,12 @@ fn status_and_show_work_while_coordinator_owns_lock() {
     );
     assert_eq!(status["reserved_slot_count"], 0);
     assert_eq!(status["latest_telemetry"], Value::Null);
+    assert_eq!(status["tasks"][0]["last_output_age_seconds"], Value::Null);
+    assert_eq!(status["tasks"][0]["output_silence_warning"], false);
+    assert_eq!(
+        status["tasks"][0]["output_age_unavailable_reason"],
+        "no reserved attempt"
+    );
     let shown = f.run(&["show", "task"]).unwrap();
     assert_eq!(shown["pr_state"], "unavailable");
     assert_eq!(shown["last_observed_pr"], Value::Null);
@@ -222,6 +228,50 @@ fn status_and_show_work_while_coordinator_owns_lock() {
     assert_eq!(f.run(&["show", "missing"]), Err(CliError::TaskNotFound));
     assert_eq!(f.run(&["logs", "missing"]), Err(CliError::TaskNotFound));
     assert_eq!(f.run(&["logs", "task"]), Err(CliError::AttemptNotFound));
+}
+
+#[test]
+fn status_reports_output_age_and_silence_without_exposing_log_contents() {
+    let f = Fixture::new();
+    f.task("active");
+    f.attempt("active", "old-attempt", "session");
+    let (stdout, stderr) = f.logs("old-attempt");
+    fs::write(&stderr, "private-log-secret").unwrap();
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(600);
+    let times = fs::FileTimes::new().set_modified(old);
+    fs::File::options()
+        .write(true)
+        .open(&stdout)
+        .unwrap()
+        .set_times(times)
+        .unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&stderr)
+        .unwrap()
+        .set_times(times)
+        .unwrap();
+
+    let status = f.run(&["status"]).unwrap();
+    let task = &status["tasks"][0];
+    assert!(task["last_output_age_seconds"].as_u64().unwrap() >= 300);
+    assert_eq!(task["output_age_unavailable_reason"], Value::Null);
+    assert_eq!(task["output_silence_warning"], true);
+    assert_eq!(task["silence_warning_threshold_seconds"], 300);
+    assert_eq!(task["latest_attempt_id"], "old-attempt");
+    assert!(!status.to_string().contains("hello"));
+    assert!(!status.to_string().contains("private-log-secret"));
+
+    fs::write(stdout, "").unwrap();
+    fs::write(stderr, "").unwrap();
+    let status = f.run(&["status"]).unwrap();
+    let task = &status["tasks"][0];
+    assert_eq!(task["last_output_age_seconds"], Value::Null);
+    assert_eq!(task["output_silence_warning"], false);
+    assert_eq!(
+        task["output_age_unavailable_reason"],
+        "no verified output log data"
+    );
 }
 
 #[test]
