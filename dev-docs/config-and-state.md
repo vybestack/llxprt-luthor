@@ -11,7 +11,7 @@ Synthetic example (all paths, IDs and names are illustrative; no key is present)
   "capacity": 1,
   "assignment_login": "example-agent",
   "sources": [{"project_id":"PVT_SAMPLE","repositories":["example/tracker"],"ready_marker":{"kind":"label","name":"daemon-ready"},"milestone":"v1"}],
-  "mappings": [{"tracker_repository":"example/tracker","code_repository":"example/code","checkout":"/src/example-code","base_branch":"main","push_remote":"git@github-acoliver:example/code.git","allowed_pr_head_repository":"example/code-fork","allowed_pr_author":"example-user"}],
+  "mappings": [{"tracker_repository":"example/tracker","code_repository":"example/code","checkout":"/src/example-code","base_branch":"main","push_remote":"git@github-acoliver:example/code.git","allowed_pr_head_repository":"example/code-fork","allowed_pr_author":"acoliver"}],
   "initial": {"executable":"/usr/local/bin/llxprt-code-rs","args":["--session","{task.id}","--cwd","{worktree}","-p","Work on {task.issue_url} (task {task.id}, attempt {attempt.id})"]},
   "resume": {"executable":"/usr/local/bin/llxprt-code-rs","args":["--session","{task.id}","--cwd","{worktree}","-p","Continue task {task.id}, attempt {attempt.id}, from {task.issue_url}"]}
 }

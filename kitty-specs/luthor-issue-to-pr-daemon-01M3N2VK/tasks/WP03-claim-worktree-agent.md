@@ -46,6 +46,7 @@ owned_files:
 - src/claim.rs
 - src/state.rs
 - src/github/pull_request.rs
+- src/github/identity.rs
 - src/worktree.rs
 - src/supervisor.rs
 - src/coordinator.rs
@@ -59,6 +60,7 @@ owned_files:
 - tests/daemon.rs
 - tests/state.rs
 - tests/eligibility.rs
+- tests/config.rs
 - dev-docs/config-and-state.md
 tags: []
 tracker_refs: []

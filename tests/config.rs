@@ -12,7 +12,8 @@ fn documented_json_example_loads_and_round_trips() {
     let mapping = &config.mappings[0];
     assert_eq!(mapping.push_remote, "git@github-acoliver:example/code.git");
     assert_eq!(mapping.allowed_pr_head_repository, "example/code-fork");
-    assert_eq!(mapping.allowed_pr_author, "example-user");
+    assert_eq!(mapping.allowed_pr_author, "acoliver");
+    assert_eq!(config.assignment_login, "example-agent");
 
     let snapshot = serde_json::to_string(&config).unwrap();
     let round_tripped = Config::from_json(&snapshot).unwrap();
