@@ -727,10 +727,7 @@ impl StateStore {
 
     /// Returns the first and latest launch plans and the verified latest exit only
     /// when a paused task has no outstanding worker or reservation.
-    pub(crate) fn resume_context(
-        &self,
-        task_id: &str,
-    ) -> Result<(String, String, String), StateError> {
+    pub fn resume_context(&self, task_id: &str) -> Result<(String, String, String), StateError> {
         resume_context(&self.connection, task_id)
     }
 

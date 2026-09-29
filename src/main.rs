@@ -5,7 +5,10 @@ use luthor::{
         DispatchDependencies, ProductionLauncher, ResumeDependencies, dispatch_one, resume_one,
     },
     eligibility,
-    github::{project::GhProjectReader, pull_request::GhPullRequestReader},
+    github::{
+        identity::verify_authenticated_account, project::GhProjectReader,
+        pull_request::GhPullRequestReader,
+    },
     state::StateStore,
 };
 use serde_json::json;
@@ -198,6 +201,7 @@ fn dispatch(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     if execute == 0 {
         return Err("dispatch held: pass --execute to authorize GitHub writes".into());
     }
+    verify_authenticated_account(PathBuf::from("gh").as_path(), &config, candidate)?;
     let (task_id, attempt_id) = (random_id()?, random_id()?);
     let mut store = StateStore::open(&config.state_root, config.capacity)?;
     let mut prs = GhPullRequestReader::new(PathBuf::from("gh"));
@@ -275,11 +279,18 @@ fn resume(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         return Err("invalid task id".into());
     }
     let config = Config::from_json(&fs::read_to_string(path)?)?;
-    let attempt_id = random_id()?;
     let mut store = StateStore::open(&config.state_root, config.capacity)?;
     if store.task_phase(task_id)?.is_none() {
         return Err("task not found".into());
     }
+    store
+        .resume_context(task_id)
+        .map_err(|_| "resume held: task is not resumable")?;
+    let selection = store
+        .selection_evidence(task_id)?
+        .ok_or("task selection missing")?;
+    verify_authenticated_account(PathBuf::from("gh").as_path(), &config, &selection.candidate)?;
+    let attempt_id = random_id()?;
     let mut projects = GhProjectReader::new(PathBuf::from("gh"));
     let mut prs = GhPullRequestReader::new(PathBuf::from("gh"));
     let mut launcher = ProductionLauncher;

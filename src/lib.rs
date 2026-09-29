@@ -4,6 +4,7 @@ pub mod config;
 pub mod coordinator;
 pub mod eligibility;
 pub mod github {
+    pub mod identity;
     pub mod project;
     pub mod pull_request;
 }
