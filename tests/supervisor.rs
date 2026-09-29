@@ -112,10 +112,10 @@ fn git(dir: &Path, args: &[&str]) {
 fn claimed(store: &mut StateStore, config: &Config, candidate: &Candidate, _root: &Path) {
     store.create_task("task", candidate, "rev", config).unwrap();
     store
-        .record_claim_intent("task", "operator", "org/tracker", 7)
+        .record_claim_intent("task", &config.assignment_login, "org/tracker", 7)
         .unwrap();
     store
-        .record_evidence("task", None, "claim_verified", "operator")
+        .record_evidence("task", None, "claim_verified", &config.assignment_login)
         .unwrap();
     store.set_task_phase("task", "claimed").unwrap();
     let checkout = &candidate.mapping.checkout;
@@ -131,6 +131,31 @@ fn claimed(store: &mut StateStore, config: &Config, candidate: &Candidate, _root
     git(checkout, &["add", "README"]);
     git(checkout, &["commit", "-m", "initial"]);
     ensure_worktree(store, "task", &config.worktree_root, &candidate.mapping).unwrap();
+}
+
+#[test]
+fn initial_prompt_distinguishes_issue_assignee_from_author() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut config, mut candidate) = configured(dir.path());
+    config.assignment_login = "issue-agent".into();
+    config.mappings[0].allowed_pr_author = "acoliver".into();
+    candidate.mapping = config.mappings[0].clone();
+    let mut store = StateStore::open(&config.state_root, 1).unwrap();
+    claimed(&mut store, &config, &candidate, dir.path());
+    let plan = prepare_initial(&mut store, "task", "attempt-1").unwrap();
+    let prompt = plan.args.windows(2).find(|pair| pair[0] == "-p").unwrap()[1].as_str();
+    assert!(
+        prompt.contains("authorized PR author is acoliver"),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains("tracker issue is assigned to issue-agent"),
+        "{prompt}"
+    );
+    assert!(
+        !prompt.contains("authorized PR author is issue-agent"),
+        "{prompt}"
+    );
 }
 
 #[test]

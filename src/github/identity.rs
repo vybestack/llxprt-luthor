@@ -1,4 +1,4 @@
-use crate::{config::Config, eligibility::Candidate};
+use crate::eligibility::Candidate;
 use std::{path::Path, process::Command};
 use thiserror::Error;
 
@@ -8,13 +8,12 @@ pub enum IdentityError {
     Command,
     #[error("GitHub account verification returned missing or ambiguous account output")]
     Output,
-    #[error("GitHub account does not match the configured assignment and PR author")]
+    #[error("GitHub account is not the authorized PR author for live writes")]
     Mismatch,
 }
 
 pub fn verify_authenticated_account(
     gh_binary: &Path,
-    config: &Config,
     candidate: &Candidate,
 ) -> Result<(), IdentityError> {
     let output = Command::new(gh_binary)
@@ -30,12 +29,7 @@ pub fn verify_authenticated_account(
     if login.is_empty() || lines.any(|line| !line.trim().is_empty()) {
         return Err(IdentityError::Output);
     }
-    if login == "llxprt"
-        || config.assignment_login != "acoliver"
-        || candidate.mapping.allowed_pr_author != "acoliver"
-        || login != config.assignment_login
-        || login != candidate.mapping.allowed_pr_author
-    {
+    if login != "acoliver" || candidate.mapping.allowed_pr_author != login {
         return Err(IdentityError::Mismatch);
     }
     Ok(())

@@ -160,11 +160,8 @@ fn cycle(config: &Config, options: &Options) -> Result<(), Error> {
         );
         return Ok(());
     }
-    if config.assignment_login != "acoliver" {
-        return Err("execution requires acoliver assignment login".into());
-    }
     for candidate in &selected {
-        verify_authenticated_account(&gh, config, candidate)?;
+        verify_authenticated_account(&gh, candidate)?;
     }
     let mut store = StateStore::open(&config.state_root, config.capacity)?;
     let mut prs = GhPullRequestReader::new(gh.clone());

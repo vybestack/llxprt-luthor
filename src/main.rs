@@ -230,7 +230,7 @@ fn dispatch(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         .into());
     }
     let candidate = &candidates[0];
-    verify_authenticated_account(PathBuf::from("gh").as_path(), &config, candidate)?;
+    verify_authenticated_account(PathBuf::from("gh").as_path(), candidate)?;
     let (task_id, attempt_id) = (random_id()?, random_id()?);
     let mut assignments = GhAssignmentWriter {
         executable: PathBuf::from("gh"),
@@ -316,7 +316,7 @@ fn resume(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     let selection = store
         .selection_evidence(task_id)?
         .ok_or("task selection missing")?;
-    verify_authenticated_account(PathBuf::from("gh").as_path(), &config, &selection.candidate)?;
+    verify_authenticated_account(PathBuf::from("gh").as_path(), &selection.candidate)?;
     let attempt_id = random_id()?;
     let mut projects = GhProjectReader::new(PathBuf::from("gh"));
     let mut prs = GhPullRequestReader::new(PathBuf::from("gh"));

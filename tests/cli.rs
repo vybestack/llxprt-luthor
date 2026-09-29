@@ -534,7 +534,7 @@ mod resume_cli {
                     base_branch: "main".into(),
                     push_remote: "origin".into(),
                     allowed_pr_head_repository: "org/head".into(),
-                    allowed_pr_author: "agent".into(),
+                    allowed_pr_author: "acoliver".into(),
                 }],
                 initial: CommandTemplate {
                     executable: gh.clone(),
@@ -605,7 +605,7 @@ case "$*" in
   *graphql*) printf '%s\n' '{{"data":{{"node":{{"items":{{"nodes":[{{"id":"ITEM-8","content":{{"__typename":"Issue","id":"ISSUE-8","number":8,"repository":{{"id":"REPO","nameWithOwner":"org/tracker"}}}},"fieldValues":{{"nodes":[],"pageInfo":{{"hasNextPage":false}}}}}}],"pageInfo":{{"hasNextPage":false,"endCursor":null}}}}}}}}}}' ;;
   *repos/org/tracker/issues/8*) printf '%s\n' '{{"node_id":"ISSUE-8","number":8,"repository_url":"https://api.github.com/repos/org/tracker","html_url":"https://github.com/org/tracker/issues/8","state":"open","assignees":[],"labels":[{{"name":"ready"}}],"milestone":null}}' ;;
   *repos/org/tracker*) printf '%s\n' '{{"node_id":"REPO"}}' ;;
-  *"api user --jq .login"*) printf '%s\n' 'agent' ;;
+  *"api user --jq .login"*) printf '%s\n' 'acoliver' ;;
   *) exit 91 ;;
 esac
 "#, self.log.display(), worker.display(), assignments.display())).unwrap();
@@ -723,10 +723,11 @@ esac
         ]);
         assert!(!output.status.success());
         assert!(
-            stderr(&output).contains("GitHub account does not match"),
+            stderr(&output).contains("worktree failed"),
             "{}",
             stderr(&output)
         );
+        assert!(!stderr(&output).contains("authorized PR author"));
         let calls = fs::read_to_string(&h.log).unwrap();
         assert!(calls.contains("api graphql"), "{calls}");
         assert!(calls.contains("api user --jq .login"), "{calls}");

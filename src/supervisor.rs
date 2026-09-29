@@ -258,6 +258,7 @@ struct PromptRequirements<'a> {
     branch: &'a str,
     remote: &'a str,
     author: &'a str,
+    assignee: &'a str,
 }
 
 fn enforce_prompt(
@@ -273,6 +274,7 @@ fn enforce_prompt(
         branch,
         remote,
         author,
+        assignee,
     } = requirements;
     let indexes: Vec<usize> = args
         .windows(2)
@@ -288,7 +290,7 @@ fn enforce_prompt(
          Work only in code repository {code_repository}. Use mapped base branch {base}.\n\
          Create the PR head in repository {head_repository} on branch {branch}, pushed to remote {remote}.\n\
          The PR body must include this exact line: Tracker-Issue: {issue_url}\n\
-         The authorized PR author is {author}. The tracker issue is already claimed; do not reassign it.\n\
+         The authorized PR author is {author}. The tracker issue is already claimed; do not reassign it. The tracker issue is assigned to {assignee}.\n\
          Create only an open PR. Report the PR URL and ID.\
 \
          Tracker repository: {tracker_repository}."
@@ -351,7 +353,8 @@ pub fn prepare_initial(
             head_repository: &selection.candidate.mapping.allowed_pr_head_repository,
             branch: &identity.branch,
             remote: &identity.remote,
-            author: &selection.effective_config.assignment_login,
+            author: &selection.candidate.mapping.allowed_pr_author,
+            assignee: &selection.effective_config.assignment_login,
         },
     )?;
     let session_environment = SessionEnvironment::capture()?;
@@ -434,7 +437,8 @@ pub fn prepare_resume(
             head_repository: &selection.candidate.mapping.allowed_pr_head_repository,
             branch: &identity.branch,
             remote: &identity.remote,
-            author: &selection.effective_config.assignment_login,
+            author: &selection.candidate.mapping.allowed_pr_author,
+            assignee: &selection.effective_config.assignment_login,
         },
     )?;
     enforce_resume_inspection(&mut args)?;
