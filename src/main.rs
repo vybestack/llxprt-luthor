@@ -54,13 +54,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         Some("daemon") => luthor::daemon::run(&args.collect::<Vec<_>>()),
         Some("dispatch") => dispatch(args.collect()),
         Some("resume") => resume(args.collect()),
+        Some("recover") => recover(args.collect()),
         Some("--help" | "-h") => {
             println!(
-                "Usage: luthor discover --config <path>\n       luthor daemon --config PATH --config-revision REV [--repository owner/repo --issues N,N,...] [--once] [--execute]\n       luthor dispatch --config <path> --repository owner/repo --issue N --config-revision REV [--execute]\n       luthor resume TASK --config <path> --execute\n       luthor status --config <path>\n       luthor show TASK --config <path>\n       luthor logs TASK [--attempt ATTEMPT] --config <path>"
+                "Usage: luthor discover --config <path>\n       luthor daemon --config PATH --config-revision REV [--repository owner/repo --issues N,N,...] [--once] [--execute]\n       luthor dispatch --config <path> --repository owner/repo --issue N --config-revision REV [--execute]\n       luthor resume TASK --config <path> --execute\n       luthor recover TASK --attempt ID --config PATH --actor LOGIN --reason TEXT --execute\n       luthor status --config <path>\n       luthor show TASK --config <path>\n       luthor logs TASK [--attempt ATTEMPT] --config <path>"
             );
             Ok(())
         }
-        _ => Err("expected `discover`, `daemon`, `dispatch`, or `resume`".into()),
+        _ => Err("expected `discover`, `daemon`, `dispatch`, `resume`, or `recover`".into()),
     }
 }
 
@@ -181,6 +182,58 @@ fn mutate(command: &str, mut values: Vec<String>) -> Result<(), Box<dyn std::err
             }
         }
         _ => return Err("invalid control command".into()),
+    }
+    Ok(())
+}
+
+fn recover(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
+    if args.len() != 11
+        || args[1] != "--attempt"
+        || args[3] != "--config"
+        || args[5] != "--actor"
+        || args[7] != "--reason"
+        || args[10] != "--execute"
+        || args[0].is_empty()
+        || args[2].is_empty()
+        || args[4].is_empty()
+        || args[6].trim().is_empty()
+        || args[8].trim().is_empty()
+    {
+        return Err(
+            "expected TASK --attempt ID --config PATH --actor LOGIN --reason TEXT --execute".into(),
+        );
+    }
+    let task_id = &args[0];
+    let attempt_id = &args[2];
+    let actor = &args[6];
+    let reason = &args[8];
+    let config = Config::from_json(
+        &fs::read_to_string(&args[4]).map_err(|_| "recovery configuration unavailable")?,
+    )
+    .map_err(|_| "recovery configuration invalid")?;
+    let mut store = StateStore::open(&config.state_root, config.capacity)
+        .map_err(|_| "recovery state unavailable")?;
+    let mut projects = GhProjectReader::new(PathBuf::from("gh"));
+    let mut prs = GhPullRequestReader::new(PathBuf::from("gh"));
+    let result = luthor::coordinator::operator_recover_missing_receipt(
+        &mut store,
+        task_id,
+        attempt_id,
+        actor,
+        reason,
+        &mut projects,
+        &mut prs,
+    )
+    .map_err(|_| "recovery could not be completed")?;
+    match result {
+        luthor::coordinator::RecoveryResult::RecoveredHeld => println!(
+            "{}",
+            json!({"task_id": task_id, "attempt_id": attempt_id, "status": "recovered_held", "reason": "receipt loss audited; task remains held"})
+        ),
+        luthor::coordinator::RecoveryResult::Held(reason) => println!(
+            "{}",
+            json!({"task_id": task_id, "attempt_id": attempt_id, "status": "held", "reason": reason})
+        ),
     }
     Ok(())
 }

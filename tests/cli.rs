@@ -1,3 +1,37 @@
+#[cfg(unix)]
+#[test]
+fn recover_requires_execute_before_config_store_or_github_access() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let gh = dir.path().join("gh");
+    let calls = dir.path().join("gh-calls");
+    fs::write(
+        &gh,
+        format!("#!/bin/sh\necho called >> '{}'\n", calls.display()),
+    )
+    .unwrap();
+    fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_luthor"))
+        .args([
+            "recover",
+            "task",
+            "--attempt",
+            "attempt",
+            "--config",
+            "/must/not/open",
+            "--actor",
+            "operator",
+            "--reason",
+            "audited reason",
+        ])
+        .env("PATH", dir.path())
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--execute"));
+    assert!(!calls.exists());
+}
+
 use luthor::{
     cli::{CliError, execute},
     state::StateStore,
