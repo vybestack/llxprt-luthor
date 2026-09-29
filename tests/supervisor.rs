@@ -1233,6 +1233,135 @@ fn stopped_exit_matching_pr_is_proved_and_persisted() {
 }
 
 #[cfg(unix)]
+#[test]
+fn natural_exit_stale_assignee_is_held_despite_matching_open_pr() {
+    let (_dir, mut config, mut store) = dispatched_fixture(7);
+    config.capacity = 1;
+    let selection = store.selection_evidence("task").unwrap().unwrap();
+    let identity = store
+        .worktree_record("task")
+        .unwrap()
+        .unwrap()
+        .identity
+        .unwrap();
+    let mut prs = ExitPr {
+        matching: Some((selection.candidate.issue_url.clone(), identity.branch)),
+        ..ExitPr::default()
+    };
+    let mut projects = OtherProject(selection.candidate, 0);
+    let result = luthor::coordinator::reconcile_with_pr(
+        &mut store,
+        "task",
+        "attempt-real",
+        &mut projects,
+        &mut prs,
+    )
+    .unwrap();
+    assert!(matches!(result, Reconciliation::Held { .. }));
+    assert!(
+        store
+            .held_reason("task")
+            .unwrap()
+            .unwrap()
+            .contains("completion claim changed")
+    );
+    assert_eq!(store.task_phase("task").unwrap().as_deref(), Some("held"));
+    assert!(
+        !store
+            .evidence_kinds("task")
+            .unwrap()
+            .iter()
+            .any(|kind| kind == "verified_open_pr")
+    );
+    assert!(
+        store
+            .evidence_kinds("task")
+            .unwrap()
+            .iter()
+            .any(|kind| kind == "attempt_exit")
+    );
+    let connection = rusqlite::Connection::open(config.state_root.join("state.sqlite3")).unwrap();
+    let outcome: Option<String> = connection
+        .query_row(
+            "SELECT outcome FROM attempts WHERE id='attempt-real'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(outcome.as_deref(), Some("exit_code=Some(7);signal=None"));
+    assert_eq!(store.reservation_count().unwrap(), 0);
+    assert!(store.ensure_dispatch_capacity().is_err());
+    assert_eq!(prs.reads, 1);
+    assert_eq!(projects.1, 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn stopped_exit_stale_assignee_is_held_despite_matching_open_pr() {
+    let (_dir, config, mut store) = dispatched_fixture(7);
+    store.record_stop_intent("task", "attempt-real").unwrap();
+    edit_receipt(&config, |receipt| {
+        receipt.stop_signals = vec![libc::SIGTERM]
+    });
+    let selection = store.selection_evidence("task").unwrap().unwrap();
+    let identity = store
+        .worktree_record("task")
+        .unwrap()
+        .unwrap()
+        .identity
+        .unwrap();
+    let mut prs = ExitPr {
+        matching: Some((selection.candidate.issue_url.clone(), identity.branch)),
+        ..ExitPr::default()
+    };
+    let mut projects = OtherProject(selection.candidate, 0);
+    let result = luthor::coordinator::reconcile_with_pr(
+        &mut store,
+        "task",
+        "attempt-real",
+        &mut projects,
+        &mut prs,
+    )
+    .unwrap();
+    assert!(matches!(result, Reconciliation::Held { .. }));
+    assert!(
+        store
+            .held_reason("task")
+            .unwrap()
+            .unwrap()
+            .contains("completion claim changed")
+    );
+    assert_eq!(store.task_phase("task").unwrap().as_deref(), Some("held"));
+    assert!(
+        !store
+            .evidence_kinds("task")
+            .unwrap()
+            .iter()
+            .any(|kind| kind == "verified_open_pr")
+    );
+    assert!(
+        store
+            .evidence_kinds("task")
+            .unwrap()
+            .iter()
+            .any(|kind| kind == "attempt_exit")
+    );
+    let connection = rusqlite::Connection::open(config.state_root.join("state.sqlite3")).unwrap();
+    let outcome: Option<String> = connection
+        .query_row(
+            "SELECT outcome FROM attempts WHERE id='attempt-real'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(outcome.as_deref(), Some("exit_code=Some(7);signal=None"));
+    assert_eq!(store.reservation_count().unwrap(), 0);
+    assert!(store.ensure_dispatch_capacity().is_err());
+    assert_eq!(prs.reads, 1);
+    assert_eq!(projects.1, 1);
+}
+
+#[cfg(unix)]
 struct OtherProject(Candidate, usize);
 #[cfg(unix)]
 impl ProjectReader for OtherProject {
