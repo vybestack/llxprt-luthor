@@ -911,7 +911,11 @@ impl PullRequestReader for ExitPr {
 #[cfg(unix)]
 #[test]
 fn natural_exit_matching_pr_is_proved_and_persisted() {
-    let (_dir, config, mut store) = dispatched_fixture(7);
+    let (_dir, mut config, mut store) = dispatched_fixture(7);
+    config.capacity = 1;
+    drop(store);
+    store = StateStore::open(&config.state_root, config.capacity).unwrap();
+    assert!(store.ensure_dispatch_capacity().is_err());
     let selection = store.selection_evidence("task").unwrap().unwrap();
     let identity = store
         .worktree_record("task")
@@ -948,12 +952,14 @@ fn natural_exit_matching_pr_is_proved_and_persisted() {
             .unwrap()
             .contains(&"attempt_exit".into())
     );
+    assert!(store.ensure_dispatch_capacity().is_ok());
     drop(store);
     let reopened = StateStore::open(&config.state_root, config.capacity).unwrap();
     assert_eq!(
         reopened.task_phase("task").unwrap().as_deref(),
         Some("pr_complete")
     );
+    assert!(reopened.ensure_dispatch_capacity().is_ok());
     assert_eq!(exit_proof(&config).status, PausePrStatus::Open);
     let output = luthor::cli::execute(&config.state_root, &["show".into(), "task".into()]).unwrap();
     let shown: serde_json::Value = serde_json::from_str(&output).unwrap();

@@ -563,6 +563,20 @@ impl StateStore {
         )?;
         let unresolved_tasks: usize = self.connection.query_row(
             "SELECT COUNT(DISTINCT t.id) FROM tasks t WHERE t.state!='completed'
+             AND NOT (t.state='pr_complete'
+               AND NOT EXISTS (SELECT 1 FROM reservations r WHERE r.task_id=t.id AND r.status='reserved')
+               AND (SELECT COUNT(*) FROM evidence e WHERE e.task_id=t.id AND e.kind='verified_open_pr'
+                 AND CASE WHEN json_valid(e.payload) THEN json_type(e.payload,'$.id')='integer' AND json_extract(e.payload,'$.id') > 0 ELSE 0 END)=1
+               AND EXISTS (SELECT 1 FROM evidence p JOIN attempts a ON a.task_id=p.task_id AND a.id=p.attempt_id
+                 JOIN reservations r ON r.task_id=a.task_id AND r.attempt_id=a.id
+                 WHERE p.task_id=t.id AND p.kind='verified_open_pr'
+                   AND CASE WHEN json_valid(p.payload) THEN json_type(p.payload,'$.id')='integer' AND json_extract(p.payload,'$.id') > 0 ELSE 0 END
+                   AND a.id=(SELECT id FROM attempts WHERE task_id=t.id ORDER BY rowid DESC LIMIT 1)
+                   AND a.lifecycle='completed' AND a.outcome IS NOT NULL AND r.status='released'
+                   AND (SELECT COUNT(*) FROM evidence e WHERE e.attempt_id=a.id AND e.kind='attempt_exit')=1
+                   AND (SELECT COUNT(*) FROM evidence e WHERE e.task_id=t.id AND e.kind='claim_verified')=1
+                   AND (SELECT COUNT(*) FROM evidence e WHERE e.task_id=t.id AND e.kind='worktree_created')=1
+                   AND (SELECT COUNT(*) FROM attempts a2 WHERE a2.task_id=t.id AND (a2.lifecycle!='completed' OR a2.outcome IS NULL))=0))
              AND NOT (t.state='paused'
                AND EXISTS (SELECT 1 FROM evidence e WHERE e.task_id=t.id AND e.attempt_id=(SELECT id FROM attempts WHERE task_id=t.id ORDER BY rowid DESC LIMIT 1) AND e.kind='pause_pr_lookup' AND CASE WHEN json_valid(e.payload) THEN json_extract(e.payload,'$.status.status')='absent' ELSE 0 END)
                AND NOT EXISTS (SELECT 1 FROM reservations r WHERE r.task_id=t.id AND r.status='reserved')
