@@ -2,7 +2,7 @@ use luthor::{
     config::{CommandTemplate, Config, Mapping, Marker, Source},
     eligibility::Candidate,
     state::StateStore,
-    worktree::{WorktreeError, WorktreeResult, ensure_worktree},
+    worktree::{WorktreeError, WorktreeResult, ensure_worktree, ensure_worktree_with_hooks},
 };
 use std::{fs, path::Path, process::Command};
 
@@ -288,4 +288,120 @@ fn restart_mismatch_and_partial_intent_hold_without_retry() {
         Err(WorktreeError::Conflict(_))
     ));
     assert!(!root.join("task-2").exists());
+}
+
+#[test]
+fn interruption_after_root_creation_leaves_durable_intent_and_never_adopts_a_path() {
+    let mut f = Fixture::new();
+    f.task("task-1", 1, true);
+    let root = f.config.worktree_root.clone();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        ensure_worktree_with_hooks(
+            &mut f.store,
+            "task-1",
+            &root,
+            &f.config.mappings[0],
+            |_| {},
+            || {
+                assert!(root.is_dir());
+                panic!("interrupted after mkdir");
+            },
+        )
+    }));
+    assert!(result.is_err());
+    let intent = f.store.worktree_intent("task-1").unwrap().unwrap();
+    assert_eq!(
+        intent.path,
+        fs::canonicalize(f.dir.path())
+            .unwrap()
+            .join("private/task-1")
+    );
+    assert!(!intent.path.exists());
+    drop(f.store);
+    let mut store = StateStore::open(&f.config.state_root, 1).unwrap();
+    fs::create_dir(&intent.path).unwrap();
+    assert!(matches!(
+        ensure_worktree(&mut store, "task-1", &root, &f.config.mappings[0]),
+        Err(WorktreeError::Conflict(
+            "unfinished worktree intent requires inspection"
+        ))
+    ));
+    assert_eq!(store.task_phase("task-1").unwrap().as_deref(), Some("held"));
+    assert_eq!(store.worktree_intent("task-1").unwrap(), Some(intent));
+}
+
+#[test]
+fn rejected_begin_worktree_leaves_root_untouched() {
+    let mut f = Fixture::new();
+    f.task("task-1", 1, true);
+    let root = f.config.worktree_root.clone();
+    assert!(matches!(
+        ensure_worktree_with_hooks(
+            &mut f.store,
+            "task-1",
+            &root,
+            &f.config.mappings[0],
+            |store| store.set_task_phase("task-1", "held").unwrap(),
+            || panic!("root must not be created"),
+        ),
+        Err(WorktreeError::State(
+            luthor::state::StateError::InvalidSelection
+        ))
+    ));
+    assert!(!root.exists());
+    assert!(f.store.worktree_intent("task-1").unwrap().is_none());
+}
+
+#[cfg(unix)]
+#[test]
+fn changed_root_after_intent_does_not_create_a_worktree() {
+    use std::os::unix::fs::symlink;
+    let mut f = Fixture::new();
+    f.task("task-1", 1, true);
+    let root = f.config.worktree_root.clone();
+    let moved = f.dir.path().join("moved");
+    assert!(matches!(
+        ensure_worktree_with_hooks(
+            &mut f.store,
+            "task-1",
+            &root,
+            &f.config.mappings[0],
+            |_| {},
+            || {
+                fs::rename(&root, &moved).unwrap();
+                symlink(&moved, &root).unwrap();
+            },
+        ),
+        Err(WorktreeError::Conflict("worktree root contains a symlink"))
+    ));
+    assert!(f.store.worktree_intent("task-1").unwrap().is_some());
+    assert!(!moved.join("task-1").exists());
+    assert_eq!(
+        f.store.task_phase("task-1").unwrap().as_deref(),
+        Some("held")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn existing_worktree_does_not_change_root_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut f = Fixture::new();
+    f.task("task-1", 1, true);
+    let WorktreeResult::Created(identity) = f.create("task-1").unwrap() else {
+        panic!()
+    };
+    fs::set_permissions(&f.config.worktree_root, fs::Permissions::from_mode(0o750)).unwrap();
+    assert_eq!(
+        f.create("task-1").unwrap(),
+        WorktreeResult::Existing(identity)
+    );
+    assert_eq!(
+        fs::metadata(&f.config.worktree_root)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o750
+    );
 }

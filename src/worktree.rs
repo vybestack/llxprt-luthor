@@ -194,6 +194,19 @@ fn validate_root_components(root: &Path) -> Result<(), WorktreeError> {
     Ok(())
 }
 
+fn normalized_root(root: &Path) -> Result<PathBuf, WorktreeError> {
+    validate_root_components(root)?;
+    let existing = root
+        .ancestors()
+        .find(|ancestor| ancestor.exists())
+        .ok_or(WorktreeError::Conflict("invalid worktree root path"))?;
+    let canonical = fs::canonicalize(existing)?;
+    Ok(canonical.join(
+        root.strip_prefix(existing)
+            .expect("ancestor must be a prefix of root"),
+    ))
+}
+
 #[cfg(unix)]
 fn file_identity(path: &Path) -> Result<(u64, u64), WorktreeError> {
     use std::os::unix::fs::MetadataExt;
@@ -248,15 +261,9 @@ fn validate_task_id(task_id: &str) -> Result<(), WorktreeError> {
     Ok(())
 }
 
-/// Checks worktree feasibility without creating files, branches, or Git worktrees.
-pub fn preflight(
-    task_id: &str,
-    worktree_root: &Path,
-    mapping: &Mapping,
-) -> Result<(), WorktreeError> {
-    validate_task_id(task_id)?;
-    validate_root_components(worktree_root)?;
-    match fs::symlink_metadata(worktree_root) {
+fn check_root(root: &Path) -> Result<PathBuf, WorktreeError> {
+    let normalized = normalized_root(root)?;
+    match fs::symlink_metadata(root) {
         Ok(meta) if !meta.is_dir() || meta.file_type().is_symlink() => {
             return Err(WorktreeError::Conflict(
                 "worktree root is not a real directory",
@@ -266,29 +273,46 @@ pub fn preflight(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
     }
-    let root = if worktree_root.exists() {
-        fs::canonicalize(worktree_root)?
-    } else {
-        worktree_root.to_path_buf()
-    };
-    let path = root.join(task_id);
-    let (checkout, _, _) = validate_checkout(mapping)?;
-    if path.starts_with(&checkout) || checkout.starts_with(&path) {
+    Ok(normalized)
+}
+
+fn check_new_worktree(checkout: &Path, intent: &WorktreeIntent) -> Result<(), WorktreeError> {
+    if intent.path.starts_with(checkout) || checkout.starts_with(&intent.path) {
         return Err(WorktreeError::Conflict("worktree path overlaps checkout"));
     }
-    match fs::symlink_metadata(&path) {
+    match fs::symlink_metadata(&intent.path) {
         Ok(_) => return Err(WorktreeError::Conflict("worktree path already exists")),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
     }
-    let branch_ref = format!("refs/heads/luthor/{task_id}");
-    let branch_check = git(&checkout, &["show-ref", "--verify", "--quiet", &branch_ref])?;
+    let branch_ref = format!("refs/heads/{}", intent.branch);
+    let branch_check = git(checkout, &["show-ref", "--verify", "--quiet", &branch_ref])?;
     if branch_check.status.code() != Some(1) {
         return Err(WorktreeError::Conflict(
             "branch exists or cannot be checked",
         ));
     }
     Ok(())
+}
+
+/// Checks worktree feasibility without creating files, branches, or Git worktrees.
+pub fn preflight(
+    task_id: &str,
+    worktree_root: &Path,
+    mapping: &Mapping,
+) -> Result<(), WorktreeError> {
+    validate_task_id(task_id)?;
+    let root = check_root(worktree_root)?;
+    let (checkout, _, _) = validate_checkout(mapping)?;
+    check_new_worktree(
+        &checkout,
+        &WorktreeIntent {
+            path: root.join(task_id),
+            branch: format!("luthor/{task_id}"),
+            base: mapping.base_branch.clone(),
+            repository: mapping.code_repository.clone(),
+        },
+    )
 }
 
 /// Returns existing evidence only after comparing it to the current filesystem and Git identity.
@@ -299,15 +323,20 @@ pub fn ensure_worktree(
     worktree_root: &Path,
     mapping: &Mapping,
 ) -> Result<WorktreeResult, WorktreeError> {
-    if task_id.is_empty()
-        || task_id.len() > 128
-        || !task_id
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-        || task_id.starts_with('-')
-    {
-        return Err(WorktreeError::InvalidTaskId);
-    }
+    ensure_worktree_with_hooks(store, task_id, worktree_root, mapping, |_| {}, || {})
+}
+
+/// Hooks for testing rejection before intent and interruption after root creation.
+#[doc(hidden)]
+pub fn ensure_worktree_with_hooks(
+    store: &mut StateStore,
+    task_id: &str,
+    worktree_root: &Path,
+    mapping: &Mapping,
+    before_intent: impl FnOnce(&mut StateStore),
+    after_root_created: impl FnOnce(),
+) -> Result<WorktreeResult, WorktreeError> {
+    validate_task_id(task_id)?;
     let selection = store
         .claimed_worktree_context(task_id)
         .map_err(|error| match error {
@@ -322,26 +351,7 @@ pub fn ensure_worktree(
             "mapping or root differs from selected task",
         ));
     }
-    validate_root_components(worktree_root)?;
-    match fs::symlink_metadata(worktree_root) {
-        Ok(meta) if !meta.is_dir() || meta.file_type().is_symlink() => {
-            return Err(WorktreeError::Conflict(
-                "worktree root is not a real directory",
-            ));
-        }
-        Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            fs::create_dir_all(worktree_root)?;
-        }
-        Err(error) => return Err(error.into()),
-    }
-    validate_root_components(worktree_root)?;
-    let root = fs::canonicalize(worktree_root)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&root, fs::Permissions::from_mode(0o700))?;
-    }
+    let root = check_root(worktree_root)?;
     let intent = WorktreeIntent {
         path: root.join(task_id),
         branch: format!("luthor/{task_id}"),
@@ -356,6 +366,7 @@ pub fn ensure_worktree(
             ));
         }
         let Some(expected) = record.identity else {
+            store.set_task_phase(task_id, "held")?;
             return Err(WorktreeError::Conflict(
                 "unfinished worktree intent requires inspection",
             ));
@@ -368,18 +379,24 @@ pub fn ensure_worktree(
             )),
         };
     }
-    if fs::symlink_metadata(&intent.path).is_ok() {
-        return Err(WorktreeError::Conflict("worktree path already exists"));
-    }
-    let branch_ref = format!("refs/heads/{}", intent.branch);
-    let branch_check = git(&checkout, &["show-ref", "--verify", "--quiet", &branch_ref])?;
-    if branch_check.status.code() != Some(1) {
-        return Err(WorktreeError::Conflict(
-            "branch exists or cannot be checked",
-        ));
-    }
+    check_new_worktree(&checkout, &intent)?;
+    before_intent(store);
     store.begin_worktree(task_id, &intent)?;
     let outcome = (|| {
+        if check_root(worktree_root)? != root {
+            return Err(WorktreeError::Conflict("worktree root changed"));
+        }
+        fs::create_dir_all(worktree_root)?;
+        after_root_created();
+        if check_root(worktree_root)? != root || fs::canonicalize(worktree_root)? != root {
+            return Err(WorktreeError::Conflict("worktree root changed"));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&root, fs::Permissions::from_mode(0o700))?;
+        }
+        check_new_worktree(&checkout, &intent)?;
         let output = git(
             &checkout,
             &[
