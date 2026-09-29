@@ -134,6 +134,34 @@ fn matching(number: u64) -> (Value, Value) {
 }
 
 #[test]
+fn gh_detail_preserves_exact_body_for_independent_verification() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let gh = dir.path().join("gh");
+    let body = format!("Summary text\nTracker-Issue: {ISSUE}\n\nMore detail.\n");
+    let list_body = format!("Tracker-Issue: {ISSUE}");
+    let detail_json = serde_json::to_string(&detail(9, &body)).unwrap();
+    let list_json = serde_json::to_string(&json!([item(9, &list_body)])).unwrap();
+    std::fs::write(
+        &gh,
+        format!(
+            "#!/bin/sh\ncase \"$2\" in\n  *'pulls?state='*) printf '%s' '{}' ;;\n  *'/pulls/9') printf '%s' '{}' ;;\n  *) exit 2 ;;\nesac\n",
+            list_json, detail_json
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let mut reader = GhPullRequestReader::new(gh);
+    let LookupResult::OpenPreexisting(evidence) = lookup(&mut reader, REPO, ISSUE).unwrap() else {
+        panic!("expected preexisting PR")
+    };
+    assert_eq!(evidence.body, body);
+    assert_eq!(evidence.tracker_issue_url, ISSUE);
+}
+
+#[test]
 fn exhausts_two_pages_before_returning_absent() {
     let mut fake = Fake::default();
     fake.pages
