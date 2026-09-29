@@ -27,6 +27,9 @@ history:
 - timestamp: '2026-09-29T00:00:00Z'
   agent: implementer
   action: Added tests/state.rs and tests/project.rs ownership for WP02 migration and pagination verification after ownership hook flagged tests/project.rs; both exercise WP02 SQLite and Project-reader requirements.
+- timestamp: '2026-09-29T00:00:00Z'
+  agent: implementer
+  action: Expanded WP02 ownership to cover actual foundation files, CLI, read-only tests, and configuration/state documentation.
 authoritative_surface: src/
 create_intent:
 - Cargo.toml
@@ -37,8 +40,12 @@ create_intent:
 - tests/config.rs
 - tests/state.rs
 - tests/eligibility.rs
-- tests/state.rs
 - tests/project.rs
+- src/main.rs
+- src/lib.rs
+- tests/cli.rs
+- dev-docs/config-and-state.md
+- Cargo.lock
 execution_mode: code_change
 owned_files:
 - Cargo.toml
@@ -49,8 +56,12 @@ owned_files:
 - tests/config.rs
 - tests/state.rs
 - tests/eligibility.rs
-- tests/state.rs
 - tests/project.rs
+- src/main.rs
+- src/lib.rs
+- tests/cli.rs
+- dev-docs/config-and-state.md
+- Cargo.lock
 tags: []
 tracker_refs: []
 ---
