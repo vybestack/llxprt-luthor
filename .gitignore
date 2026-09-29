@@ -35,5 +35,7 @@
 .kittify/sync-state.json
 .kittify/workspaces/
 .worktrees/
+tmp/
 kitty-ops/ops-index.jsonl
+kitty-ops/lifecycle.jsonl
 kitty-specs/*/.kittify/dossiers/
