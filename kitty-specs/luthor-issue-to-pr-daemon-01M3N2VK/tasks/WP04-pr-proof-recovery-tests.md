@@ -36,6 +36,7 @@ create_intent:
 - tests/claim.rs
 - tests/coordinator.rs
 - tests/supervisor.rs
+- src/main.rs
 execution_mode: code_change
 owned_files:
 - src/github/pull_request.rs
@@ -51,6 +52,7 @@ owned_files:
 - tests/recovery.rs
 - tests/fault_injection.rs
 - src/cli.rs
+- src/main.rs
 - tests/cli.rs
 tags: []
 tracker_refs: []
@@ -80,3 +82,6 @@ Fake GitHub and child-process tests cover absent versus error versus ambiguity, 
 
 ## Completion Evidence
 Passing failure-injection suite and event/log examples that retain original attempt outcomes alongside later PR evidence.
+
+## Implementation note
+The audited recovery implementation lives in `src/supervisor.rs`, `src/coordinator.rs`, `src/state.rs`, and `src/main.rs`. Real OS and SQLite rollback tests reside in `tests/supervisor.rs`. The optional planned paths `src/recovery.rs`, `tests/recovery.rs`, and `tests/fault_injection.rs` are organizational only; their absence does not remove the requirements above.
