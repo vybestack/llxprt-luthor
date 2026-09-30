@@ -707,3 +707,50 @@ fn audited_telemetry_lost_pr_completion_is_terminal_after_reopen() {
     );
     reopened.ensure_dispatch_capacity().unwrap();
 }
+
+#[test]
+fn audited_pr_completion_missing_any_recovery_evidence_is_not_terminal() {
+    for missing_kind in ["telemetry_lost", "exit_pr_lookup", "verified_open_pr"] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = StateStore::open(dir.path(), 1).unwrap();
+        store
+            .create_task(
+                "recovered",
+                &candidate("recovered-issue", 1),
+                "rev",
+                &config(),
+            )
+            .unwrap();
+        let connection = Connection::open(dir.path().join("state.sqlite3")).unwrap();
+        connection.execute_batch(
+            "INSERT INTO attempts(id,task_id,lifecycle,outcome) VALUES('prior-attempt','recovered','completed','success');
+             INSERT INTO attempts(id,task_id,lifecycle,outcome) VALUES('recovered-attempt','recovered','telemetry_lost',NULL);
+             INSERT INTO reservations(attempt_id,task_id,status) VALUES('prior-attempt','recovered','released'),('recovered-attempt','recovered','released');
+             INSERT INTO evidence(task_id,attempt_id,kind,payload) VALUES
+               ('recovered','prior-attempt','attempt_exit','{}'),('recovered','prior-attempt','exit_pr_lookup','{\"status\":{\"status\":\"absent\"}}'),
+               ('recovered','recovered-attempt','telemetry_lost','{\"actor\":\"operator\",\"reason\":\"lost receipt\",\"observed_at_unix_secs\":10,\"os_ids\":[123],\"evidence\":{\"worker_absent\":true}}'),
+               ('recovered','recovered-attempt','exit_pr_lookup','{\"observed_at_unix_secs\":11,\"repository\":\"org/code\",\"status\":{\"status\":\"open\"}}'),
+               ('recovered','recovered-attempt','verified_open_pr','{\"id\":99}'),
+               ('recovered',NULL,'claim_verified','{}'),('recovered',NULL,'worktree_created','{}');
+             UPDATE tasks SET state='pr_complete' WHERE id='recovered';"
+        ).unwrap();
+        connection.execute("DELETE FROM evidence WHERE task_id='recovered' AND attempt_id='recovered-attempt' AND kind=?1", [missing_kind]).unwrap();
+        drop(connection);
+        drop(store);
+        let reopened = StateStore::open(dir.path(), 1).unwrap();
+        assert_eq!(
+            reopened.task_phase("recovered").unwrap().as_deref(),
+            Some("pr_complete"),
+            "missing {missing_kind}"
+        );
+        assert_eq!(
+            reopened.pending_attempts().unwrap(),
+            vec![("recovered".to_owned(), "recovered-attempt".to_owned())],
+            "missing {missing_kind} must remain visible for recovery"
+        );
+        assert!(
+            reopened.ensure_dispatch_capacity().is_err(),
+            "missing {missing_kind} must retain capacity"
+        );
+    }
+}

@@ -2428,6 +2428,11 @@ fn operator_recovery_absent_pr_records_telemetry_loss_and_releases_slot() {
         Some("held")
     );
     assert_eq!(reopened.reservation_count().unwrap(), 0);
+    assert_eq!(
+        reopened.pending_attempts().unwrap(),
+        vec![("task".to_owned(), "attempt-real".to_owned())]
+    );
+    assert!(reopened.ensure_dispatch_capacity().is_err());
     assert!(
         reopened
             .evidence_kinds("task")
@@ -2516,6 +2521,31 @@ fn operator_recovery_matching_pr_completes_task_and_persists_proof() {
             .filter(|kind| *kind == "verified_open_pr")
             .count(),
         1
+    );
+    assert!(reopened.pending_attempts().unwrap().is_empty());
+    assert_eq!(
+        reopened.task_phase("task").unwrap().as_deref(),
+        Some("pr_complete")
+    );
+    reopened.ensure_dispatch_capacity().unwrap();
+    let db = rusqlite::Connection::open_with_flags(
+        config.state_root.join("state.sqlite3"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let outcome: Option<String> = db
+        .query_row(
+            "SELECT outcome FROM attempts WHERE task_id='task' AND id='attempt-real'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(outcome, None);
+    assert!(
+        !reopened
+            .evidence_kinds("task")
+            .unwrap()
+            .contains(&"attempt_exit".to_owned())
     );
 }
 
