@@ -1911,6 +1911,14 @@ pub fn reconcile_attempt(
     if supervisor.pid == child_file.pid {
         return Ok(held("supervisor and child identity contradiction"));
     }
+    let tracked = store
+        .evidence_payloads(task_id, attempt_id, "tracked_descendant")?
+        .into_iter()
+        .map(|payload| recorded_process(&payload))
+        .collect::<Option<Vec<_>>>();
+    let Some(tracked) = tracked else {
+        return Ok(held("invalid tracked descendant identity"));
+    };
     let receipt_path = attempts.join(format!("{attempt_id}.receipt.json"));
     if !receipt_path.exists() {
         if sent.is_none()
@@ -1922,14 +1930,6 @@ pub fn reconcile_attempt(
         {
             return Ok(held("live worker identity or reservation unverified"));
         }
-        let tracked = store
-            .evidence_payloads(task_id, attempt_id, "tracked_descendant")?
-            .into_iter()
-            .map(|payload| recorded_process(&payload))
-            .collect::<Option<Vec<_>>>();
-        let Some(tracked) = tracked else {
-            return Ok(held("invalid tracked descendant identity"));
-        };
         if registered_processes_absent(&child_file, &supervisor, &tracked) {
             return Ok(held(
                 "receipt missing; registered processes absent; operator recovery required",
@@ -2015,6 +2015,26 @@ pub fn reconcile_attempt(
     }
     if std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH) {
         return Ok(held("child process group absence is unproven"));
+    }
+    for process in &tracked {
+        if process.boot_identity != receipt.boot_identity {
+            return Ok(held("tracked descendant boot identity mismatch"));
+        }
+        match identity(process.pid) {
+            Ok((boot, start))
+                if boot == process.boot_identity && start == process.start_identity =>
+            {
+                return Ok(held("tracked descendant is alive"));
+            }
+            Ok(_) => return Ok(held("tracked descendant identity mismatch")),
+            Err(_) => {
+                if unsafe { libc::kill(process.pid as libc::pid_t, 0) } == 0
+                    || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+                {
+                    return Ok(held("tracked descendant absence is unproven"));
+                }
+            }
+        }
     }
     store.reconcile_verified_exit(task_id, attempt_id, &evidence, &outcome)?;
     Ok(completed)
