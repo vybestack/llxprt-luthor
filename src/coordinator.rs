@@ -807,6 +807,7 @@ where
     store.ensure_dispatch_capacity()?;
     store.create_task(task_id, candidate, config_revision, config)?;
     let result = (|| {
+        supervisor::validate_stop_socket_path(&config.state_root, attempt_id)?;
         worktree::preflight(task_id, &config.worktree_root, &candidate.mapping)?;
         claim::claim(
             store,
@@ -992,6 +993,7 @@ where
     // Do not change the phase of an active or unverified task to held.
     store.resume_context(task_id)?;
     let result = (|| {
+        supervisor::validate_stop_socket_path(store.root(), attempt_id)?;
         let selection = store
             .selection_evidence(task_id)?
             .ok_or(StateError::InvalidSelection)?;

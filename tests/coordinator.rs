@@ -381,6 +381,29 @@ impl SupervisorLauncher for FakeLauncher {
 }
 
 #[test]
+#[cfg(unix)]
+fn long_stop_socket_path_blocks_dispatch_before_claim_or_reservation() {
+    let mut f = Fixture::new(1);
+    let long_root = f.dir.path().join("s".repeat(120));
+    f.config.state_root = long_root;
+    let c = f.candidate.clone();
+    let mut github = FakeGithub::new(&c);
+    let mut writer = FakeWriter::default();
+    let mut launcher = FakeLauncher::default();
+    let result = f.run("task-a", &c, &mut github, &mut writer, &mut launcher);
+    assert!(matches!(
+        result,
+        Err(DispatchError::Supervisor(
+            SupervisorError::StopSocketPathTooLong
+        ))
+    ));
+    assert_eq!(writer.calls, 0);
+    assert!(launcher.plans.is_empty());
+    assert_eq!(f.store.reservation_count().unwrap(), 0);
+    assert!(!f.config.worktree_root.exists());
+}
+
+#[test]
 fn worktree_preflight_failures_precede_assignment_and_attempts() {
     for failure in ["base", "origin", "branch"] {
         let mut f = Fixture::new(1);

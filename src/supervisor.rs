@@ -56,6 +56,9 @@ pub enum SupervisorError {
     StopUnavailable,
     #[error("cannot establish process identity")]
     IdentityUnavailable,
+    #[cfg(unix)]
+    #[error("stop socket path exceeds Unix socket path capacity")]
+    StopSocketPathTooLong,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -572,6 +575,7 @@ pub fn prepare_initial(
     task_id: &str,
     attempt_id: &str,
 ) -> Result<LaunchPlan, SupervisorError> {
+    validate_stop_socket_path(store.root(), attempt_id)?;
     let selection = store.claimed_worktree_context(task_id)?;
     let identity = worktree::verify_existing_worktree(store, task_id)?;
     let values = TaskValues {
@@ -771,6 +775,26 @@ fn write_receipt(root: &Path, attempt: &str, receipt: &ExitReceipt) -> Result<()
 #[cfg(unix)]
 fn stop_socket(root: &Path, attempt: &str) -> PathBuf {
     root.join(format!("{attempt}.stop.sock"))
+}
+
+#[cfg(unix)]
+pub fn validate_stop_socket_path(
+    state_root: &Path,
+    attempt_id: &str,
+) -> Result<(), SupervisorError> {
+    if !valid_attempt(attempt_id) {
+        return Err(SupervisorError::Conflict);
+    }
+    use std::os::unix::ffi::OsStrExt;
+    let path = stop_socket(&state_root.join("attempts"), attempt_id);
+    let usable = unsafe { std::mem::zeroed::<libc::sockaddr_un>() }
+        .sun_path
+        .len()
+        - 1;
+    if path.as_os_str().as_bytes().len() > usable {
+        return Err(SupervisorError::StopSocketPathTooLong);
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
