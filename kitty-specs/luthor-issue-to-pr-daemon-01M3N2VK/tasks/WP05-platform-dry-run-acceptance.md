@@ -24,16 +24,24 @@ history:
 - timestamp: '2026-09-28T22:43:00Z'
   agent: system
   action: Authored from implementation plan and architecture.
+- timestamp: '2026-09-30T00:00:00Z'
+  agent: system
+  action: Recorded actual WP05 implementation ownership, including necessary shared-file edits previously approved under WP03/WP04; requirements and status are unchanged.
 authoritative_surface: src/
 create_intent:
 - src/platform.rs
 - tests/platform_dry_run.rs
 - tests/acceptance_evidence.rs
+- dev-docs/wp05-validation.md
 execution_mode: code_change
 owned_files:
 - src/platform.rs
+- src/lib.rs
+- src/supervisor.rs
 - tests/platform_dry_run.rs
+- tests/supervisor.rs
 - tests/acceptance_evidence.rs
+- dev-docs/wp05-validation.md
 tags: []
 tracker_refs: []
 ---
