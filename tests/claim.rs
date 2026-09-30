@@ -88,6 +88,109 @@ struct Fake {
     failed_page: Option<u32>,
 }
 
+#[test]
+fn gh_check_collection_preserves_results_and_failures_for_linked_draft_prs() {
+    use std::os::unix::fs::PermissionsExt;
+
+    const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+    let body = format!("Tracker-Issue: {ISSUE}");
+    let list_json = serde_json::to_string(&json!([item(9, &body)])).unwrap();
+    let mut pr_detail = detail(9, &body);
+    pr_detail["head"]["sha"] = json!(SHA);
+    let detail_json = serde_json::to_string(&pr_detail).unwrap();
+
+    let scenarios = [
+        (
+            "failed and pending checks",
+            "printf '%s' '{\"total_count\":2,\"check_runs\":[{\"name\":\"unit\",\"status\":\"completed\",\"conclusion\":\"failure\"},{\"name\":\"build\",\"status\":\"in_progress\",\"conclusion\":null}]}'",
+            Some(vec![
+                "unit:completed:failure".into(),
+                "build:in_progress:pending".into(),
+            ]),
+        ),
+        (
+            "empty result",
+            "printf '%s' '{\"total_count\":0,\"check_runs\":[]}'",
+            Some(vec![]),
+        ),
+        (
+            "forbidden request",
+            "printf '%s' '{\"status\":403}'; exit 1",
+            None,
+        ),
+        ("malformed response", "printf '%s' 'not-json'", None),
+        (
+            "incomplete pagination",
+            "case \"$2\" in *'page=1') printf '%s' '{\"total_count\":101,\"check_runs\":[{\"name\":\"unit\",\"status\":\"completed\",\"conclusion\":\"success\"}]}' ;; *) exit 2 ;; esac",
+            None,
+        ),
+    ];
+
+    for (label, checks, expected) in scenarios {
+        let dir = tempfile::tempdir().unwrap();
+        let gh = dir.path().join("gh");
+        std::fs::write(
+            &gh,
+            format!(
+                "#!/bin/sh\ncase \"$2\" in\n  *'pulls?state='*) printf '%s' '{}' ;;\n  *'/pulls/9') printf '%s' '{}' ;;\n  *'/check-runs?per_page=100&page=1'*) {} ;;\n  *'/check-runs?per_page=100&page=2'*) printf '%s' '{{\"total_count\":101,\"check_runs\":[]}}' ;;\n  *) exit 2 ;;\nesac\n",
+                list_json, detail_json, checks
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let mut reader = GhPullRequestReader::new(gh);
+        let LookupResult::OpenPreexisting(evidence) = lookup(&mut reader, REPO, ISSUE).unwrap()
+        else {
+            panic!("{label}: expected linked open PR")
+        };
+        assert!(evidence.draft, "{label}: draft open PR must still match");
+        assert_eq!(evidence.checks, expected, "{label}");
+    }
+}
+
+#[test]
+fn gh_check_collection_reads_full_page_and_bounded_second_page() {
+    use std::os::unix::fs::PermissionsExt;
+
+    const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+    let body = format!("Tracker-Issue: {ISSUE}");
+    let list_json = serde_json::to_string(&json!([item(9, &body)])).unwrap();
+    let mut pr_detail = detail(9, &body);
+    pr_detail["head"]["sha"] = json!(SHA);
+    let detail_json = serde_json::to_string(&pr_detail).unwrap();
+    let first_page =
+        vec![json!({"name":"check-{index}","status":"completed","conclusion":"success"}); 100];
+    let first_page = first_page
+        .into_iter()
+        .enumerate()
+        .map(|(index, _)| json!({"name":format!("check-{index}"),"status":"completed","conclusion":"success"}))
+        .collect::<Vec<_>>();
+    let page_one_json =
+        serde_json::to_string(&json!({"total_count":101,"check_runs":first_page})).unwrap();
+    let page_two_json = serde_json::to_string(&json!({"total_count":101,"check_runs":[{"name":"last","status":"completed","conclusion":"failure"}]})).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let gh = dir.path().join("gh");
+    std::fs::write(
+        &gh,
+        format!(
+            "#!/bin/sh\ncase \"$2\" in\n  *'pulls?state='*) printf '%s' '{}' ;;\n  *'/pulls/9') printf '%s' '{}' ;;\n  *'/check-runs?per_page=100&page=1'*) printf '%s' '{}' ;;\n  *'/check-runs?per_page=100&page=2'*) printf '%s' '{}' ;;\n  *) exit 2 ;;\nesac\n",
+            list_json, detail_json, page_one_json, page_two_json
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let mut reader = GhPullRequestReader::new(gh);
+    let LookupResult::OpenPreexisting(evidence) = lookup(&mut reader, REPO, ISSUE).unwrap() else {
+        panic!("expected linked open PR")
+    };
+    let checks = evidence.checks.unwrap();
+    assert_eq!(checks.len(), 101);
+    assert_eq!(checks[0], "check-0:completed:success");
+    assert_eq!(checks[99], "check-99:completed:success");
+    assert_eq!(checks[100], "last:completed:failure");
+}
 impl PullRequestReader for Fake {
     fn authenticated_identity(&mut self) -> Result<String, LookupError> {
         Ok("agent".into())
