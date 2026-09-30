@@ -3,6 +3,13 @@
 use serde_json::{Value, json};
 use std::{fs, os::unix::fs::PermissionsExt, path::Path, process::Command};
 
+fn tempdir() -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix("luthor-daemon-")
+        .tempdir_in("/tmp")
+        .unwrap()
+}
+
 fn fixture(dir: &Path, login: &str) -> (String, String) {
     fixture_with_principals(dir, login, "acoliver", "acoliver")
 }
@@ -83,7 +90,7 @@ fn run(path: &str, search_path: &str, extras: &[&str]) -> std::process::Output {
 
 #[test]
 fn preview_missing_target_fails_without_state_or_writes() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempdir();
     let (config, path) = fixture(dir.path(), "acoliver");
     let result = run(&config, &path, &["--issues", "8"]);
     assert!(!result.status.success());
@@ -96,7 +103,7 @@ fn preview_missing_target_fails_without_state_or_writes() {
 
 #[test]
 fn preview_selected_target_prints_summary_without_state_or_writes() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempdir();
     let (config, path) = fixture(dir.path(), "acoliver");
     let result = run(&config, &path, &["--issues", "7"]);
     assert!(
@@ -115,7 +122,7 @@ fn preview_selected_target_prints_summary_without_state_or_writes() {
 
 #[test]
 fn identity_mismatch_blocks_execution_before_assignment_or_state() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempdir();
     let (config, path) = fixture(dir.path(), "someone-else");
     let result = run(&config, &path, &["--issues", "7", "--execute"]);
     assert!(!result.status.success());
@@ -128,7 +135,7 @@ fn identity_mismatch_blocks_execution_before_assignment_or_state() {
 
 #[test]
 fn differing_assignment_principal_claims_issue_with_acoliver_write_account() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempdir();
     let (config, path) = fixture_with_principals(dir.path(), "acoliver", "issue-agent", "acoliver");
     let checkout = dir.path().join("checkout");
     fs::create_dir(&checkout).unwrap();
@@ -183,7 +190,7 @@ fn differing_assignment_principal_claims_issue_with_acoliver_write_account() {
 
 #[test]
 fn execute_unknown_target_fails_without_assignment_post() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempdir();
     let (config, path) = fixture_with_principals(dir.path(), "acoliver", "issue-agent", "acoliver");
     let result = run(&config, &path, &["--issues", "8", "--execute"]);
     assert!(!result.status.success());
@@ -200,7 +207,7 @@ fn execute_unknown_target_fails_without_assignment_post() {
 
 #[test]
 fn preview_assigned_target_fails_without_mutating_persisted_state() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempdir();
     let (config, path) = fixture_with_principals(dir.path(), "acoliver", "issue-agent", "acoliver");
     let checkout = dir.path().join("checkout");
     fs::create_dir(&checkout).unwrap();
@@ -254,7 +261,7 @@ fn preview_assigned_target_fails_without_mutating_persisted_state() {
 
 #[test]
 fn wrong_pr_author_blocks_execution_before_any_write() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempdir();
     let (config, path) =
         fixture_with_principals(dir.path(), "acoliver", "issue-agent", "someone-else");
     let result = run(&config, &path, &["--issues", "7", "--execute"]);
@@ -267,7 +274,7 @@ fn wrong_pr_author_blocks_execution_before_any_write() {
 
 #[test]
 fn suspended_account_blocks_execution_even_for_differing_assignee() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempdir();
     let (config, path) = fixture_with_principals(dir.path(), "llxprt", "issue-agent", "acoliver");
     let result = run(&config, &path, &["--issues", "7", "--execute"]);
     assert!(!result.status.success());
