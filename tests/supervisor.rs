@@ -290,6 +290,24 @@ fn changed_worktree_identity_blocks_before_reservation() {
 }
 
 #[cfg(unix)]
+#[test]
+fn partial_ready_handshake_times_out_and_keeps_reserved_slot() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let (_config, mut store, plan, _) = prepared_fake_worker(&dir);
+    let binary = dir.path().join("fake-supervisor");
+    fs::write(&binary, "#!/bin/sh\nprintf 'R'\nsleep 8\n").unwrap();
+    fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+    let started = Instant::now();
+    assert!(matches!(
+        execute_with_binary(&mut store, &plan, &binary),
+        Err(SupervisorError::ReadyTimeout)
+    ));
+    assert!(started.elapsed() < Duration::from_secs(7));
+    assert_eq!(store.reservation_count().unwrap(), 1);
+}
+
+#[cfg(unix)]
 fn direct_snapshot(root: &Path) -> WorktreeIdentity {
     use std::os::unix::fs::MetadataExt;
     git(root, &["init", "-b", "main"]);
@@ -781,6 +799,27 @@ impl Drop for FixtureGroupGuard {
         {
             unsafe { libc::kill(-pid, libc::SIGKILL) };
         }
+    }
+}
+
+#[cfg(unix)]
+fn wait_for_process_and_group_absence(pid: libc::pid_t) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let process_result = unsafe { libc::kill(pid, 0) };
+        let process_absent = process_result == -1
+            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+        let group_result = unsafe { libc::kill(-pid, 0) };
+        let group_absent = group_result == -1
+            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+        if process_absent && group_absent {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "supervisor {pid} or its process group remains"
+        );
+        thread::sleep(Duration::from_millis(10));
     }
 }
 
@@ -2285,19 +2324,7 @@ fn reaped_supervisor_with_removed_receipt_proves_recovery_quiescence() {
     let supervisor_pid = identity["pid"].as_u64().expect("supervisor PID");
     let supervisor_pid = libc::pid_t::try_from(supervisor_pid).unwrap();
 
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let mut status = 0;
-    loop {
-        let result = unsafe { libc::waitpid(supervisor_pid, &mut status, libc::WNOHANG) };
-        if result == supervisor_pid {
-            break;
-        }
-        let error = std::io::Error::last_os_error();
-        assert_eq!(result, 0, "waitpid failed: {error}");
-        assert!(Instant::now() < deadline, "supervisor was not reaped");
-        thread::sleep(Duration::from_millis(10));
-    }
-    assert!(libc::WIFEXITED(status), "supervisor did not exit normally");
+    wait_for_process_and_group_absence(supervisor_pid);
     fs::remove_file(receipt_path(&config)).unwrap();
 
     assert_eq!(
@@ -2350,26 +2377,7 @@ fn resumed_missing_receipt_accepts_attempt_snapshot_descending_from_original() {
     let pid = serde_json::from_str::<serde_json::Value>(&payload).unwrap()["pid"]
         .as_u64()
         .unwrap() as libc::pid_t;
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let mut status = 0;
-    loop {
-        let result = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
-        if result == pid {
-            break;
-        }
-        assert_eq!(
-            result,
-            0,
-            "waitpid failed: {}",
-            std::io::Error::last_os_error()
-        );
-        assert!(
-            Instant::now() < deadline,
-            "resumed supervisor was not reaped"
-        );
-        thread::sleep(Duration::from_millis(10));
-    }
-    assert!(libc::WIFEXITED(status));
+    wait_for_process_and_group_absence(pid);
     fs::remove_file(receipt).unwrap();
     assert_eq!(
         inspect_recovery_quiescence(&store, "task", "attempt-next").unwrap(),
@@ -2408,8 +2416,7 @@ fn operator_recovery_pr_lookup_failure_keeps_slot_reserved() {
     let pid = serde_json::from_str::<serde_json::Value>(&payload).unwrap()["pid"]
         .as_u64()
         .unwrap() as libc::pid_t;
-    let mut status = 0;
-    assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+    wait_for_process_and_group_absence(pid);
     fs::remove_file(receipt_path(&config)).unwrap();
     let selection = store.selection_evidence("task").unwrap().unwrap();
     let mut projects = OtherProject(selection.candidate, 1);
@@ -2448,8 +2455,7 @@ fn operator_recovery_absent_pr_records_telemetry_loss_and_releases_slot() {
     let pid = serde_json::from_str::<serde_json::Value>(&payload).unwrap()["pid"]
         .as_u64()
         .unwrap() as libc::pid_t;
-    let mut status = 0;
-    assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+    wait_for_process_and_group_absence(pid);
     fs::remove_file(receipt_path(&config)).unwrap();
     let selection = store.selection_evidence("task").unwrap().unwrap();
     let mut projects = OtherProject(selection.candidate, 1);
@@ -2546,8 +2552,7 @@ fn operator_recovery_matching_pr_completes_task_and_persists_proof() {
     let pid = serde_json::from_str::<serde_json::Value>(&payload).unwrap()["pid"]
         .as_u64()
         .unwrap() as libc::pid_t;
-    let mut status = 0;
-    assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+    wait_for_process_and_group_absence(pid);
     fs::remove_file(receipt_path(&config)).unwrap();
     let selection = store.selection_evidence("task").unwrap().unwrap();
     let branch = store
@@ -2643,9 +2648,7 @@ fn operator_recovery_release_failure_rolls_back_for_absent_and_matching_pr() {
         let pid = serde_json::from_str::<serde_json::Value>(&payload).unwrap()["pid"]
             .as_u64()
             .unwrap() as libc::pid_t;
-        let mut status = 0;
-        assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
-        assert!(libc::WIFEXITED(status), "supervisor did not exit normally");
+        wait_for_process_and_group_absence(pid);
         fs::remove_file(receipt_path(&config)).unwrap();
 
         let selection = store.selection_evidence("task").unwrap().unwrap();
@@ -2737,8 +2740,7 @@ fn operator_recovery_does_not_count_nonmatching_pr() {
     let pid = serde_json::from_str::<serde_json::Value>(&payload).unwrap()["pid"]
         .as_u64()
         .unwrap() as libc::pid_t;
-    let mut status = 0;
-    assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+    wait_for_process_and_group_absence(pid);
     fs::remove_file(receipt_path(&config)).unwrap();
     let selection = store.selection_evidence("task").unwrap().unwrap();
     let branch = store
@@ -2790,8 +2792,7 @@ fn operator_recovery_rejects_wrong_pr_head_and_author() {
         let pid = serde_json::from_str::<serde_json::Value>(&payload).unwrap()["pid"]
             .as_u64()
             .unwrap() as libc::pid_t;
-        let mut status = 0;
-        assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+        wait_for_process_and_group_absence(pid);
         fs::remove_file(receipt_path(&config)).unwrap();
         let selection = store.selection_evidence("task").unwrap().unwrap();
         let branch = store
@@ -2851,8 +2852,7 @@ fn operator_recovery_stale_claim_keeps_slot_reserved_without_pr_lookup() {
     let pid = serde_json::from_str::<serde_json::Value>(&payload).unwrap()["pid"]
         .as_u64()
         .unwrap() as libc::pid_t;
-    let mut status = 0;
-    assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+    wait_for_process_and_group_absence(pid);
     fs::remove_file(receipt_path(&config)).unwrap();
     let selection = store.selection_evidence("task").unwrap().unwrap();
     let mut projects = OtherProject(selection.candidate, 0);

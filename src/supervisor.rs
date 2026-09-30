@@ -44,6 +44,10 @@ pub enum SupervisorError {
     Json(#[from] serde_json::Error),
     #[error("launch plan does not match verified task or worktree")]
     Conflict,
+    #[error(
+        "supervisor READY handshake timed out; reservation held for identity-safe reconciliation"
+    )]
+    ReadyTimeout,
     #[error("supervisor execution is unavailable; reservation held for reconciliation")]
     ExecutionUnavailable,
     #[error("process gate closed without release")]
@@ -2243,21 +2247,56 @@ pub fn execute_with_binary(
         });
     }
     let mut child = command.spawn()?;
-    let mut ready = String::new();
-    use std::io::BufRead;
-    let mut reader = std::io::BufReader::new(child.stdout.take().expect("piped stdout"));
-    if reader.read_line(&mut ready)? != 6 || ready != "READY\n" {
+    let mut gate = child.stdin.take().expect("piped stdin");
+    let supervisor_pid = child.id();
+    let stdout = child.stdout.take().expect("piped stdout");
+    std::thread::Builder::new()
+        .name(format!("supervisor-reaper-{supervisor_pid}"))
+        .spawn(move || {
+            let mut child = child;
+            let _ = child.wait();
+        })?;
+    use std::io::Read;
+    use std::os::fd::AsRawFd;
+    let mut reader = stdout;
+    let fd = reader.as_raw_fd();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut ready = [0u8; 6];
+    for byte in &mut ready {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(SupervisorError::ReadyTimeout);
+        }
+        let timeout_ms = i32::try_from(remaining.as_millis().max(1)).unwrap_or(i32::MAX);
+        let mut pollfd = libc::pollfd {
+            fd,
+            events: libc::POLLIN | libc::POLLHUP,
+            revents: 0,
+        };
+        let polled = unsafe { libc::poll(&mut pollfd, 1, timeout_ms) };
+        if polled == 0 {
+            return Err(SupervisorError::ReadyTimeout);
+        }
+        if polled < 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        if reader.read_exact(std::slice::from_mut(byte)).is_err() {
+            return Err(SupervisorError::ExecutionUnavailable);
+        }
+    }
+    if ready != *b"READY\n" {
         return Err(SupervisorError::ExecutionUnavailable);
     }
-    let (boot, start) = identity(child.id())?;
-    let process = serde_json::json!({"pid":child.id(),"boot_identity":boot,"start_identity":start});
+    let (boot, start) = identity(supervisor_pid)?;
+    let process =
+        serde_json::json!({"pid":supervisor_pid,"boot_identity":boot,"start_identity":start});
     let registered: ChildIdentity =
         private_bytes(&attempts.join(format!("{}.child.json", plan.attempt_id)))
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
             .ok_or(SupervisorError::IdentityUnavailable)?;
     let child_pid =
         i32::try_from(registered.pid).map_err(|_| SupervisorError::IdentityUnavailable)?;
-    if registered.pid == child.id()
+    if registered.pid == supervisor_pid
         || registered.pid != registered.group_id
         || unsafe { libc::getpgid(child_pid) } != child_pid
         || identity(registered.pid).ok().as_ref()
@@ -2287,7 +2326,6 @@ pub fn execute_with_binary(
         "gate_release",
         &process.to_string(),
     )?;
-    let mut gate = child.stdin.take().expect("piped stdin");
     gate.write_all(b"R")?;
     gate.flush()?;
     store.record_evidence(
