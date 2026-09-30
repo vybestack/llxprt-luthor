@@ -131,7 +131,8 @@
       "shell_pid": 38977,
       "shell_pid_created_at": "1790708842.249887",
       "subtasks": {
-        "T009": "done"
+        "T009": "done",
+        "T010": "done"
       }
     },
     "WP05": {
