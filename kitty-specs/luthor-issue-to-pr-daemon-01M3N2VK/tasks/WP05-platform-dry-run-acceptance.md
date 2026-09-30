@@ -41,6 +41,7 @@ owned_files:
 - src/state.rs
 - tests/state.rs
 - tests/daemon.rs
+- tests/coordinator.rs
 - src/platform.rs
 - src/lib.rs
 - src/supervisor.rs

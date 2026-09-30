@@ -771,6 +771,24 @@ where
     L: SupervisorLauncher,
     I: IdCreator,
 {
+    let startup = startup_reconcile_all(store, dependencies.projects, dependencies.prs)?;
+    schedule_candidates_after_startup(store, candidates, dependencies, startup)
+}
+
+/// Schedule candidates using startup reconciliation already performed by the caller.
+pub fn schedule_candidates_after_startup<P, Q, W, L, I>(
+    store: &mut StateStore,
+    candidates: Vec<Candidate>,
+    dependencies: ScheduleDependencies<'_, P, Q, W, L, I>,
+    startup: StartupReport,
+) -> Result<ScheduleReport, ScheduleError>
+where
+    P: ProjectReader,
+    Q: PullRequestReader,
+    W: AssignmentWriter,
+    L: SupervisorLauncher,
+    I: IdCreator,
+{
     let ScheduleDependencies {
         config,
         config_revision,
@@ -781,7 +799,7 @@ where
         ids,
     } = dependencies;
     let mut report = ScheduleReport {
-        startup: startup_reconcile_all(store, projects, prs)?,
+        startup,
         ..Default::default()
     };
     if report.startup.scheduling_blocked() {

@@ -4,7 +4,7 @@ use luthor::{
     coordinator::{
         AttemptReview, DispatchDependencies, DispatchError, IdCreator, ResumeDependencies,
         ScheduleDependencies, SupervisorLauncher, dispatch_one, resume_one, schedule_candidates,
-        startup_reconcile_all,
+        schedule_candidates_after_startup, startup_reconcile_all,
     },
     eligibility::Candidate,
     github::{
@@ -833,4 +833,78 @@ fn scheduler_dispatches_other_task_after_verified_pause_without_resuming_paused_
         f.store.ensure_dispatch_capacity(),
         Err(luthor::state::StateError::Capacity { .. })
     ));
+}
+
+#[test]
+fn scheduler_uses_precomputed_startup_without_reconciling_again() {
+    let mut f = Fixture::new(1);
+    let c = f.candidate.clone();
+    let mut github = FakeGithub::new(&c);
+    let mut writer = FakeWriter::default();
+    let mut launcher = FakeLauncher::default();
+    f.run("task-a", &c, &mut github, &mut writer, &mut launcher)
+        .unwrap();
+    let latest = f.store.latest_attempt("task-a").unwrap();
+    let mut projects = FakeGithub::new(&f.candidate);
+    let mut prs = FakePr::default();
+    let mut assignments = FakeWriter::default();
+    let mut scheduler_launcher = FakeLauncher::default();
+    let report = schedule_candidates_after_startup(
+        &mut f.store,
+        vec![],
+        ScheduleDependencies {
+            config: &f.config,
+            config_revision: "revision",
+            projects: &mut projects,
+            prs: &mut prs,
+            assignments: &mut assignments,
+            launcher: &mut scheduler_launcher,
+            ids: &mut FixedIds::default(),
+        },
+        Default::default(),
+    )
+    .unwrap();
+    assert_eq!(report.startup, Default::default());
+    assert!(report.launched.is_empty());
+    assert_eq!(projects.reads, 0);
+    assert_eq!(prs.lookups, 0);
+    assert_eq!(f.store.latest_attempt("task-a").unwrap(), latest);
+    assert_eq!(f.store.reservation_count().unwrap(), 1);
+}
+
+#[test]
+fn scheduler_with_precomputed_blocked_startup_does_not_select_candidates() {
+    let mut f = Fixture::new(1);
+    let c = f.candidate.clone();
+    let mut projects = FakeGithub::new(&c);
+    let mut prs = FakePr::default();
+    let mut assignments = FakeWriter::default();
+    let mut launcher = FakeLauncher::default();
+    let startup = luthor::coordinator::StartupReport {
+        source_holds: vec![luthor::coordinator::SourceHold {
+            task_id: "task-source".into(),
+            kind: "claim".into(),
+        }],
+        ..Default::default()
+    };
+    let report = schedule_candidates_after_startup(
+        &mut f.store,
+        vec![c],
+        ScheduleDependencies {
+            config: &f.config,
+            config_revision: "revision",
+            projects: &mut projects,
+            prs: &mut prs,
+            assignments: &mut assignments,
+            launcher: &mut launcher,
+            ids: &mut FixedIds::default(),
+        },
+        startup.clone(),
+    )
+    .unwrap();
+    assert_eq!(report.startup, startup);
+    assert!(report.launched.is_empty());
+    assert_eq!(projects.reads, 0);
+    assert_eq!(prs.lookups, 0);
+    assert_eq!(assignments.calls, 0);
 }
