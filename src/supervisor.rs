@@ -830,16 +830,38 @@ fn private_file(path: &Path) -> Result<File, SupervisorError> {
     Ok(options.open(path)?)
 }
 
+#[cfg(any(test, target_os = "macos"))]
+fn darwin_boot_identity(bytes: &[u8]) -> Result<String, SupervisorError> {
+    let uuid = std::str::from_utf8(bytes)
+        .map_err(|_| SupervisorError::IdentityUnavailable)?
+        .trim();
+    if uuid.len() != 36
+        || !uuid.bytes().enumerate().all(|(i, byte)| {
+            if matches!(i, 8 | 13 | 18 | 23) {
+                byte == b'-'
+            } else {
+                byte.is_ascii_hexdigit()
+            }
+        })
+        || uuid.bytes().all(|byte| byte == b'0' || byte == b'-')
+    {
+        return Err(SupervisorError::IdentityUnavailable);
+    }
+    Ok(format!(
+        "darwin-bootsessionuuid:{}",
+        uuid.to_ascii_lowercase()
+    ))
+}
+
 #[cfg(target_os = "macos")]
 fn identity(pid: u32) -> Result<(String, String), SupervisorError> {
-    fn query(args: &[&str]) -> Result<String, SupervisorError> {
-        let output = Command::new("/usr/sbin/sysctl").args(args).output()?;
-        if !output.status.success() {
-            return Err(SupervisorError::IdentityUnavailable);
-        }
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    let output = Command::new("/usr/sbin/sysctl")
+        .args(["-n", "kern.bootsessionuuid"])
+        .output()?;
+    if !output.status.success() {
+        return Err(SupervisorError::IdentityUnavailable);
     }
-    let boot = query(&["-n", "kern.boottime"])?;
+    let boot = darwin_boot_identity(&output.stdout)?;
     let pid = i32::try_from(pid).map_err(|_| SupervisorError::IdentityUnavailable)?;
     let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
     let size = std::mem::size_of_val(&info) as i32;
@@ -1848,6 +1870,39 @@ pub(crate) fn registered_processes_absent(
     supervisor: &ProcessIdentity,
     tracked: &[ProcessIdentity],
 ) -> bool {
+    registered_process_absence(child, supervisor, tracked).is_ok()
+}
+
+#[cfg(unix)]
+fn registered_process_absence(
+    child: &ChildIdentity,
+    supervisor: &ProcessIdentity,
+    tracked: &[ProcessIdentity],
+) -> Result<(), &'static str> {
+    registered_process_absence_with(
+        child,
+        supervisor,
+        tracked,
+        || identity(std::process::id()).map(|(boot, _)| boot),
+        |pid| {
+            if unsafe { libc::kill(pid as libc::pid_t, 0) } == 0 {
+                return false;
+            }
+            std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+        },
+        group_absent,
+    )
+}
+
+#[cfg(unix)]
+fn registered_process_absence_with(
+    child: &ChildIdentity,
+    supervisor: &ProcessIdentity,
+    tracked: &[ProcessIdentity],
+    current_boot: impl FnOnce() -> Result<String, SupervisorError>,
+    mut pid_absent: impl FnMut(u32) -> bool,
+    mut group_absent: impl FnMut(i32) -> bool,
+) -> Result<(), &'static str> {
     let bounded = |boot: &str, start: &str| {
         !boot.trim().is_empty()
             && boot.len() <= 256
@@ -1862,6 +1917,7 @@ pub(crate) fn registered_processes_absent(
         || child.group_id != child.pid
         || !bounded(&child.boot_identity, &child.start_identity)
         || !bounded(&supervisor.boot_identity, &supervisor.start_identity)
+        || supervisor.boot_identity != child.boot_identity
         || tracked.iter().any(|process| {
             process.pid == 0
                 || i32::try_from(process.pid).is_err()
@@ -1869,25 +1925,27 @@ pub(crate) fn registered_processes_absent(
                 || process.boot_identity != child.boot_identity
         })
     {
-        return false;
+        return Err("registered process identity is invalid or contradictory");
     }
-    let Ok(current) = identity(std::process::id()) else {
-        return false;
-    };
-    if current.0 != child.boot_identity || current.0 != supervisor.boot_identity {
-        return false;
+    // Historical boottime contains no boot-session UUID to compare. Neither
+    // equal seconds nor present-day ESRCH probes can supply that missing link.
+    if child.boot_identity.starts_with("{ sec") {
+        return Err("historical Darwin boot identity cannot prove boot continuity");
     }
-    let pid_absent = |pid: u32| {
-        if unsafe { libc::kill(pid as libc::pid_t, 0) } == 0 {
-            return false;
-        }
-        std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
-    };
-    pid_absent(child.pid)
-        && pid_absent(supervisor.pid)
-        && tracked.iter().all(|process| pid_absent(process.pid))
-        && group_absent(child.group_id as i32)
-        && group_absent(supervisor.pid as i32)
+    let current = current_boot().map_err(|_| "current boot identity is unavailable")?;
+    if current != child.boot_identity {
+        return Err("registered boot identity differs from current boot");
+    }
+    if !pid_absent(child.pid)
+        || !pid_absent(supervisor.pid)
+        || !tracked.iter().all(|process| pid_absent(process.pid))
+    {
+        return Err("registered process is present or its absence is unproven");
+    }
+    if !group_absent(child.group_id as i32) || !group_absent(supervisor.pid as i32) {
+        return Err("registered process group is present or its absence is unproven");
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -2146,8 +2204,10 @@ fn reconcile_attempt_inner(
     if store.reconciled_exit(task_id, attempt_id, &evidence, &outcome)? && !recheck_processes {
         return Ok(completed);
     }
-    if recheck_processes && !registered_processes_absent(&child_file, &supervisor, &tracked) {
-        return Ok(held("registered process absence is unproven"));
+    if recheck_processes
+        && let Err(reason) = registered_process_absence(&child_file, &supervisor, &tracked)
+    {
+        return Ok(held(reason));
     }
     match identity(supervisor.pid) {
         Ok((boot, start))
@@ -2509,4 +2569,200 @@ pub fn execute_with_binary(
 #[cfg(not(unix))]
 pub fn execute(_store: &mut StateStore, _plan: &LaunchPlan) -> Result<(), SupervisorError> {
     Err(SupervisorError::ExecutionUnavailable)
+}
+
+#[cfg(test)]
+mod darwin_boot_tests {
+    use super::*;
+
+    #[test]
+    fn bootsession_uuid_is_validated_and_normalized() {
+        assert_eq!(
+            darwin_boot_identity(b"7379D9DB-543D-4D87-819E-086CEDBF1EF1\n").unwrap(),
+            "darwin-bootsessionuuid:7379d9db-543d-4d87-819e-086cedbf1ef1"
+        );
+        for invalid in [
+            &b""[..],
+            b" \n",
+            b"00000000-0000-0000-0000-000000000000",
+            b"7379D9DB543D4D87819E086CEDBF1EF1",
+            b"7379D9DB-543D-4D87-819E-086CEDBF1EFG",
+            b"7379D9DB-543D-4D87-819E-086CEDBF1EF1\nsecond-line",
+            b"7379D9DB-543D-4D87-819E-086CEDBF1EF1\0",
+            b"\xff",
+            b"{ sec = 1790533213, usec = 220969 } Sun Sep 27 15:20:13 2026",
+        ] {
+            assert!(matches!(
+                darwin_boot_identity(invalid),
+                Err(SupervisorError::IdentityUnavailable)
+            ));
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod registered_absence_tests {
+    use super::*;
+    use std::cell::RefCell;
+    const BOOT: &str = "darwin-bootsessionuuid:7379d9db-543d-4d87-819e-086cedbf1ef1";
+
+    fn records() -> (ChildIdentity, ProcessIdentity, Vec<ProcessIdentity>) {
+        (
+            ChildIdentity {
+                pid: 101,
+                group_id: 101,
+                boot_identity: BOOT.into(),
+                start_identity: "child".into(),
+            },
+            ProcessIdentity {
+                pid: 102,
+                boot_identity: BOOT.into(),
+                start_identity: "supervisor".into(),
+            },
+            vec![ProcessIdentity {
+                pid: 103,
+                boot_identity: BOOT.into(),
+                start_identity: "descendant".into(),
+            }],
+        )
+    }
+
+    #[test]
+    fn unchanged_uuid_requires_independent_esrch_probes_for_all_registered_pids_and_groups() {
+        let (child, supervisor, tracked) = records();
+        let probes = RefCell::new(Vec::new());
+        assert_eq!(
+            registered_process_absence_with(
+                &child,
+                &supervisor,
+                &tracked,
+                || Ok(BOOT.into()),
+                |pid| {
+                    probes.borrow_mut().push(pid as i32);
+                    true
+                },
+                |group| {
+                    probes.borrow_mut().push(-group);
+                    true
+                }
+            ),
+            Ok(())
+        );
+        assert_eq!(*probes.borrow(), [101, 102, 103, -101, -102]);
+    }
+
+    #[test]
+    fn changed_or_unavailable_boot_refuses_before_pid_or_group_probes() {
+        let (child, supervisor, tracked) = records();
+        for current in [
+            Ok("darwin-bootsessionuuid:00000001-0000-4000-8000-000000000001".into()),
+            Err(SupervisorError::IdentityUnavailable),
+        ] {
+            assert!(
+                registered_process_absence_with(
+                    &child,
+                    &supervisor,
+                    &tracked,
+                    || current,
+                    |_| panic!("boot unproven"),
+                    |_| panic!("boot unproven")
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn historical_boottime_never_proves_continuity_even_with_equal_seconds_or_exact_value() {
+        let (mut child, mut supervisor, mut tracked) = records();
+        let old = "{ sec = 1790533213, usec = 116017 } Sun Sep 27 15:20:13 2026";
+        child.boot_identity = old.into();
+        supervisor.boot_identity = old.into();
+        tracked[0].boot_identity = old.into();
+        for current in [
+            old,
+            "{ sec = 1790533213, usec = 220969 } Sun Sep 27 15:20:13 2026",
+            "{ sec = 1790539999, usec = 116017 } Sun Sep 27 17:13:19 2026",
+            BOOT,
+        ] {
+            assert_eq!(
+                registered_process_absence_with(
+                    &child,
+                    &supervisor,
+                    &tracked,
+                    || Ok(current.into()),
+                    |_| panic!("historical boot unproven"),
+                    |_| panic!("historical boot unproven")
+                ),
+                Err("historical Darwin boot identity cannot prove boot continuity")
+            );
+        }
+    }
+
+    #[test]
+    fn live_reused_or_unobservable_pids_and_groups_all_refuse() {
+        let (child, supervisor, tracked) = records();
+        for present in [101, 102, 103, -101, -102] {
+            assert!(
+                registered_process_absence_with(
+                    &child,
+                    &supervisor,
+                    &tracked,
+                    || Ok(BOOT.into()),
+                    |pid| pid as i32 != present,
+                    |group| -group != present
+                )
+                .is_err()
+            );
+        }
+        // Start identity cannot turn a reused PID into absence.
+        let mut reused = child.clone();
+        reused.start_identity = "old-process-start".into();
+        assert!(
+            registered_process_absence_with(
+                &reused,
+                &supervisor,
+                &tracked,
+                || Ok(BOOT.into()),
+                |pid| pid != reused.pid,
+                |_| true
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn contradictory_or_malformed_records_refuse_before_process_probes() {
+        for contradiction in [
+            "child_boot",
+            "supervisor_boot",
+            "tracked_boot",
+            "group",
+            "pid",
+            "start",
+        ] {
+            let (mut child, mut supervisor, mut tracked) = records();
+            match contradiction {
+                "child_boot" => child.boot_identity.clear(),
+                "supervisor_boot" => supervisor.boot_identity = "another".into(),
+                "tracked_boot" => tracked[0].boot_identity = "another".into(),
+                "group" => child.group_id = supervisor.pid,
+                "pid" => child.pid = supervisor.pid,
+                "start" => tracked[0].start_identity.clear(),
+                _ => unreachable!(),
+            }
+            assert!(
+                registered_process_absence_with(
+                    &child,
+                    &supervisor,
+                    &tracked,
+                    || Ok(BOOT.into()),
+                    |_| panic!("contradiction"),
+                    |_| panic!("contradiction")
+                )
+                .is_err(),
+                "{contradiction}"
+            );
+        }
+    }
 }

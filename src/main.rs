@@ -351,7 +351,7 @@ fn dispatch(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn safe_error_stage(error: &luthor::coordinator::DispatchError) -> &'static str {
+fn safe_error_stage(error: &luthor::coordinator::DispatchError) -> &str {
     use luthor::coordinator::DispatchError;
     match error {
         DispatchError::State(_) => "state transition failed",
@@ -361,6 +361,9 @@ fn safe_error_stage(error: &luthor::coordinator::DispatchError) -> &'static str 
         DispatchError::ExistingPr => "pull request exists",
         DispatchError::PullRequest(_) => "pull request lookup failed",
         DispatchError::Supervisor(_) => "worker launch failed",
+        // Retry reasons originate from fixed reconciliation messages, never
+        // supplied identities, paths, argv, or external error text.
+        DispatchError::RetryHeld { reason } => reason,
     }
 }
 

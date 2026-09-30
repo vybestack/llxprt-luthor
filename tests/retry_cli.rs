@@ -35,6 +35,58 @@ fn git(path: &Path, args: &[&str]) {
     );
 }
 
+fn replace_fixture_boot(state: &Path, attempt: &str, boot: &str) {
+    let receipt_path = state.join(format!("attempts/{attempt}.receipt.json"));
+    let mut receipt: luthor::supervisor::ExitReceipt =
+        serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
+    receipt.boot_identity = boot.into();
+    fs::write(&receipt_path, serde_json::to_vec(&receipt).unwrap()).unwrap();
+    let child_path = state.join(format!("attempts/{attempt}.child.json"));
+    let mut child: Value = serde_json::from_slice(&fs::read(&child_path).unwrap()).unwrap();
+    child["boot_identity"] = json!(boot);
+    fs::write(&child_path, serde_json::to_vec(&child).unwrap()).unwrap();
+    let db = rusqlite::Connection::open(state.join("state.sqlite3")).unwrap();
+    db.execute("UPDATE evidence SET payload=json_set(payload,'$.boot_identity',?1)
+        WHERE attempt_id=?2 AND kind IN ('child_registered','supervisor_ready','gate_sent','tracked_descendant')",
+        [boot, attempt]).unwrap();
+    db.execute(
+        "UPDATE evidence SET payload=?1 WHERE attempt_id=?2 AND kind='attempt_exit'",
+        [serde_json::to_string(&receipt).unwrap().as_str(), attempt],
+    )
+    .unwrap();
+    db.execute(
+        "UPDATE intents SET detail=json_set(detail,'$.boot_identity',?1)
+        WHERE attempt_id=?2 AND kind='gate_release'",
+        [boot, attempt],
+    )
+    .unwrap();
+}
+
+fn state_rows(state: &Path) -> Vec<Vec<Vec<rusqlite::types::Value>>> {
+    let db = rusqlite::Connection::open(state.join("state.sqlite3")).unwrap();
+    [
+        "tasks",
+        "attempts",
+        "reservations",
+        "intents",
+        "evidence",
+        "state_meta",
+    ]
+    .iter()
+    .map(|table| {
+        let mut statement = db
+            .prepare(&format!("SELECT * FROM {table} ORDER BY rowid"))
+            .unwrap();
+        let columns = statement.column_count();
+        statement
+            .query_map([], |row| (0..columns).map(|i| row.get(i)).collect())
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    })
+    .collect()
+}
+
 #[test]
 fn explicit_retry_cli_uses_private_config_and_never_reassigns_or_reselects() {
     let dir = tempfile::Builder::new()
@@ -176,6 +228,87 @@ fn explicit_retry_cli_uses_private_config_and_never_reassigns_or_reselects() {
         before,
         "missing execution authorization performed GitHub reads"
     );
+    let receipt_file = config
+        .state_root
+        .join(format!("attempts/{previous}.receipt.json"));
+    let initial_receipt: luthor::supervisor::ExitReceipt =
+        serde_json::from_slice(&fs::read(&receipt_file).unwrap()).unwrap();
+    #[cfg(target_os = "macos")]
+    {
+        let boot = Command::new("/usr/sbin/sysctl")
+            .args(["-n", "kern.bootsessionuuid"])
+            .output()
+            .unwrap();
+        assert!(boot.status.success());
+        assert_eq!(
+            initial_receipt.boot_identity,
+            format!(
+                "darwin-bootsessionuuid:{}",
+                String::from_utf8(boot.stdout)
+                    .unwrap()
+                    .trim()
+                    .to_ascii_lowercase()
+            )
+        );
+    }
+    for (boot, reason) in [
+        (
+            "{ sec = 1790533213, usec = 116017 } Sun Sep 27 15:20:13 2026",
+            "historical Darwin boot identity cannot prove boot continuity",
+        ),
+        (
+            "{ sec = 1790533213, usec = 220969 } Sun Sep 27 15:20:13 2026",
+            "historical Darwin boot identity cannot prove boot continuity",
+        ),
+        (
+            "darwin-bootsessionuuid:00000001-0000-4000-8000-000000000001",
+            "registered boot identity differs from current boot",
+        ),
+        (
+            "untrusted-secret\n\x1b[31m",
+            "registered boot identity differs from current boot",
+        ),
+        ("", "child registration mismatch"),
+    ] {
+        // Only disposable fixture evidence is changed to reproduce historical records.
+        replace_fixture_boot(&config.state_root, previous, boot);
+        let rows = state_rows(&config.state_root);
+        let files: Vec<_> = fs::read_dir(config.state_root.join("attempts"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|p| p.is_file())
+            .map(|p| {
+                let bytes = fs::read(&p).unwrap();
+                (p, bytes)
+            })
+            .collect();
+        let calls_before = fs::read_to_string(&calls).unwrap();
+        let out = invoke(&["--execute"]);
+        assert!(!out.status.success(), "{boot}");
+        assert!(out.stdout.is_empty());
+        assert_eq!(
+            String::from_utf8(out.stderr).unwrap(),
+            format!("luthor: retry refused or held: {reason}\n")
+        );
+        assert_eq!(
+            state_rows(&config.state_root),
+            rows,
+            "refusal changed history"
+        );
+        for (file, bytes) in files {
+            assert_eq!(fs::read(file).unwrap(), bytes);
+        }
+        let calls_after = fs::read_to_string(&calls).unwrap();
+        assert!(
+            calls_after
+                .strip_prefix(&calls_before)
+                .unwrap()
+                .lines()
+                .all(|call| call.contains("user")),
+            "refusal read source or PRs"
+        );
+    }
+    replace_fixture_boot(&config.state_root, previous, &initial_receipt.boot_identity);
     let out = invoke(&["--execute"]);
     assert!(
         out.status.success(),

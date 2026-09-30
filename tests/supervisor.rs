@@ -735,7 +735,7 @@ fn detached_same_binary_dispatch_records_gate_and_worker_receipt() {
 #[cfg(target_os = "macos")]
 fn observed_process_identity(pid: u32) -> Option<(String, String)> {
     let boot = Command::new("/usr/sbin/sysctl")
-        .args(["-n", "kern.boottime"])
+        .args(["-n", "kern.bootsessionuuid"])
         .output()
         .ok()?;
     if !boot.status.success() {
@@ -756,7 +756,13 @@ fn observed_process_identity(pid: u32) -> Option<(String, String)> {
         && info.pbi_start_tvsec != 0)
         .then(|| {
             (
-                String::from_utf8_lossy(&boot.stdout).trim().into(),
+                format!(
+                    "darwin-bootsessionuuid:{}",
+                    String::from_utf8(boot.stdout)
+                        .expect("sysctl UUID UTF-8")
+                        .trim()
+                        .to_ascii_lowercase()
+                ),
                 format!("{}:{}", info.pbi_start_tvsec, info.pbi_start_tvusec),
             )
         })
@@ -4475,6 +4481,9 @@ fn retry_refusals_never_reserve_or_launch_or_rewrite_selection() {
         "task_identity",
         "claim_intent",
         "tracked_live",
+        "tracked_reused",
+        "supervisor_contradiction",
+        "receipt_contradiction",
         "supervisor_error",
         "invalid_config",
     ] {
@@ -4570,9 +4579,20 @@ fn retry_refusals_never_reserve_or_launch_or_rewrite_selection() {
             "claim_intent" => {
                 db.execute("UPDATE intents SET detail='{}' WHERE task_id='task' AND kind='claim_assignment'", []).unwrap();
             }
-            "tracked_live" => {
-                let (boot, start) = test_process_identity(std::process::id());
+            "tracked_live" | "tracked_reused" => {
+                let (boot, mut start) = test_process_identity(std::process::id());
+                if refusal == "tracked_reused" {
+                    start = "different historical start".into();
+                }
                 store.record_evidence("task", Some("attempt-real"), "tracked_descendant", &serde_json::json!({"pid":std::process::id(), "boot_identity":boot,"start_identity":start}).to_string()).unwrap();
+            }
+            "supervisor_contradiction" => {
+                db.execute("UPDATE evidence SET payload=json_set(payload,'$.boot_identity','contradiction') WHERE attempt_id='attempt-real' AND kind='supervisor_ready'", []).unwrap();
+            }
+            "receipt_contradiction" => {
+                edit_receipt(&config, |receipt| {
+                    receipt.boot_identity = "contradiction".into()
+                });
             }
             "supervisor_error" => {
                 fs::write(
@@ -4598,6 +4618,13 @@ fn retry_refusals_never_reserve_or_launch_or_rewrite_selection() {
             "{refusal}"
         );
         assert_eq!(launcher.0, 0, "{refusal}");
+        assert!(
+            store
+                .evidence_payloads("task", "attempt-retry", "retry_authorized")
+                .unwrap()
+                .is_empty(),
+            "{refusal}"
+        );
         assert_eq!(
             store.reservation_count().unwrap(),
             reservations,

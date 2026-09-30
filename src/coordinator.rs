@@ -754,6 +754,8 @@ pub enum DispatchError {
     PullRequest(#[from] LookupError),
     #[error(transparent)]
     Supervisor(#[from] SupervisorError),
+    #[error("retry held: {reason}")]
+    RetryHeld { reason: String },
     #[error("claim changed before launch")]
     ChangedClaim,
     #[error("pull request is no longer absent")]
@@ -844,6 +846,7 @@ where
             DispatchError::ExistingPr => "prelaunch PR present",
             DispatchError::PullRequest(_) => "prelaunch PR read failed",
             DispatchError::Supervisor(_) => "launch preparation or dispatch failed",
+            DispatchError::RetryHeld { .. } => "retry held before launch",
             DispatchError::State(_) => "state transition failed",
         };
         store.hold_task(task_id, reason)?;
@@ -1026,6 +1029,7 @@ where
             DispatchError::ExistingPr => "resume PR present",
             DispatchError::PullRequest(_) => "resume PR read failed",
             DispatchError::Supervisor(_) => "resume preparation or dispatch failed",
+            DispatchError::RetryHeld { .. } => "retry held before launch",
             DispatchError::State(_) => "resume state transition failed",
             DispatchError::Worktree(_) => "resume worktree failed",
         };
@@ -1080,14 +1084,19 @@ pub fn retry_one<P: ProjectReader, Q: PullRequestReader, L: SupervisorLauncher>(
     }
     supervisor::validate_stop_socket_path(store.root(), attempt_id)?;
     store.ensure_dispatch_capacity()?;
-    if !matches!(
-        supervisor::recheck_retry_exit(store, task_id, previous_attempt_id)?,
+    match supervisor::recheck_retry_exit(store, task_id, previous_attempt_id)? {
         supervisor::Reconciliation::Completed {
             exit_code: Some(_),
-            signal: None
+            signal: None,
+        } => {}
+        supervisor::Reconciliation::Held { reason } => {
+            return Err(DispatchError::RetryHeld { reason });
         }
-    ) {
-        return Err(SupervisorError::Conflict.into());
+        _ => {
+            return Err(DispatchError::RetryHeld {
+                reason: "previous attempt is not a verified natural exit".into(),
+            });
+        }
     }
     let claim = store
         .source_claim_intent(task_id)?

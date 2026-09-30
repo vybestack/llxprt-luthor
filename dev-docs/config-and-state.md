@@ -81,3 +81,43 @@ configuration must pass validation. Both its templates must be valid.
 Normal stop/resume invariants and stored-selection semantics are unchanged. A
 changed-revision retry cannot subsequently use normal `resume` to adopt that
 configuration. No startup, scheduler or reconciliation path launches a retry.
+
+
+### Darwin boot identity and historical refusal
+
+New Darwin process registrations use the validated, lowercase
+`darwin-bootsessionuuid:<UUID>` identity from `kern.bootsessionuuid`. Empty,
+malformed, nil, non-UTF-8 or unavailable UUID output fails closed. There is no
+`kern.boottime` fallback. Process-start identity still comes from
+`PROC_PIDTBSDINFO`; its PID and start timestamp checks are unchanged.
+
+Retry requires the recorded child, supervisor and tracked descendants to agree
+on the current boot identity. Independent PID and group probes must all return
+ESRCH. A live or reused PID, present group, permission error, unavailable identity
+or contradictory record refuses continuation before a new reservation or launch.
+Retry holds expose fixed reconciliation messages; they do not print recorded
+identities, paths, command arguments or external error details.
+
+Historical `kern.boottime` records remain unchanged and cannot establish boot
+continuity with a new UUID. The observed historical value
+`{ sec = 1790533213, usec = 116017 } Sun Sep 27 15:20:13 2026` and later value
+`{ sec = 1790533213, usec = 220969 } Sun Sep 27 15:20:13 2026` illustrate why
+whole-string comparison was unstable. Equal seconds/date do not establish a
+boot-session identity. Present-day ESRCH probes establish current absence of
+registered IDs, but cannot recover the boot-session identity of an exited
+historical process. An operator statement or an audit recording those same
+observations supplies no independent continuity evidence.
+
+There is no historical revalidation, identity rewrite, seconds-only comparison,
+force flag or migration. A historical retry refuses with:
+
+```text
+luthor: retry refused or held: historical Darwin boot identity cannot prove boot continuity
+```
+
+The original issue #2 attempt therefore remains blocked under the existing
+continuity requirement. Issue #5 fixes new identity recording and diagnostics;
+it does not authorize that historical continuation. Its released reservation,
+receipt, selection, plan and worktree must remain intact. The existing `recover`
+command handles missing exit telemetry and cannot authorize this completed
+historical attempt.
