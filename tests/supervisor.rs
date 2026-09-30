@@ -4056,3 +4056,28 @@ fn resume_rejects_same_prompt_and_tampered_session_or_inode_before_reservation()
         assert!(store.launch_intent("fresh").unwrap().is_none());
     }
 }
+
+#[test]
+fn initial_rejects_conflicting_session_and_cwd_arguments_before_reservation() {
+    let alterations: &[&[&str]] = &[
+        &["--session", "other-task"],
+        &["--cwd", "/tmp/other"],
+        &["--session=other-task"],
+        &["--cwd=/tmp/other"],
+    ];
+    for (index, alteration) in alterations.iter().enumerate() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut config, candidate) = configured(dir.path());
+        config
+            .initial
+            .args
+            .extend(alteration.iter().map(|arg| (*arg).into()));
+        let mut store = StateStore::open(&config.state_root, 1).unwrap();
+        claimed(&mut store, &config, &candidate, dir.path());
+
+        let attempt = format!("attempt-invalid-{index}");
+        assert!(prepare_initial(&mut store, "task", &attempt).is_err());
+        assert_eq!(store.reservation_count().unwrap(), 0, "{alteration:?}");
+        assert!(store.launch_intent(&attempt).unwrap().is_none());
+    }
+}

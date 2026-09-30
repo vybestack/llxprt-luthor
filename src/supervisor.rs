@@ -465,10 +465,14 @@ pub struct ExitReceipt {
 }
 
 fn requires_pair(args: &[String], flag: &str, value: &str) -> bool {
-    args.windows(2)
-        .filter(|pair| pair[0] == flag && pair[1] == value)
-        .count()
-        == 1
+    let mut occurrences = args
+        .iter()
+        .enumerate()
+        .filter(|(_, arg)| arg.as_str() == flag || arg.starts_with(&format!("{flag}=")));
+    let Some((index, _)) = occurrences.next() else {
+        return false;
+    };
+    occurrences.next().is_none() && args.get(index + 1).is_some_and(|actual| actual == value)
 }
 
 fn prompt(args: &[String]) -> Option<&str> {
