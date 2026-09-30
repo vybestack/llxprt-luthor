@@ -26,13 +26,14 @@ history:
   action: Authored from implementation plan and architecture.
 - timestamp: '2026-09-30T00:00:00Z'
   agent: system
-  action: Recorded actual WP05 implementation ownership, including necessary shared-file edits previously approved under WP03/WP04; requirements and status are unchanged.
+  action: Recorded actual WP05 implementation ownership, including necessary shared-file edits previously approved under WP03/WP04, and operator documentation for runnable delivery; requirements and status are unchanged.
 authoritative_surface: src/
 create_intent:
 - src/platform.rs
 - tests/platform_dry_run.rs
 - tests/acceptance_evidence.rs
 - dev-docs/wp05-validation.md
+- README.md
 execution_mode: code_change
 owned_files:
 - src/platform.rs
@@ -42,6 +43,7 @@ owned_files:
 - tests/supervisor.rs
 - tests/acceptance_evidence.rs
 - dev-docs/wp05-validation.md
+- README.md
 tags: []
 tracker_refs: []
 ---
@@ -58,6 +60,7 @@ Verify the runnable daemon on macOS and Linux, then perform a separately authori
 - Build and run automated checks on macOS and Linux; investigate OS-specific process and identity behavior.
 - On macOS, run configured llxprt-code-rs against a disposable source with GitHub writes disabled; prove executable arguments, stable session/worktree/root, logs, stop, receipt and distinct-prompt resume.
 - Resolve first-repository issue-branch PR bootstrap, prepare runnable branch delivery and PR, never direct-main push. Merge is outside this WP absent explicit approval.
+- Document operator setup and use for runnable delivery in `README.md`.
 - After implementation delivery and authorization, use five different ready-marked, open, unassigned `vybestack/llxprt-code` issues with milestone `0.12.0`, selected/labeled before dispatch.
 - Run dispatch only through Luthor, no manual code or PR fixes; collect task/claim/worktree/attempt/authorized identity and exact PR linkage evidence for five distinct open PRs.
 
