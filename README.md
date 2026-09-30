@@ -1,0 +1,136 @@
+# Luthor
+
+Luthor is a local Rust daemon for selecting eligible GitHub Project issues, assigning them to a configured login, launching `llxprt-code-rs` in isolated worktrees, and checking whether each task produced a matching pull request. Discovery and operator inspection are read-only with respect to GitHub. Assignment, worker launch, pause, and reconciliation are separate actions with different effects; read the command behavior below before using them.
+
+**Live provider and live acceptance are not validated.** The recorded installed-worker checks use a synthetic localhost provider and fixtures, with GitHub writes disabled. Do not treat those checks as authorization or evidence for a first live dispatch. See [WP05 validation](dev-docs/wp05-validation.md) for the evidence boundary.
+
+## Build and test offline
+
+Install a Rust toolchain that supports the Rust 2024 edition. The dependencies are locked in `Cargo.lock`.
+
+```sh
+cargo build --offline --locked
+cargo test --offline --locked --all-targets -- --test-threads=1
+cargo fmt --all -- --check
+cargo clippy --offline --locked --all-targets -- -D warnings
+```
+
+The documented checks require dependencies to already be present in Cargo's local cache. `--offline` prevents Cargo from fetching missing packages. The test command runs the full target suite serially, as used in the recorded macOS and Linux validation. Linux format and Clippy results were not recorded because those tools were unavailable in the Linux image.
+
+The binary is `target/debug/luthor` after a debug build. Use `cargo run --offline --locked -- --help` for the top-level help, or run the built binary directly:
+
+```sh
+target/debug/luthor --help
+target/debug/luthor daemon --help
+```
+
+The actual top-level usage is:
+
+```text
+Usage: luthor discover --config <path>
+       luthor daemon --config PATH --config-revision REV [--repository owner/repo --issues N,N,...] [--once] [--execute]
+       luthor dispatch --config <path> --repository owner/repo --issue N --config-revision REV [--execute]
+       luthor resume TASK --config <path> --execute
+       luthor recover TASK --attempt ID --config PATH --actor LOGIN --reason TEXT --execute
+       luthor status --config <path>
+       luthor show TASK --config <path>
+       luthor logs TASK [--attempt ATTEMPT] --config <path>
+```
+
+`pause` and `reconcile` are also implemented operator commands; their exact syntax is shown under [Inspect and control tasks](#inspect-and-control-tasks). `recover` is a narrow audited recovery operation for missing receipts, not a routine retry control.
+
+## Configuration and access setup
+
+Luthor requires a JSON configuration. The structs in `src/config.rs` reject unknown fields. The required top-level fields are:
+
+| Field | Meaning |
+| --- | --- |
+| `state_root` | Private local directory for SQLite state and attempt artifacts. |
+| `worktree_root` | Root directory for daemon-managed task worktrees. |
+| `capacity` | Positive maximum number of reserved task attempts. |
+| `assignment_login` | GitHub login Luthor assigns to selected issues. |
+| `sources` | Non-empty set of Project sources and eligibility selectors. |
+| `mappings` | Non-empty tracker-to-code repository and push/PR identity mappings. |
+| `initial` | Executable and argv template for a new worker session. |
+| `resume` | Executable and argv template for continuing that session. |
+
+A source includes `project_id`, `repositories`, a `ready_marker`, and optional `milestone`. Markers are either `{"kind":"label","name":"…"}` or `{"kind":"project_field","name":"…","value":"…"}`. A mapping includes `tracker_repository`, `code_repository`, `checkout`, `base_branch`, `push_remote`, `allowed_pr_head_repository`, and `allowed_pr_author`. Command templates use an executable and an `args` array. They are argv templates, not shell commands. Supported substitutions are `{task.issue_number}`, `{task.repository}`, `{task.issue_url}`, `{task.id}`, `{attempt.id}`, and `{worktree}`.
+
+Do not copy a configuration example into a live environment without validating every repository, Project, account, path, branch, and remote. The configuration contract and a synthetic example are maintained in [Configuration and state](dev-docs/config-and-state.md); validation rules and command-template constraints are enforced by `src/config.rs` and tested in `tests/config.rs`. Keep credentials out of JSON and argv. Luthor uses the installed `gh` executable for GitHub operations and requires its authenticated identity to match the configured allowed identity for the selected task. Do not assume an alternate credential or authentication fallback.
+
+Before any live scheduling, verify all of the following independently:
+
+- The Project ID, allowed tracker repositories, exact readiness marker, and optional exact milestone select only intended issues. Discovery requires Project membership, an open issue, the configured marker, no assignees, and a matching milestone when configured.
+- `assignment_login` is the intended assignee and the authenticated GitHub identity is permitted for that task. GitHub assignment is not an atomic compare-and-set operation; Luthor verifies the assignment afterward and holds work when it cannot verify the result.
+- Each tracker repository has exactly one valid mapping. Confirm the checkout and base branch, push remote, allowed PR head repository, and authorized PR author against the intended GitHub repositories and account.
+- The configured SSH push remote works for the intended identity and repository. Configure SSH outside Luthor; never put credentials in the configuration or command arguments.
+- `state_root` and `worktree_root` are local paths with appropriate access controls. Use a dedicated state directory and do not share it between independent Luthor installations.
+
+## Preview and explicit execution
+
+Start with read-only discovery:
+
+```sh
+target/debug/luthor discover --config /private/luthor/config.json
+```
+
+This calls GitHub Project and issue reads and prints eligible candidates as JSON lines. It does not assign or launch a worker.
+
+Daemon mode without `--execute` performs preview cycles. Supply both `--repository` and `--issues` to restrict the selection to specific configured issue numbers; omit both to scan configured sources. `--once` exits after one cycle. Without it, preview repeats every 30 seconds.
+
+```sh
+target/debug/luthor daemon --config /private/luthor/config.json --config-revision local --once
+# Optional target restriction, still preview-only:
+target/debug/luthor daemon --config /private/luthor/config.json --config-revision local --repository owner/tracker --issues 17,18 --once
+```
+
+Only `--execute` authorizes daemon scheduling, including assignment and worker launch. Dispatch also requires `--execute`. These are GitHub and local-state side effects, not dry-run switches:
+
+```sh
+target/debug/luthor daemon --config /private/luthor/config.json --config-revision local --repository owner/tracker --issues 17 --once --execute
+target/debug/luthor dispatch --config /private/luthor/config.json --repository owner/tracker --issue 17 --config-revision local --execute
+```
+
+The examples show syntax only. They are not a recommendation to run against live repositories. Live use requires a separate operational decision and a verified, safe preflight. Luthor claims by assigning the configured login, verifies the claim, prepares a task worktree, and launches the worker. An uncertain assignment or launch is held rather than automatically retried.
+
+## Private state, capacity, and recovery
+
+`state_root` contains `state.sqlite3` and private per-attempt artifacts, including worker logs and process evidence. The state implementation uses restrictive permissions for private artifacts. Keep the root on a trusted local filesystem and back it up only with appropriate protections. A process-level coordinator lock prevents simultaneous coordinators from dispatching against the same state root; database transactions and durable reservations also enforce capacity across restarts. Do not remove lock, reservation, or attempt artifacts to free capacity manually.
+
+Capacity counts reserved attempts, including uncertain attempts. A slot is not released merely because a process appears absent or a worker exited. Luthor retains reservations when process, receipt, claim, or PR evidence is uncertain. Pause can free a slot only after process-group termination is verified; the task's claim, worktree, logs, and session identity remain. A paused task requires explicit resume. Each resume keeps the task's worker session and worktree and creates a new attempt.
+
+A worker process exit does not complete a task. Completion requires a verified matching open PR in the mapped code repository, with the exact tracker issue linkage, expected base and allowed head repository, and authorized identity. Draft status and pending or failing checks are reported, but do not by themselves negate a verified matching open PR. An absent, ambiguous, or unreadable PR result does not establish completion. Luthor does not automatically retry work, review or repair a PR, merge, or unassign an issue.
+
+## Inspect and control tasks
+
+The read-only inspection commands open the local state database in read-only mode. They do not perform fresh GitHub reads. `status` reports task phases, reserved versus configured capacity, output-silence warnings, and stored evidence. `show` displays a task's attempts, worktree, events, and stored evidence. `logs` reads safe local attempt log files.
+
+```sh
+target/debug/luthor status --config /private/luthor/config.json
+target/debug/luthor show TASK_ID --config /private/luthor/config.json
+target/debug/luthor logs TASK_ID --config /private/luthor/config.json
+target/debug/luthor logs TASK_ID --attempt ATTEMPT_ID --config /private/luthor/config.json
+```
+
+Pause writes a stop request for the task's latest attempt. Reconcile changes local state and may read GitHub to verify source or PR evidence; it does not launch a worker. For a task with no attempt, reconcile observes unfinished source operations. With an attempt, it checks process/receipt and PR evidence. Resume launches a new attempt and therefore requires explicit `--execute`.
+
+```sh
+target/debug/luthor pause TASK_ID --config /private/luthor/config.json
+target/debug/luthor reconcile TASK_ID --config /private/luthor/config.json
+target/debug/luthor reconcile TASK_ID --attempt ATTEMPT_ID --config /private/luthor/config.json
+target/debug/luthor resume TASK_ID --config /private/luthor/config.json --execute
+```
+
+Use pause only when you intend to stop that task. Reconciliation can leave a task held when the available evidence is incomplete or conflicting; inspect `status` and `show` before deciding what to do next. Do not interpret silence as proof of a hung process: status warns after five minutes without observed output and does not kill the worker.
+
+## Troubleshooting
+
+- **`dispatch held: pass --execute to authorize GitHub writes`**: no dispatch occurred. Add `--execute` only when an authorized live action is intended.
+- **`resume held: pass --execute to authorize worker launch`**: no worker launched. Use the explicit flag only after inspecting the paused task and its evidence.
+- **A task is held or capacity remains reserved**: inspect `status` and `show`, then run `reconcile` if you intend to refresh evidence. Do not delete state or retry based on process absence alone.
+- **Discovery returns no candidates**: check Project membership, issue state, marker type and exact value, assignees, milestone, source repositories, and repository mappings.
+- **GitHub reads or identity checks fail**: verify `gh` is installed and the authenticated account has the required access and matches the configured identity. Luthor does not define credential fallbacks.
+- **Push or PR verification fails**: check SSH access for the configured `push_remote`, allowed head repository, author, base branch, and exact issue link. An agent exit or PR claim is not sufficient evidence.
+- **Offline Cargo commands cannot resolve dependencies**: the locked dependencies are not cached locally. Populate Cargo's cache through your approved environment before repeating the commands.
+
+For state layout, migrations, and configuration details, see [Configuration and state](dev-docs/config-and-state.md). For what validation has and has not established, see [WP05 validation](dev-docs/wp05-validation.md).
