@@ -137,6 +137,7 @@ impl GhPullRequestReader {
 impl GhPullRequestReader {
     fn checks(&self, repository: &str, sha: &str) -> Option<Vec<Value>> {
         let mut result = Vec::new();
+        let mut complete = false;
         for page in 1..=10 {
             let path =
                 format!("repos/{repository}/commits/{sha}/check-runs?per_page=100&page={page}");
@@ -172,13 +173,43 @@ impl GhPullRequestReader {
                 result.push(Value::String(format!("{}:{}:{}", name, status, conclusion)));
             }
             if result.len() == total {
-                return Some(result);
+                complete = true;
+                break;
             }
             if runs.is_empty() {
                 return None;
             }
         }
-        None
+        if !complete || result.len() > 1000 {
+            return None;
+        }
+        let status_path = format!("repos/{repository}/commits/{sha}/status");
+        let status = self.api(&["api", &status_path]).ok()?;
+        let statuses = status.get("statuses")?.as_array()?;
+        if statuses.len() > 1000 {
+            return None;
+        }
+        for item in statuses {
+            let context = item.get("context")?.as_str()?;
+            let state = item.get("state")?.as_str()?;
+            if context.is_empty()
+                || context.len() > 128
+                || !context.bytes().all(|b| b.is_ascii_graphic() || b == b' ')
+                || state.is_empty()
+                || state.len() > 32
+                || !state.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
+            {
+                return None;
+            }
+            let summary = format!("{context}:{state}");
+            if !result
+                .iter()
+                .any(|existing| existing.as_str() == Some(&summary))
+            {
+                result.push(Value::String(summary));
+            }
+        }
+        Some(result)
     }
 }
 

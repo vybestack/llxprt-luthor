@@ -132,7 +132,7 @@ fn gh_check_collection_preserves_results_and_failures_for_linked_draft_prs() {
         std::fs::write(
             &gh,
             format!(
-                "#!/bin/sh\ncase \"$2\" in\n  *'pulls?state='*) printf '%s' '{}' ;;\n  *'/pulls/9') printf '%s' '{}' ;;\n  *'/check-runs?per_page=100&page=1'*) {} ;;\n  *'/check-runs?per_page=100&page=2'*) printf '%s' '{{\"total_count\":101,\"check_runs\":[]}}' ;;\n  *) exit 2 ;;\nesac\n",
+                "#!/bin/sh\ncase \"$2\" in\n  *'pulls?state='*) printf '%s' '{}' ;;\n  *'/pulls/9') printf '%s' '{}' ;;\n  *'/commits/{SHA}/status') printf '%s' '{{\"statuses\":[]}}' ;;\n  *'/check-runs?per_page=100&page=1'*) {} ;;  *'/check-runs?per_page=100&page=2'*) printf '%s' '{{\"total_count\":101,\"check_runs\":[]}}' ;;\n  *) exit 2 ;;\nesac\n",
                 list_json, detail_json, checks
             ),
         )
@@ -146,6 +146,45 @@ fn gh_check_collection_preserves_results_and_failures_for_linked_draft_prs() {
         };
         assert!(evidence.draft, "{label}: draft open PR must still match");
         assert_eq!(evidence.checks, expected, "{label}");
+    }
+}
+#[test]
+fn legacy_status_failures_are_advisory_for_linked_open_prs() {
+    use std::os::unix::fs::PermissionsExt;
+
+    const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+    let body = format!("Tracker-Issue: {ISSUE}");
+    let list_json = serde_json::to_string(&json!([item(9, &body)])).unwrap();
+    let mut pr_detail = detail(9, &body);
+    pr_detail["head"]["sha"] = json!(SHA);
+    let detail_json = serde_json::to_string(&pr_detail).unwrap();
+
+    for (status_reply, expected) in [
+        (
+            "printf '%s' '{\"statuses\":[{\"context\":\"legacy/build\",\"state\":\"failure\"}]}'",
+            Some(vec!["legacy/build:failure".to_string()]),
+        ),
+        ("printf '%s' 'not-json'", None),
+        ("printf '%s' '{\"status\":403}'; exit 1", None),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let gh = dir.path().join("gh");
+        std::fs::write(
+            &gh,
+            format!(
+                "#!/bin/sh\ncase \"$2\" in\n  *'pulls?state='*) printf '%s' '{}' ;;\n  *'/pulls/9') printf '%s' '{}' ;;\n  *'/commits/{SHA}/status') {status_reply} ;;\n  *'/check-runs?per_page=100&page=1'*) printf '%s' '{{\"total_count\":0,\"check_runs\":[]}}' ;;\n  *) exit 2 ;;\nesac\n",
+                list_json, detail_json
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let mut reader = GhPullRequestReader::new(gh);
+        let LookupResult::OpenPreexisting(evidence) = lookup(&mut reader, REPO, ISSUE).unwrap()
+        else {
+            panic!("expected linked open PR")
+        };
+        assert_eq!(evidence.checks, expected);
     }
 }
 
@@ -174,7 +213,7 @@ fn gh_check_collection_reads_full_page_and_bounded_second_page() {
     std::fs::write(
         &gh,
         format!(
-            "#!/bin/sh\ncase \"$2\" in\n  *'pulls?state='*) printf '%s' '{}' ;;\n  *'/pulls/9') printf '%s' '{}' ;;\n  *'/check-runs?per_page=100&page=1'*) printf '%s' '{}' ;;\n  *'/check-runs?per_page=100&page=2'*) printf '%s' '{}' ;;\n  *) exit 2 ;;\nesac\n",
+            "#!/bin/sh\ncase \"$2\" in\n  *'pulls?state='*) printf '%s' '{}' ;;\n  *'/pulls/9') printf '%s' '{}' ;;\n  *'/commits/{SHA}/status') printf '%s' '{{\"statuses\":[]}}' ;;\n  *'/check-runs?per_page=100&page=1'*) printf '%s' '{}' ;;  *'/check-runs?per_page=100&page=2'*) printf '%s' '{}' ;;\n  *) exit 2 ;;\nesac\n",
             list_json, detail_json, page_one_json, page_two_json
         ),
     )
