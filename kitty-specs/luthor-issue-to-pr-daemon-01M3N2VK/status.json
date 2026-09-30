@@ -1,7 +1,7 @@
 {
-  "event_count": 140,
-  "last_event_id": "01M3R2FM39KTMF3BYGSZJS680K",
-  "materialized_at": "2026-09-30T02:32:16.234018+00:00",
+  "event_count": 142,
+  "last_event_id": "01M3R2KMHTYPCH6RY90YYCGCW4",
+  "materialized_at": "2026-09-30T02:34:27.769686+00:00",
   "mission_number": "",
   "mission_slug": "luthor-issue-to-pr-daemon-01M3N2VK",
   "mission_type": "software-dev",
@@ -12,9 +12,9 @@
     "claimed": 0,
     "done": 0,
     "for_review": 0,
-    "in_progress": 0,
+    "in_progress": 1,
     "in_review": 0,
-    "planned": 1
+    "planned": 0
   },
   "work_packages": {
     "WP01": {
@@ -147,11 +147,19 @@
       }
     },
     "WP05": {
-      "actor": "finalize-tasks",
+      "actor": "llxprt",
+      "agent": "llxprt",
+      "agent_profile": "__resolved_profile_absent__",
+      "agent_profile_version": "__resolved_profile_version_absent__",
       "force_count": 0,
-      "lane": "planned",
-      "last_event_id": "01M3N3EWAEG59Y0CGDMAMP0CFC",
-      "last_transition_at": "2026-09-28T22:51:37.166576+00:00"
+      "lane": "in_progress",
+      "last_event_id": "01M3R2KMHTYPCH6RY90YYCGCW4",
+      "last_transition_at": "2026-09-30T02:34:27.769686+00:00",
+      "model": "__resolved_model_absent__",
+      "provider": "__resolved_provider_absent__",
+      "role": "implementer",
+      "shell_pid": 38295,
+      "shell_pid_created_at": "1790735664.480386"
     }
   }
 }
