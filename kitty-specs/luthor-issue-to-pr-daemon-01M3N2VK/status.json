@@ -126,6 +126,9 @@
       "last_event_id": "01M3R0BPC3N1H70Z5JJJ7VST06",
       "last_transition_at": "2026-09-30T01:55:10.339582+00:00",
       "model": "__resolved_model_absent__",
+      "notes": [
+        "Independent WP04 verification: R3 still blocks terminal recovery after an accounted prior pause; exact production SQL reproduces pending recovered attempt and capacity hold. Shared root state/supervisor/CLI ownership reviewed against prior-WP invariants; no product edits."
+      ],
       "provider": "__resolved_provider_absent__",
       "review": null,
       "review_result": {
@@ -134,12 +137,12 @@
         "reviewer": "deepthinker",
         "verdict": "changes_requested"
       },
-      "role": "reviewer",
-      "shell_pid": 58828,
-      "shell_pid_created_at": "1790732862.222757",
+      "role": "implementer",
+      "shell_pid": null,
+      "shell_pid_created_at": null,
       "subtasks": {
-        "T009": "done",
-        "T010": "done"
+        "T009": "planned",
+        "T010": "planned"
       }
     },
     "WP05": {
