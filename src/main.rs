@@ -187,12 +187,12 @@ fn mutate(command: &str, mut values: Vec<String>) -> Result<(), Box<dyn std::err
 }
 
 fn recover(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
-    if args.len() != 11
+    if args.len() != 10
         || args[1] != "--attempt"
         || args[3] != "--config"
         || args[5] != "--actor"
         || args[7] != "--reason"
-        || args[10] != "--execute"
+        || args[9] != "--execute"
         || args[0].is_empty()
         || args[2].is_empty()
         || args[4].is_empty()

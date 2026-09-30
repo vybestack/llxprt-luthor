@@ -32,6 +32,47 @@ fn recover_requires_execute_before_config_store_or_github_access() {
     assert!(!calls.exists());
 }
 
+#[test]
+fn recover_accepts_documented_syntax_then_fails_before_state_or_github_access() {
+    let dir = tempfile::tempdir().unwrap();
+    let nonexistent_config = dir.path().join("missing-config.yaml");
+    let output = Command::new(env!("CARGO_BIN_EXE_luthor"))
+        .args(["recover", "task", "--attempt", "attempt", "--config"])
+        .arg(&nonexistent_config)
+        .args([
+            "--actor",
+            "operator",
+            "--reason",
+            "lost receipt",
+            "--execute",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("configuration unavailable"));
+}
+
+#[test]
+fn recover_rejects_extra_argument_before_config_access() {
+    let dir = tempfile::tempdir().unwrap();
+    let nonexistent_config = dir.path().join("missing-config.yaml");
+    let output = Command::new(env!("CARGO_BIN_EXE_luthor"))
+        .args(["recover", "task", "--attempt", "attempt", "--config"])
+        .arg(&nonexistent_config)
+        .args([
+            "--actor",
+            "operator",
+            "--reason",
+            "lost receipt",
+            "ignored",
+            "--execute",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("expected TASK"));
+}
+
 use luthor::{
     cli::{CliError, execute},
     state::StateStore,
