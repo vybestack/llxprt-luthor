@@ -686,7 +686,8 @@ fn audited_telemetry_lost_pr_completion_is_terminal_after_reopen() {
         "INSERT INTO attempts(id,task_id,lifecycle,outcome) VALUES('prior-attempt','recovered','completed','success');
          INSERT INTO attempts(id,task_id,lifecycle,outcome) VALUES('recovered-attempt','recovered','telemetry_lost',NULL);
          INSERT INTO reservations(attempt_id,task_id,status) VALUES('prior-attempt','recovered','released');
-         INSERT INTO evidence(task_id,attempt_id,kind,payload) VALUES('recovered','prior-attempt','attempt_exit','{}'),('recovered','prior-attempt','exit_pr_lookup','{\"status\":{\"status\":\"absent\"}}');
+         INSERT INTO intents(id,task_id,attempt_id,kind,detail) VALUES('prior-stop','recovered','prior-attempt','stop','{}');
+         INSERT INTO evidence(task_id,attempt_id,kind,payload) VALUES('recovered','prior-attempt','attempt_exit','{\"attempt_id\":\"prior-attempt\",\"child_pid\":123,\"boot_identity\":\"boot\",\"child_start_identity\":\"start\",\"exit_code\":0,\"signal\":null,\"stdout_path\":\"stdout\",\"stdout_bytes\":0,\"stderr_path\":\"stderr\",\"stderr_bytes\":0,\"stop_signals\":[15]}'),('recovered','prior-attempt','pause_pr_lookup','{\"status\":{\"status\":\"absent\"}}');
          INSERT INTO reservations(attempt_id,task_id,status) VALUES('recovered-attempt','recovered','released');
          INSERT INTO evidence(task_id,attempt_id,kind,payload) VALUES
            ('recovered','recovered-attempt','telemetry_lost','{\"actor\":\"operator\",\"reason\":\"lost receipt\",\"observed_at_unix_secs\":10,\"os_ids\":[123],\"evidence\":{\"worker_absent\":true}}'),
@@ -706,6 +707,55 @@ fn audited_telemetry_lost_pr_completion_is_terminal_after_reopen() {
         Vec::<(String, String)>::new()
     );
     reopened.ensure_dispatch_capacity().unwrap();
+}
+
+#[test]
+fn stopped_prior_attempt_without_absent_pause_lookup_is_not_terminal() {
+    for prior_lookup in [None, Some("exit_pr_lookup")] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = StateStore::open(dir.path(), 1).unwrap();
+        store
+            .create_task(
+                "recovered",
+                &candidate("recovered-issue", 1),
+                "rev",
+                &config(),
+            )
+            .unwrap();
+
+        let connection = Connection::open(dir.path().join("state.sqlite3")).unwrap();
+        connection.execute_batch(
+            "INSERT INTO attempts(id,task_id,lifecycle,outcome) VALUES('prior-attempt','recovered','completed','success');
+             INSERT INTO attempts(id,task_id,lifecycle,outcome) VALUES('recovered-attempt','recovered','telemetry_lost',NULL);
+             INSERT INTO reservations(attempt_id,task_id,status) VALUES('prior-attempt','recovered','released'),('recovered-attempt','recovered','released');
+             INSERT INTO intents(id,task_id,attempt_id,kind,detail) VALUES('prior-stop','recovered','prior-attempt','stop','{}');
+             INSERT INTO evidence(task_id,attempt_id,kind,payload) VALUES
+               ('recovered','prior-attempt','attempt_exit','{}'),
+               ('recovered','recovered-attempt','telemetry_lost','{\"actor\":\"operator\",\"reason\":\"lost receipt\",\"observed_at_unix_secs\":10,\"os_ids\":[123],\"evidence\":{\"worker_absent\":true}}'),
+               ('recovered','recovered-attempt','exit_pr_lookup','{\"observed_at_unix_secs\":11,\"repository\":\"org/code\",\"status\":{\"status\":\"open\"}}'),
+               ('recovered','recovered-attempt','verified_open_pr','{\"id\":99}'),
+               ('recovered',NULL,'claim_verified','{}'),('recovered',NULL,'worktree_created','{}');
+             UPDATE tasks SET state='pr_complete' WHERE id='recovered';",
+        )
+        .unwrap();
+        if let Some(kind) = prior_lookup {
+            connection.execute(
+                "INSERT INTO evidence(task_id,attempt_id,kind,payload) VALUES('recovered','prior-attempt',?1,'{\"status\":{\"status\":\"absent\"}}')",
+                [kind],
+            ).unwrap();
+        }
+        drop(connection);
+        drop(store);
+
+        let reopened = StateStore::open(dir.path(), 1).unwrap();
+        assert!(
+            reopened
+                .pending_attempts()
+                .unwrap()
+                .contains(&("recovered".to_owned(), "recovered-attempt".to_owned()))
+        );
+        assert!(reopened.ensure_dispatch_capacity().is_err());
+    }
 }
 
 #[test]
