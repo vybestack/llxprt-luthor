@@ -15,9 +15,10 @@ use luthor::{
         ExitPrEvidence, PausePrEvidence, PausePrStatus, StateError, StateStore, WorktreeIdentity,
     },
     supervisor::{
-        Reconciliation, RecoveryInspection, SupervisorError, execute_with_binary,
-        inspect_recovery_quiescence, prepare_initial, prepare_resume, reconcile_attempt,
-        request_stop, run_gated_child_with_binary, run_gated_child_with_log_writers,
+        Reconciliation, RecoveryInspection, SupervisorError, ensure_distinct_resume_prompt,
+        execute_with_binary, inspect_recovery_quiescence, prepare_initial, prepare_resume,
+        reconcile_attempt, request_stop, run_gated_child_with_binary,
+        run_gated_child_with_log_writers,
     },
     worktree::ensure_worktree,
 };
@@ -3875,6 +3876,37 @@ fn minimal_resume_template_gets_interrupted_worktree_inspection_guidance() {
         Some("attempt-next")
     );
     assert!(config.state_root.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn resume_rejects_same_final_prompt_but_allows_distinct_rendered_attempt() {
+    let (_dir, _config, mut store, _) =
+        paused_fixture_with_resume_prompt("Continue {task.issue_url}");
+    let first = prepare_resume(&mut store, "task", "attempt-next").unwrap();
+    let first_prompt = first
+        .args
+        .windows(2)
+        .find(|pair| pair[0] == "--prompt")
+        .unwrap()[1]
+        .clone();
+    let latest = first.clone();
+    assert!(matches!(
+        ensure_distinct_resume_prompt(&first, &latest, &first.args),
+        Err(SupervisorError::Conflict)
+    ));
+
+    let (_dir, _config, mut distinct_store, _) =
+        paused_fixture_with_resume_prompt("Continue {task.issue_url} for {attempt.id}");
+    let distinct = prepare_resume(&mut distinct_store, "task", "attempt-next").unwrap();
+    let distinct_prompt = distinct
+        .args
+        .windows(2)
+        .find(|pair| pair[0] == "--prompt")
+        .unwrap()[1]
+        .clone();
+    assert_ne!(first_prompt, distinct_prompt);
+    assert!(ensure_distinct_resume_prompt(&first, &first, &distinct.args).is_ok());
 }
 
 #[cfg(unix)]

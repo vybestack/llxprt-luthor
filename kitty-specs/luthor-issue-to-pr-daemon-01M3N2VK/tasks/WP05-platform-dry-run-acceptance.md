@@ -36,6 +36,10 @@ create_intent:
 - README.md
 execution_mode: code_change
 owned_files:
+- src/daemon.rs
+- src/coordinator.rs
+- src/state.rs
+- tests/daemon.rs
 - src/platform.rs
 - src/lib.rs
 - src/supervisor.rs

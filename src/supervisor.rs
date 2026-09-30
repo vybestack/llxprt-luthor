@@ -545,6 +545,18 @@ fn enforce_resume_inspection(args: &mut [String]) -> Result<(), SupervisorError>
     Ok(())
 }
 
+pub fn ensure_distinct_resume_prompt(
+    first: &LaunchPlan,
+    latest: &LaunchPlan,
+    args: &[String],
+) -> Result<(), SupervisorError> {
+    let continuation = prompt(args).ok_or(SupervisorError::Conflict)?;
+    if prompt(&first.args) == Some(continuation) || prompt(&latest.args) == Some(continuation) {
+        return Err(SupervisorError::Conflict);
+    }
+    Ok(())
+}
+
 /// Renders one initial attempt; the caller remains responsible for fresh claim
 /// and absent-PR evidence. This function deliberately cannot start a worker.
 pub fn prepare_initial(
@@ -648,13 +660,11 @@ pub fn prepare_resume(
         executable,
         mut args,
     } = selection.effective_config.resume.render(&values)?;
-    let continuation = prompt(&args).ok_or(SupervisorError::Conflict)?;
+    let raw_continuation = prompt(&args).ok_or(SupervisorError::Conflict)?;
     if selection.effective_config.resume.args == selection.effective_config.initial.args
         || !requires_pair(&args, "--session", task_id)
         || !requires_pair(&args, "--cwd", cwd)
-        || continuation.trim().is_empty()
-        || prompt(&first.args) == Some(continuation)
-        || prompt(&latest.args) == Some(continuation)
+        || raw_continuation.trim().is_empty()
     {
         return Err(SupervisorError::Conflict);
     }
@@ -673,6 +683,7 @@ pub fn prepare_resume(
         },
     )?;
     enforce_resume_inspection(&mut args)?;
+    ensure_distinct_resume_prompt(&first, &latest, &args)?;
     let plan = LaunchPlan {
         task_id: task_id.to_owned(),
         attempt_id: attempt_id.to_owned(),
