@@ -689,6 +689,7 @@ fn audited_telemetry_lost_pr_completion_is_terminal_after_reopen() {
          INSERT INTO intents(id,task_id,attempt_id,kind,detail) VALUES('prior-stop','recovered','prior-attempt','stop','{}');
          INSERT INTO evidence(task_id,attempt_id,kind,payload) VALUES('recovered','prior-attempt','attempt_exit','{\"attempt_id\":\"prior-attempt\",\"child_pid\":123,\"boot_identity\":\"boot\",\"child_start_identity\":\"start\",\"exit_code\":0,\"signal\":null,\"stdout_path\":\"stdout\",\"stdout_bytes\":0,\"stderr_path\":\"stderr\",\"stderr_bytes\":0,\"stop_signals\":[15]}'),('recovered','prior-attempt','pause_pr_lookup','{\"status\":{\"status\":\"absent\"}}');
          INSERT INTO reservations(attempt_id,task_id,status) VALUES('recovered-attempt','recovered','released');
+         INSERT INTO intents(id,task_id,attempt_id,kind,detail) VALUES('recovered-stop','recovered','recovered-attempt','stop','{}');
          INSERT INTO evidence(task_id,attempt_id,kind,payload) VALUES
            ('recovered','recovered-attempt','telemetry_lost','{\"actor\":\"operator\",\"reason\":\"lost receipt\",\"observed_at_unix_secs\":10,\"os_ids\":[123],\"evidence\":{\"worker_absent\":true}}'),
            ('recovered','recovered-attempt','exit_pr_lookup','{\"observed_at_unix_secs\":11,\"repository\":\"org/code\",\"status\":{\"status\":\"open\"}}'),
@@ -706,7 +707,21 @@ fn audited_telemetry_lost_pr_completion_is_terminal_after_reopen() {
         reopened.pending_attempts().unwrap(),
         Vec::<(String, String)>::new()
     );
+    assert!(reopened.unresolved_sources().unwrap().is_empty());
     reopened.ensure_dispatch_capacity().unwrap();
+
+    let connection = Connection::open(dir.path().join("state.sqlite3")).unwrap();
+    connection.execute_batch(
+        "INSERT INTO intents(id,task_id,attempt_id,kind,detail) VALUES('malformed-stop','recovered','recovered-attempt','stop','{}');
+         DELETE FROM evidence WHERE task_id='recovered' AND attempt_id='recovered-attempt' AND kind='telemetry_lost';",
+    ).unwrap();
+    assert_eq!(
+        reopened.unresolved_sources().unwrap(),
+        vec![
+            ("recovered".to_owned(), "stop".to_owned()),
+            ("recovered".to_owned(), "stop".to_owned()),
+        ]
+    );
 }
 
 #[test]

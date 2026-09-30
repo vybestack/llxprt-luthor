@@ -615,7 +615,31 @@ impl StateStore {
                OR (i.kind='worktree_create' AND NOT EXISTS
                  (SELECT 1 FROM evidence e WHERE e.task_id=i.task_id AND e.kind='worktree_created'))
                OR (i.kind='stop' AND NOT EXISTS
-                 (SELECT 1 FROM evidence e WHERE e.task_id=i.task_id AND e.attempt_id=i.attempt_id AND e.kind='attempt_exit'))
+                 (SELECT 1 FROM evidence e WHERE e.task_id=i.task_id AND e.attempt_id=i.attempt_id AND e.kind='attempt_exit')
+                 AND NOT (
+                   t.state='pr_complete'
+                   AND EXISTS (SELECT 1 FROM attempts a JOIN reservations r ON r.task_id=a.task_id AND r.attempt_id=a.id
+                     WHERE a.task_id=i.task_id AND a.id=i.attempt_id AND a.lifecycle='telemetry_lost'
+                       AND a.outcome IS NULL AND r.status='released'
+                       AND a.id=(SELECT id FROM attempts WHERE task_id=i.task_id ORDER BY rowid DESC LIMIT 1))
+                   AND (SELECT COUNT(*) FROM evidence e WHERE e.task_id=i.task_id AND e.attempt_id=i.attempt_id
+                     AND e.kind IN ('telemetry_lost','exit_pr_lookup','verified_open_pr'))=3
+                   AND (SELECT COUNT(*) FROM evidence e WHERE e.task_id=i.task_id AND e.attempt_id=i.attempt_id
+                     AND e.kind='telemetry_lost' AND CASE WHEN json_valid(e.payload) THEN
+                       json_type(e.payload,'$.actor')='text' AND length(trim(json_extract(e.payload,'$.actor')))>0
+                       AND json_type(e.payload,'$.reason')='text' AND length(trim(json_extract(e.payload,'$.reason')))>0
+                       AND json_type(e.payload,'$.observed_at_unix_secs')='integer' AND json_extract(e.payload,'$.observed_at_unix_secs')>0
+                       AND json_type(e.payload,'$.os_ids')='array' AND json_array_length(e.payload,'$.os_ids')>0
+                       AND json_type(e.payload,'$.exit_code') IS NULL AND json_type(e.payload,'$.signal') IS NULL ELSE 0 END)=1
+                   AND (SELECT COUNT(*) FROM evidence e WHERE e.task_id=i.task_id AND e.attempt_id=i.attempt_id
+                     AND e.kind='exit_pr_lookup' AND CASE WHEN json_valid(e.payload) THEN
+                       json_extract(e.payload,'$.status.status')='open'
+                       AND json_type(e.payload,'$.observed_at_unix_secs')='integer'
+                       AND json_extract(e.payload,'$.observed_at_unix_secs')>0 ELSE 0 END)=1
+                   AND (SELECT COUNT(*) FROM evidence e WHERE e.task_id=i.task_id AND e.attempt_id=i.attempt_id
+                     AND e.kind='verified_open_pr' AND CASE WHEN json_valid(e.payload) THEN
+                       json_type(e.payload,'$.id')='integer' AND json_extract(e.payload,'$.id')>0 ELSE 0 END)=1
+                 ))
              ) ORDER BY 1,2",
         )?;
         Ok(statement
