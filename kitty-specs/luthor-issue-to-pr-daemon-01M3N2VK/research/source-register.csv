@@ -1,0 +1,7 @@
+source_id,source_path_or_reference,source_kind,used_for,quality_and_limit
+S1,"dev-docs/architecture.md; kitty-specs/luthor-issue-to-pr-daemon-01M3N2VK/spec.md",workspace design/specification,"Eligibility, claim semantics, PR verification, scope",Design evidence; not live API verification
+S2,"dev-docs/architecture.md; dev-docs/implementation-plan.md",workspace design/planning,"Assignment concurrency and single-dispatcher constraint",Design evidence; operational enforcement unverified
+S3,"dev-docs/architecture.md; kitty-specs/luthor-issue-to-pr-daemon-01M3N2VK/spec.md; kitty-specs/luthor-issue-to-pr-daemon-01M3N2VK/plan.md",workspace design/specification,"Conceptual data model, task/attempt/PR evidence rules",Research synthesis; no implementation/schema exists here
+S4,"dev-docs/notes.md; dev-docs/architecture.md; dev-docs/implementation-plan.md",workspace notes/planning,"llxprt-code-rs session and resume assumptions",Notes report source inspection; installed binary behavior unverified
+S5,"dev-docs/implementation-plan.md; kitty-specs/luthor-issue-to-pr-daemon-01M3N2VK/spec.md",workspace plan/specification,"V1 boundaries and five-PR acceptance target",Target requirements; no implementation or acceptance run
+S6,"kitty-specs/luthor-issue-to-pr-daemon-01M3N2VK/plan.md; dev-docs/implementation-plan.md",workspace planning,"Empty-remote branch-PR bootstrap question",Explicitly unresolved; no remote operations performed

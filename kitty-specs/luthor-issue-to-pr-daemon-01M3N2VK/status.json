@@ -1,0 +1,170 @@
+{
+  "event_count": 142,
+  "last_event_id": "01M3R2KMHTYPCH6RY90YYCGCW4",
+  "materialized_at": "2026-09-30T02:34:27.769686+00:00",
+  "mission_number": "",
+  "mission_slug": "luthor-issue-to-pr-daemon-01M3N2VK",
+  "mission_type": "software-dev",
+  "summary": {
+    "approved": 4,
+    "blocked": 0,
+    "canceled": 0,
+    "claimed": 0,
+    "done": 0,
+    "for_review": 0,
+    "in_progress": 1,
+    "in_review": 0,
+    "planned": 0
+  },
+  "work_packages": {
+    "WP01": {
+      "actor": "user",
+      "agent": "deepthinker",
+      "agent_profile": "__resolved_profile_absent__",
+      "agent_profile_version": "__resolved_profile_version_absent__",
+      "force_count": 2,
+      "lane": "approved",
+      "last_event_id": "01M3NS9ADQYGVDTPJTFFWRBHTH",
+      "last_transition_at": "2026-09-29T05:13:03.671760+00:00",
+      "model": "__resolved_model_absent__",
+      "notes": [
+        "Ready for review",
+        "WP01 evidence recorded; live probe is explicitly held for WP05",
+        "Review passed: documented 12-page Project membership and direct issue joins, distinct tracker/target and PR/error contracts, empty-remote options, and installed rs localhost initial/continuation/stop with same session root and cwd; live credentials, writes, dispatcher exclusivity and real provider remain gated"
+      ],
+      "provider": "__resolved_provider_absent__",
+      "review": null,
+      "review_result": {
+        "feedback_path": "/Volumes/XS1000/acoliver/projects/llxprt-luthor/branch-1/kitty-specs/luthor-issue-to-pr-daemon-01M3N2VK/tasks/WP01-preflight-contracts/review-cycle-3.md",
+        "reference": "review-cycle://luthor-issue-to-pr-daemon-01M3N2VK/WP01-preflight-contracts/review-cycle-3.md",
+        "reviewer": "deepthinker",
+        "verdict": "approved"
+      },
+      "role": "reviewer",
+      "shell_pid": 37535,
+      "shell_pid_created_at": "1790658619.092117",
+      "subtasks": {
+        "T001": "done",
+        "T002": "done"
+      }
+    },
+    "WP02": {
+      "actor": "user",
+      "agent": "deep-bug-investigator",
+      "agent_profile": "__resolved_profile_absent__",
+      "agent_profile_version": "__resolved_profile_version_absent__",
+      "force_count": 6,
+      "lane": "approved",
+      "last_event_id": "01M3P5JK379SHBXGWAJ5831BZ8",
+      "last_transition_at": "2026-09-29T08:47:50.375940+00:00",
+      "model": "__resolved_model_absent__",
+      "notes": [
+        "Date GraphQL selection omits date scalar needed by the parser; unrelated Date blocks eligible Status discovery",
+        "Integrated a07e8eb; full offline test and strict lint gates passed; addresses review-cycle-6.",
+        "Review passed: query-shaped Date lacks date, configured Due errors, unrelated Date with Status Ready selects one candidate, credential prompt rejection retained; fmt/offline locked tests/strict clippy passed. Shared lane WP03 depends on WP02."
+      ],
+      "provider": "__resolved_provider_absent__",
+      "review": null,
+      "review_result": {
+        "feedback_path": "/Volumes/XS1000/acoliver/projects/llxprt-luthor/branch-1/kitty-specs/luthor-issue-to-pr-daemon-01M3N2VK/tasks/WP02-state-and-eligibility/review-cycle-7.md",
+        "reference": "review-cycle://luthor-issue-to-pr-daemon-01M3N2VK/WP02-state-and-eligibility/review-cycle-7.md",
+        "reviewer": "user",
+        "verdict": "approved"
+      },
+      "role": "reviewer",
+      "shell_pid": 16774,
+      "shell_pid_created_at": "1790671562.616216",
+      "subtasks": {
+        "T003": "done",
+        "T004": "done",
+        "T005": "done"
+      }
+    },
+    "WP03": {
+      "actor": "independent-architect",
+      "agent": "independent-architect",
+      "agent_profile": "__resolved_profile_absent__",
+      "agent_profile_version": "__resolved_profile_version_absent__",
+      "force_count": 13,
+      "lane": "approved",
+      "last_event_id": "01M3Q8X48245H465P8B5PKTG00",
+      "last_transition_at": "2026-09-29T19:05:15.778341+00:00",
+      "model": "__resolved_model_absent__",
+      "notes": [
+        "WP03 fix integrated; root fmt, locked offline all-target tests, and strict Clippy passed.",
+        "Review passed: verified claim and optional milestone identity, exhaustive PR preflight, worktree and session identity, gated supervision, conservative restart capacity, operator controls and root checks. Shared state and coordinator ownership is recorded in WP03.",
+        "Documented command JSON now parses and renders initial/resume argv with task-scoped session and distinct attempt prompt; root checks passed.",
+        "WP03 rejected: log-failure evidence-write error leaves worker running; shared supervisor/test lane needs coordinated rework",
+        "WP03 fault fix integrated as 9bc8442; fmt, serial supervisor suite, strict clippy passed; full all-target test had transient supervisor receipt failures under parallel test execution.",
+        "Independent review: stop-race classification test bypasses request_stop and lacks intent-before-exit-before-signal coverage; telemetry, serial offline locked tests, fmt and strict clippy pass. Shared state/main/daemon/config docs remain coordinated with the sequential WP02/WP03 lane.",
+        "Review passed: independently verified root beb132b4675307a28609595c48e366235a2a0dfc (product files identical to 8b1ca58). Both real-worker production stop orderings preserve the natural receipt, exit 7, attention state, released capacity, claim/worktree/session identity, and blocked resume. Live gated-worker status/show expose separate observational stdout/stderr bytes and output age; final receipt counts match logs. Offline locked serial CLI 26 passed, supervisor 40 passed plus isolated child environment test passed; fmt and strict all-target Clippy passed. Evidence in tmp/wp03-independent-beb132b; no fixture processes remaining. WP03 scope only, no WP04 completion-proof assertion. Shared WP02 state/coordinator files reviewed as the sequential WP03 extension. No contracts artifact; no frozen files. Production wiring, real-path tests, explicit held/unavailable handling, FR coverage, locked decisions, shared ownership and stop race handling passed."
+      ],
+      "provider": "__resolved_provider_absent__",
+      "review": null,
+      "review_result": {
+        "feedback_path": "/Volumes/XS1000/acoliver/projects/llxprt-luthor/branch-1/kitty-specs/luthor-issue-to-pr-daemon-01M3N2VK/tasks/WP03-claim-worktree-agent/review-cycle-16.md",
+        "reference": "review-cycle://luthor-issue-to-pr-daemon-01M3N2VK/WP03-claim-worktree-agent/review-cycle-16.md",
+        "reviewer": "independent-architect",
+        "verdict": "approved"
+      },
+      "role": "reviewer",
+      "shell_pid": 12387,
+      "shell_pid_created_at": "1790708424.337074",
+      "subtasks": {
+        "T006": "done",
+        "T007": "done",
+        "T008": "done"
+      }
+    },
+    "WP04": {
+      "actor": "architect",
+      "agent": "architect",
+      "agent_profile": "__resolved_profile_absent__",
+      "agent_profile_version": "__resolved_profile_version_absent__",
+      "force_count": 2,
+      "lane": "approved",
+      "last_event_id": "01M3R2FM39KTMF3BYGSZJS680K",
+      "last_transition_at": "2026-09-30T02:32:16.234018+00:00",
+      "model": "__resolved_model_absent__",
+      "notes": [
+        "Independent WP04 verification: R3 still blocks terminal recovery after an accounted prior pause; exact production SQL reproduces pending recovered attempt and capacity hold. Shared root state/supervisor/CLI ownership reviewed against prior-WP invariants; no product edits.",
+        "Independent original-scope WP04 verification passed at 4dfb5cec4c1a47d2bf5e694fcdda2b8ae141a3ff (product correction 88ed19a). R1-R4 production findings resolved; exact pending-attempt and capacity SQL accepts audited PR-complete recovery after an accounted pause and holds missing/wrong evidence. 233 parent offline tests plus two child-process tests passed; fmt and strict clippy passed. Report and logs: tmp/wp04-architect-83369/review.md, focused.log, remaining.log, recovery-sql.log, fmt.log, clippy.log. Retain recorded composed-test limits; Linux/live acceptance not claimed. Checklist: dead code PASS, synthetic-fixture PASS, silent-empty PASS, FR coverage PASS, frozen N/A, locked decisions PASS, shared ownership PASS, fragility PASS. Coordination: accumulated lane-a state/coordinator/supervisor/main/CLI and tests overlap prior WPs; existing invariants retained; only WP04 reviewed. Reviewer did not implement or submit code; no source edits, force, fallback, manual events, GitHub writes or pushes."
+      ],
+      "provider": "__resolved_provider_absent__",
+      "review": null,
+      "review_result": {
+        "feedback_path": "/Volumes/XS1000/acoliver/projects/llxprt-luthor/branch-1/kitty-specs/luthor-issue-to-pr-daemon-01M3N2VK/tasks/WP04-pr-proof-recovery-tests/review-cycle-3.md",
+        "reference": "review-cycle://luthor-issue-to-pr-daemon-01M3N2VK/WP04-pr-proof-recovery-tests/review-cycle-3.md",
+        "reviewer": "architect",
+        "verdict": "approved"
+      },
+      "role": "reviewer",
+      "shell_pid": 83369,
+      "shell_pid_created_at": "1790735166.803796",
+      "subtasks": {
+        "T009": "done",
+        "T010": "done"
+      }
+    },
+    "WP05": {
+      "actor": "llxprt",
+      "agent": "llxprt",
+      "agent_profile": "__resolved_profile_absent__",
+      "agent_profile_version": "__resolved_profile_version_absent__",
+      "force_count": 0,
+      "lane": "in_progress",
+      "last_event_id": "01M3R2KMHTYPCH6RY90YYCGCW4",
+      "last_transition_at": "2026-09-30T02:34:27.769686+00:00",
+      "model": "__resolved_model_absent__",
+      "provider": "__resolved_provider_absent__",
+      "role": "implementer",
+      "shell_pid": 38295,
+      "shell_pid_created_at": "1790735664.480386",
+      "subtasks": {
+        "T011": "done",
+        "T012": "done",
+        "T013": "done"
+      }
+    }
+  }
+}

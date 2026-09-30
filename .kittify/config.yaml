@@ -1,0 +1,17 @@
+project:
+  uuid: 5d2487c0-b1d1-4d21-a74d-33f6f36458a0
+  slug: llxprt-luthor
+  node_id: 6cbef6abfc6a
+  build_id: dfc74ab7-f88c-5b6a-88a6-e851bbd3d459
+mission_type_activations:
+- software-dev
+- documentation
+- research
+- plan
+vcs:
+  type: git
+agents:
+  available:
+  - llxprt
+  auto_commit: true
+  lint_on_edit: false

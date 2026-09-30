@@ -1,0 +1,27 @@
+---
+affected_files: []
+cycle_number: 10
+mission_slug: luthor-issue-to-pr-daemon-01M3N2VK
+reproduction_command:
+reviewed_at: '2026-09-29T16:35:58Z'
+reviewer_agent: user
+wp_id: WP03
+---
+
+# WP03 review feedback
+
+## Blocking: local controls misreport a live worker as held and hide its process proof
+
+`src/state.rs:876-889` persists every launched attempt as `launch_intended` with task state `held`. The production supervisor records `child_registered`, `supervisor_ready`, and `gate_sent` (`src/supervisor.rs:1750-1789`), and reconciliation can independently return `Running` (`src/supervisor.rs:1470-1492`), but neither path updates a durable running state. `status` prints the raw task state and attempt lifecycle (`src/cli.rs:64-76,95-107`), so even a verified live worker is reported as `phase: held`, `latest_attempt_lifecycle: launch_intended`. `show` also exposes no live child/supervisor identity: `events` discards the contents of both identity records and gate evidence (`src/cli.rs:123-160`). An operator cannot distinguish an active attempt from an uncertain held attempt or inspect the process evidence required by the WP03 local-control and completion-evidence criteria. The pause control similarly records a stop intent without a visible `pause_requested` state.
+
+Remediate without weakening the gate or reservation semantics: persist an evidence-backed active/stop-requested lifecycle, or derive an explicit verified-running/uncertain/stop-requested status from persisted identity and reconciliation evidence, and show bounded process identifiers plus boot/start/group identity for the attempt while redacting prompt/argv and credentials. Add a CLI integration assertion using a real gated child: after launch and after `reconcile` returns running, `status`/`show` identify the worker as active with process evidence; after a stop request they expose stop pending; an unverifiable child remains held with reserved capacity. Existing fake and supervisor integration tests do not assert these operator outputs for an active child.
+
+## Blocking: `show` suppresses the evidence that explains a PR-read hold
+
+The reusable lookup correctly distinguishes absent, open, ambiguous and error. But `show` exposes only evidence names and timestamps for `pause_pr_lookup`, `exit_pr_lookup`, and `source_observation` (`src/cli.rs:123-160`), and derives `last_observed_pr` from that already-redacted event (`src/cli.rs:254-258`). `status` copies only the raw last pause payload (`src/cli.rs:72,110`), not the exit lookup. Thus after an explicit reconciliation with a failed or ambiguous PR read, the local controls do not give the operator the lookup category, safe error code or HTTP status, even though these were recorded in `src/state.rs:127-149` and the WP requires reason evidence and local inspection. This finding concerns WP03 preflight and pause/resume diagnostics, not WP04 final PR completion.
+
+Expose a sanitized typed summary of the most recent stored PR and source observations in `show`/`status` with stage, timestamp, category/code/status and attempt ID; keep untrusted API text, prompt and secrets hidden. Add CLI regressions for absent, ambiguous, incomplete/failed reads on pause and exit reconciliation and for source-read failure; verify the displayed reason is current for each task state.
+
+The downstream WP04 depends on WP03; rebase its lane work after these changes before final PR-proof work. No contracts/ directory exists for this mission. Verification on authoritative root: `cargo fmt --all -- --check`, `cargo test --locked --offline --all-targets`, `cargo clippy --locked --offline --all-targets -- -D warnings` all passed with `CARGO_TARGET_DIR=tmp/wp03-root-target`; focused child-resume, log-failure, PR pagination, prelaunch-PR and live-capacity tests passed. These failures are missing runtime/operator behavior despite green tests.
+
+WP03 prompt anti-pattern checklist: dead code PASS; synthetic fixtures PASS for covered claim/supervision paths, FAIL for active local-control contract; silent empty return PASS; FR coverage FAIL for FR-006/FR-007 local-control state and evidence; frozen surface N/A; locked decision FAIL for required visible running/pause state; shared-file ownership PASS (single lane, explicit WP03 owned files); production fragility PASS for inspected paths.

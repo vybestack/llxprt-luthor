@@ -98,7 +98,7 @@ The operator can trust that task completion means a matching open PR exists in t
 | C-002 | No unsafe claim guarantee | GitHub assignment is not compare-and-set; live dispatch requires a maintainable single-dispatcher policy or a future atomic claim service. | Operational | High | Open |
 | C-003 | No direct-main delivery | Initial runnable delivery must be pushed on an issue branch and proposed via PR; never push directly to main. | Git | High | Open |
 | C-004 | Empty remote bootstrap | The remote currently has no default branch. Establish the first remote history through the approved issue-branch PR workflow; do not invent a default branch or push directly to main. | Git | High | Open |
-| C-005 | No implementation in setup mission work | This task produces mission artifacts only; Rust daemon implementation and live issue/PR activity are out of scope. | Scope | High | Open |
+| C-005 | Separate setup from implementation and acceptance | Mission setup produces planning artifacts only. Later work packages implement the Rust daemon; live GitHub writes and five-PR acceptance require the stated preflight, delivery and authorization conditions. This analysis gate authorizes neither implementation nor GitHub writes. | Scope | High | Open |
 
 ### Key Entities
 

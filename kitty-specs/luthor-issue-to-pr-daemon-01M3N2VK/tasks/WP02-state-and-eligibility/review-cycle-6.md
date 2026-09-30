@@ -1,0 +1,19 @@
+---
+affected_files: []
+cycle_number: 6
+mission_slug: luthor-issue-to-pr-daemon-01M3N2VK
+reproduction_command:
+reviewed_at: '2026-09-29T08:36:43Z'
+reviewer_agent: user
+wp_id: WP02
+---
+
+# WP02 review: changes required
+
+For the WP02 implementer: the committed CLI regression test exercises the production binary with fake `gh` Project, repository, and direct issue replies. The configured Date `Due` case checks a nonzero exit, Project/item identity in the diagnostic, and empty stdout. The unrelated Date plus supported `Status=Ready` case checks a successful candidate with the observed Project fields. The earlier credential-bearing `--prompt` exclusion, non-echoing error, and refusal to persist task/selection evidence also remain covered. No unrelated WP was reviewed or modified.
+
+**Remaining blocker in the same Date combined path:** The fake GraphQL response in `tests/cli.rs:134-185` contains a `date` property, but `GhProjectReader::page` does not request that property for `ProjectV2ItemFieldDateValue` in its GraphQL selection (`src/github/project.rs:216`). The parser now requires `date` for *every* Date field (`src/github/project.rs:358-370`), before eligibility can check the configured marker. A real GraphQL response to that selection cannot contain the fixture's `date` value. Consequently, a valid issue with `Status=Ready` and unrelated `Due` fails as `ProjectPage Malformed (invalid-project-field)` rather than producing the required observed issue JSON. Configured `Due` also receives that generic error instead of the explicit `project PROJECT item ITEM has unsupported configured marker field Due` diagnostic.
+
+Reproduction in the root checkout: `tmp/wp02-review-6/gh` is a local fake with a successful Project page containing `Status=Ready` and a `Due` Date value with only the requested `field.name`, plus successful repository and direct issue replies; `tmp/wp02-review-6/status-config.json` configures the supported `Status=Ready` marker. Run `env PATH="$PWD/tmp/wp02-review-6:/usr/bin:/bin" ./target/debug/luthor discover --config tmp/wp02-review-6/status-config.json`. Observed exit 1, zero stdout bytes, stderr `luthor: Project enumeration failed: ProjectPage Malformed (invalid-project-field)`. The fake is local and ignored; equivalently, remove `"date":"2026-01-01"` from the Date node in the committed `tests/cli.rs:142` fixture and run the targeted CLI test to expose the mismatch. Request the `date` scalar in the production GraphQL selection, or otherwise make the parser handle exactly what the query selects while preserving explicit configured-Date rejection and nonfatal unrelated-Date selection. Update the fake-`gh` regression to verify that its Date reply is consistent with the actual query; retain successful direct issue reads, both marker assertions and the observed issue JSON assertion.
+
+Root checks passed: `cargo fmt --all --check`, `cargo test --offline --locked` (62 integration tests: CLI 6, config 16, eligibility 11, Project 15, state 14), and `cargo clippy --offline --locked --all-targets -- -D warnings`. No `contracts/` artifact exists. WP02 anti-pattern checklist: dead code N/A for foundation APIs awaiting WP03; synthetic-fixture test FAIL because the Date fixture includes an unrequested GraphQL property; silent empty return PASS for the tested configured-Date case but the actual query produces a generic parser failure; FR coverage FAIL for the unrelated-Date branch of FR-002; frozen surface N/A; locked decision PASS for credentials; shared-file ownership PASS with WP03 rebase coordination; production fragility N/A. WP03 depends on WP02 and should rebase after the correction lands. No code, status, or event files were manually edited, and no GitHub writes were made.

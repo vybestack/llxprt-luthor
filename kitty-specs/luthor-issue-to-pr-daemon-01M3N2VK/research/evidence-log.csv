@@ -1,0 +1,11 @@
+evidence_id,source_id,claim_or_finding,evidence_type,verification_status,scope_or_limit
+E1,S1,"Project-item enumeration plus direct issue reads are required to establish source eligibility; issue-list filtering alone is insufficient",design-source,source-inspected,"Requirement from architecture; no live Project probe"
+E2,S1,"Readiness marker representation, Project field access, membership and pagination remain unverified",open-question,not-live-verified,"No GitHub/API access performed"
+E3,S2,"Assignment is not compare-and-set; observed post-write assignment cannot prove exclusive claim against other actors",design-source,source-inspected,"Single-dispatcher policy is an operational prerequisite, not verified"
+E4,S3,"Task identity separates tracker repository and issue from mapped code repository",design-source,source-inspected,"Design requirement; no implementation inspected in this workspace"
+E5,S3,"Task, attempt outcome, process evidence and PR evidence are distinct; agent exit alone does not complete a task",design-source,source-inspected,"Mission architecture and spec"
+E6,S3,"Only exhaustive successful PR lookup can establish absence; open completion requires exact issue and repository/head identity match",design-source,source-inspected,"No live PR query or adapter test"
+E7,S4,"Initial/resume rs command and session-root behavior require installed-binary validation",design-source,source-inspected,"Notes describe source evaluation only; no binary run"
+E8,S4,"Recovery retains holds/reservations when process or receipt evidence is uncertain",design-source,source-inspected,"Proposed design invariant; no crash test run"
+E9,S5,"V1 excludes automatic retry, review, repair, merge and unassignment",mission-scope,source-inspected,"Scope in implementation plan and mission spec"
+E10,S6,"Empty-remote issue-branch PR bootstrap remains unresolved",open-question,not-live-verified,"No remote write or bootstrap probe"

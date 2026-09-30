@@ -1,0 +1,95 @@
+{
+  "version": 1,
+  "mission_slug": "luthor-issue-to-pr-daemon-01M3N2VK",
+  "mission_id": "01M3N2VKCY63H0QY6Z1TXCMKNH",
+  "mission_branch": "kitty/mission-luthor-issue-to-pr-daemon-01M3N2VK",
+  "target_branch": "work/luthor-issue-to-pr-daemon",
+  "lanes": [
+    {
+      "lane_id": "lane-a",
+      "wp_ids": [
+        "WP01",
+        "WP02",
+        "WP03",
+        "WP04",
+        "WP05"
+      ],
+      "write_scope": [
+        "Cargo.toml",
+        "dev-docs/**",
+        "src/**",
+        "src/claim.rs",
+        "src/cli.rs",
+        "src/config.rs",
+        "src/coordinator.rs",
+        "src/eligibility.rs",
+        "src/github/project.rs",
+        "src/github/pull_request.rs",
+        "src/platform.rs",
+        "src/pr_evidence.rs",
+        "src/recovery.rs",
+        "src/state.rs",
+        "src/supervisor.rs",
+        "src/worktree.rs",
+        "tests/**",
+        "tests/acceptance_evidence.rs",
+        "tests/claim.rs",
+        "tests/cli.rs",
+        "tests/config.rs",
+        "tests/coordinator.rs",
+        "tests/eligibility.rs",
+        "tests/fault_injection.rs",
+        "tests/platform_dry_run.rs",
+        "tests/pr_evidence.rs",
+        "tests/recovery.rs",
+        "tests/state.rs",
+        "tests/supervisor.rs",
+        "tests/worktree.rs"
+      ],
+      "predicted_surfaces": [
+        "api",
+        "artifact-rendering",
+        "tracker-integration"
+      ],
+      "depends_on_lanes": [],
+      "parallel_group": 0
+    }
+  ],
+  "computed_at": "2026-09-28T22:55:04.016595+00:00",
+  "computed_from": "dependency_graph+ownership",
+  "planning_artifact_wps": [],
+  "planning_commit_sha": "701474b60de98515c6d90ce4827b98efc062a54d",
+  "collapse_report": {
+    "events": [
+      {
+        "wp_a": "WP01",
+        "wp_b": "WP02",
+        "rule": "write_scope_overlap",
+        "evidence": "overlapping globs: 'src/**' vs 'src/config.rs', 'src/**' vs 'src/state.rs', 'src/**' vs 'src/github/project.rs', 'src/**' vs 'src/eligibility.rs', 'tests/**' vs 'tests/config.rs', 'tests/**' vs 'tests/state.rs', 'tests/**' vs 'tests/eligibility.rs'; WP02 depends on WP01"
+      },
+      {
+        "wp_a": "WP01",
+        "wp_b": "WP03",
+        "rule": "write_scope_overlap",
+        "evidence": "overlapping globs: 'src/**' vs 'src/claim.rs', 'src/**' vs 'src/worktree.rs', 'src/**' vs 'src/supervisor.rs', 'src/**' vs 'src/coordinator.rs', 'src/**' vs 'src/cli.rs', 'tests/**' vs 'tests/claim.rs', 'tests/**' vs 'tests/worktree.rs', 'tests/**' vs 'tests/supervisor.rs', 'tests/**' vs 'tests/coordinator.rs', 'tests/**' vs 'tests/cli.rs'"
+      },
+      {
+        "wp_a": "WP01",
+        "wp_b": "WP04",
+        "rule": "write_scope_overlap",
+        "evidence": "overlapping globs: 'src/**' vs 'src/github/pull_request.rs', 'src/**' vs 'src/pr_evidence.rs', 'src/**' vs 'src/recovery.rs', 'tests/**' vs 'tests/pr_evidence.rs', 'tests/**' vs 'tests/recovery.rs', 'tests/**' vs 'tests/fault_injection.rs'"
+      },
+      {
+        "wp_a": "WP01",
+        "wp_b": "WP05",
+        "rule": "write_scope_overlap",
+        "evidence": "overlapping globs: 'src/**' vs 'src/platform.rs', 'tests/**' vs 'tests/platform_dry_run.rs', 'tests/**' vs 'tests/acceptance_evidence.rs'; WP05 depends on WP01"
+      }
+    ],
+    "total_merges": 4,
+    "independent_wps_collapsed": 0,
+    "by_rule": {
+      "write_scope_overlap": 4
+    }
+  }
+}
