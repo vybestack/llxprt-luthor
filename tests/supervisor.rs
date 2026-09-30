@@ -1039,6 +1039,72 @@ impl PullRequestReader for ExitPr {
 
 #[cfg(unix)]
 #[test]
+fn live_running_lost_claim_requests_stop_and_holds_reservation_until_exit() {
+    let dir = tempfile::tempdir().unwrap();
+    let (config, mut store, plan, _) = prepared_fake_worker(&dir);
+    fs::write(&plan.executable, "#!/bin/sh\nexec /bin/sleep 15\n").unwrap();
+    let child_path = config.state_root.join("attempts/attempt-real.child.json");
+    let _guard = FixtureGroupGuard(child_path);
+    execute_with_binary(&mut store, &plan, Path::new(env!("CARGO_BIN_EXE_luthor"))).unwrap();
+
+    assert_eq!(
+        reconcile_attempt(&mut store, "task", "attempt-real").unwrap(),
+        Reconciliation::Running
+    );
+    let selection = store.selection_evidence("task").unwrap().unwrap();
+    let mut projects = OtherProject(selection.candidate, 0);
+    let mut prs = ExitPr::default();
+    let observed = luthor::coordinator::reconcile_with_pr(
+        &mut store,
+        "task",
+        "attempt-real",
+        &mut projects,
+        &mut prs,
+    )
+    .unwrap();
+
+    assert_eq!(
+        projects.1, 1,
+        "claim read count after active reconciliation"
+    );
+    assert!(
+        matches!(observed, Reconciliation::Held { .. }),
+        "unexpected active reconciliation: {observed:?}"
+    );
+    assert_eq!(projects.1, 1, "the issue claim must be read once");
+    assert_eq!(
+        prs.reads, 1,
+        "the PR lookup must occur while the worker runs"
+    );
+    assert!(store.stop_intent("task", "attempt-real").unwrap().is_some());
+    assert_eq!(store.reservation_count().unwrap(), 1);
+    assert!(matches!(
+        reconcile_attempt(&mut store, "task", "attempt-real").unwrap(),
+        Reconciliation::Held { .. }
+    ));
+    assert_eq!(store.reservation_count().unwrap(), 1);
+    assert!(
+        !store
+            .evidence_kinds("task")
+            .unwrap()
+            .contains(&"attempt_exit".into())
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let completed = loop {
+        let result = reconcile_attempt(&mut store, "task", "attempt-real").unwrap();
+        if matches!(result, Reconciliation::Completed { .. }) {
+            break result;
+        }
+        assert!(Instant::now() < deadline, "worker did not exit after stop");
+        thread::sleep(Duration::from_millis(10));
+    };
+    assert!(matches!(completed, Reconciliation::Completed { .. }));
+    assert_eq!(store.reservation_count().unwrap(), 0);
+}
+
+#[cfg(unix)]
+#[test]
 fn natural_exit_matching_pr_is_proved_and_persisted() {
     let (_dir, mut config, mut store) = dispatched_fixture(7);
     config.capacity = 1;

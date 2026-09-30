@@ -409,6 +409,9 @@ pub fn reconcile_with_pr<P: ProjectReader, Q: PullRequestReader>(
     prs: &mut Q,
 ) -> Result<supervisor::Reconciliation, SupervisorError> {
     let result = supervisor::reconcile_attempt(store, task_id, attempt_id)?;
+    if matches!(result, supervisor::Reconciliation::Running) {
+        return monitor_running_attempt(store, task_id, attempt_id, projects, prs);
+    }
     if !matches!(result, supervisor::Reconciliation::Completed { .. }) {
         return Ok(result);
     }
@@ -423,6 +426,114 @@ pub fn reconcile_with_pr<P: ProjectReader, Q: PullRequestReader>(
         );
     }
     Ok(result)
+}
+
+fn monitor_running_attempt<P: ProjectReader, Q: PullRequestReader>(
+    store: &mut StateStore,
+    task_id: &str,
+    attempt_id: &str,
+    projects: &mut P,
+    prs: &mut Q,
+) -> Result<supervisor::Reconciliation, SupervisorError> {
+    let selection = store
+        .selection_evidence(task_id)?
+        .ok_or(StateError::InvalidSelection)?;
+    let claim_lost = match verify_completion_claim(projects, &selection) {
+        Ok(()) => false,
+        Err(ClaimError::Changed) => true,
+        Err(ClaimError::Source(_)) => {
+            store.record_evidence(
+                task_id,
+                Some(attempt_id),
+                "held_reason",
+                "active claim read failed",
+            )?;
+            return Ok(supervisor::Reconciliation::Held {
+                reason: "active claim read failed".into(),
+            });
+        }
+        Err(_) => {
+            unreachable!("completion claim verification only returns source or changed errors")
+        }
+    };
+    let lookup_result = lookup(
+        prs,
+        &selection.candidate.mapping.code_repository,
+        &selection.candidate.issue_url,
+    );
+    let matching_pr = match lookup_result {
+        Ok(LookupResult::Absent) => false,
+        Ok(LookupResult::OpenPreexisting(pr)) => {
+            let observed = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|_| SupervisorError::IdentityUnavailable)?
+                .as_secs();
+            let verified = (|| {
+                let login = prs.authenticated_identity().map_err(|_| "identity")?;
+                let expected =
+                    expected_for_task(store, task_id, prs, &login).map_err(|_| "evidence")?;
+                VerifiedOpenPr::from_matching(*pr, &expected, &login, attempt_id, observed)
+                    .map_err(|_| "mismatch")
+            })();
+            if verified.is_err() {
+                store.record_evidence(
+                    task_id,
+                    Some(attempt_id),
+                    "held_reason",
+                    "active PR verification failed",
+                )?;
+                return Ok(supervisor::Reconciliation::Held {
+                    reason: "active PR verification failed".into(),
+                });
+            }
+            true
+        }
+        Ok(LookupResult::Ambiguous(_)) => {
+            store.record_evidence(
+                task_id,
+                Some(attempt_id),
+                "held_reason",
+                "active PR lookup ambiguous",
+            )?;
+            return Ok(supervisor::Reconciliation::Held {
+                reason: "active PR lookup ambiguous".into(),
+            });
+        }
+        Err(_) => {
+            store.record_evidence(
+                task_id,
+                Some(attempt_id),
+                "held_reason",
+                "active PR read failed",
+            )?;
+            return Ok(supervisor::Reconciliation::Held {
+                reason: "active PR read failed".into(),
+            });
+        }
+    };
+    let reason = match (claim_lost, matching_pr) {
+        (true, true) => Some("active claim lost and matching PR observed"),
+        (true, false) => Some("active claim lost"),
+        (false, true) => Some("matching PR observed while worker active"),
+        (false, false) => None,
+    };
+    if let Some(reason) = reason {
+        store.record_evidence(task_id, Some(attempt_id), "held_reason", reason)?;
+        if store.stop_intent(task_id, attempt_id)?.is_none()
+            && supervisor::request_stop(store, task_id, attempt_id).is_err()
+        {
+            store.record_evidence(
+                task_id,
+                Some(attempt_id),
+                "held_reason",
+                "active worker stop pending",
+            )?;
+        }
+        return Ok(supervisor::Reconciliation::Held {
+            reason: reason.into(),
+        });
+    }
+    Ok(supervisor::Reconciliation::Running)
 }
 
 fn finish_verified_stopped_attempt_with_pr<P: ProjectReader, Q: PullRequestReader>(
