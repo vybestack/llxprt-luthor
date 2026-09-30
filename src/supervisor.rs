@@ -142,7 +142,6 @@ pub fn inspect_recovery_quiescence(
     };
     let record = store.worktree_record(task_id)?;
     if worktree.path != plan.worktree
-        || worktree != plan.expected_worktree
         || record.as_ref().is_none_or(|r| {
             r.identity.as_ref() != Some(&worktree)
                 || r.intent.path != worktree.path
@@ -150,10 +149,11 @@ pub fn inspect_recovery_quiescence(
                 || r.intent.base != worktree.base
                 || r.intent.repository != worktree.repository
         })
+        || !worktree::matches_snapshot(&worktree, &plan.expected_worktree).unwrap_or(false)
     {
         return held("worktree identity mismatch");
     }
-    if worktree::verify_snapshot(&worktree).is_err() {
+    if worktree::verify_snapshot(&plan.expected_worktree).is_err() {
         return held("worktree snapshot mismatch");
     }
     let Some(selection) = store.selection_evidence(task_id)? else {
