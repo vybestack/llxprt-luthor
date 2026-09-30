@@ -161,6 +161,95 @@ fn differing_assignment_principal_claims_issue_with_acoliver_write_account() {
     );
     assert!(dir.path().join("assigned").exists());
     assert!(!result.status.success());
+
+    let restart = run(&config, &path, &["--issues", "7", "--execute"]);
+    let calls_after_restart = fs::read_to_string(dir.path().join("calls")).unwrap();
+    assert_eq!(
+        calls_after_restart
+            .matches("POST repos/org/tracker/issues/7/assignees")
+            .count(),
+        1
+    );
+    let stdout = String::from_utf8_lossy(&restart.stdout);
+    let stderr = String::from_utf8_lossy(&restart.stderr);
+    assert!(
+        stdout.contains("\"reconciliation\"")
+            || stdout.contains("\"source_holds\"")
+            || stderr.contains("reconciliation"),
+        "stdout={stdout}\nstderr={stderr}"
+    );
+    assert!(!stdout.contains("selected 0 eligible candidates"));
+}
+
+#[test]
+fn execute_unknown_target_fails_without_assignment_post() {
+    let dir = tempfile::tempdir().unwrap();
+    let (config, path) = fixture_with_principals(dir.path(), "acoliver", "issue-agent", "acoliver");
+    let result = run(&config, &path, &["--issues", "8", "--execute"]);
+    assert!(!result.status.success());
+    let calls = fs::read_to_string(dir.path().join("calls")).unwrap();
+    assert!(
+        !calls.contains("POST repos/org/tracker/issues/7/assignees"),
+        "{calls}"
+    );
+    assert!(
+        !calls.contains("POST repos/org/tracker/issues/8/assignees"),
+        "{calls}"
+    );
+}
+
+#[test]
+fn preview_assigned_target_fails_without_mutating_persisted_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let (config, path) = fixture_with_principals(dir.path(), "acoliver", "issue-agent", "acoliver");
+    let checkout = dir.path().join("checkout");
+    fs::create_dir(&checkout).unwrap();
+    for args in [
+        vec!["init", "-b", "main"],
+        vec!["config", "user.name", "Fixture"],
+        vec!["config", "user.email", "fixture@example.org"],
+        vec!["remote", "add", "origin", "git@github.com:org/code.git"],
+        vec!["commit", "--allow-empty", "-m", "base"],
+    ] {
+        let result = Command::new("git")
+            .arg("-C")
+            .arg(&checkout)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+    let first = run(&config, &path, &["--issues", "7", "--execute"]);
+    assert!(!first.status.success());
+    assert!(dir.path().join("assigned").exists());
+    let snapshot = fs::read_dir(dir.path().join("state"))
+        .unwrap()
+        .map(|entry| {
+            let entry = entry.unwrap();
+            (entry.file_name(), fs::read(entry.path()).unwrap())
+        })
+        .collect::<Vec<_>>();
+    let preview = run(&config, &path, &["--issues", "7"]);
+    assert!(!preview.status.success());
+    let after = fs::read_dir(dir.path().join("state"))
+        .unwrap()
+        .map(|entry| {
+            let entry = entry.unwrap();
+            (entry.file_name(), fs::read(entry.path()).unwrap())
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(after, snapshot);
+    let calls = fs::read_to_string(dir.path().join("calls")).unwrap();
+    assert_eq!(
+        calls
+            .matches("POST repos/org/tracker/issues/7/assignees")
+            .count(),
+        1
+    );
 }
 
 #[test]
