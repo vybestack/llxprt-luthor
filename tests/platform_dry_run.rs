@@ -279,7 +279,7 @@ fn installed_rs_stop_uses_private_supervisor_and_reconciles() {
         config::{CommandTemplate, Config, Mapping, Marker, Source},
         eligibility::Candidate,
         state::StateStore,
-        supervisor::{execute_with_binary, prepare_initial},
+        supervisor::{execute_with_binary, prepare_initial, prepare_resume},
         worktree::ensure_worktree,
     };
     use std::{
@@ -556,6 +556,30 @@ fn installed_rs_stop_uses_private_supervisor_and_reconciles() {
         luthor::supervisor::Reconciliation::Completed { .. }
     ));
     assert_eq!(store.reservation_count().unwrap(), 0);
+    store
+        .record_pause_pr_lookup(
+            "task",
+            "installed-stop",
+            &luthor::state::PausePrEvidence {
+                observed_at_unix_secs: 2,
+                repository: "org/code".into(),
+                status: luthor::state::PausePrStatus::Absent,
+            },
+        )
+        .unwrap();
+    assert_eq!(store.task_phase("task").unwrap().as_deref(), Some("paused"));
+    drop(store);
+    let mut reopened = StateStore::open(&config.state_root, 1).unwrap();
+    let resume = prepare_resume(&mut reopened, "task", "installed-resume").unwrap();
+    assert_eq!(resume.session_id, plan.session_id);
+    assert_eq!(resume.worktree, plan.worktree);
+    assert!(
+        resume
+            .args
+            .join(" ")
+            .contains("Distinct second turn after stop for installed-resume")
+    );
+    assert_eq!(reopened.reservation_count().unwrap(), 1);
     let stdout = fs::metadata(&receipt.stdout_path).unwrap();
     let stderr = fs::metadata(&receipt.stderr_path).unwrap();
     assert_eq!(stdout.len(), receipt.stdout_bytes);
