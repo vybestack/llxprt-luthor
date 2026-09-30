@@ -984,6 +984,8 @@ fn expected_for_task_rejects_changed_login_and_repository_id_lookup_errors() {
 #[cfg(unix)]
 #[derive(Default)]
 struct ExitPr {
+    ambiguous: bool,
+    login: Option<String>,
     reads: usize,
     fail: bool,
     matching: Option<(String, String)>,
@@ -992,7 +994,7 @@ struct ExitPr {
 #[cfg(unix)]
 impl PullRequestReader for ExitPr {
     fn authenticated_identity(&mut self) -> Result<String, LookupError> {
-        Ok("operator".into())
+        Ok(self.login.clone().unwrap_or_else(|| "operator".into()))
     }
     fn page(&mut self, _: &str, _: u32) -> Result<Vec<serde_json::Value>, LookupError> {
         self.reads += 1;
@@ -1003,20 +1005,24 @@ impl PullRequestReader for ExitPr {
                 status: None,
             })
         } else if let Some((issue_url, _)) = &self.matching {
-            Ok(vec![
+            let mut prs = vec![
                 serde_json::json!({"number": 42, "body": format!("Tracker-Issue: {issue_url}")}),
-            ])
+            ];
+            if self.ambiguous {
+                prs.push(serde_json::json!({"number": 43, "body": format!("Tracker-Issue: {issue_url}")}));
+            }
+            Ok(prs)
         } else {
             Ok(vec![])
         }
     }
-    fn detail(&mut self, _: &str, _: u64) -> Result<serde_json::Value, LookupError> {
+    fn detail(&mut self, _: &str, number: u64) -> Result<serde_json::Value, LookupError> {
         let Some((issue_url, branch)) = &self.matching else {
             unreachable!()
         };
         Ok(serde_json::json!({
-            "id": 4242, "number": 42, "state": "open",
-            "html_url": "https://github.com/org/code/pull/42",
+            "id": 4200 + number, "number": number, "state": "open",
+            "html_url": format!("https://github.com/org/code/pull/{number}"),
             "body": format!("Tracker-Issue: {issue_url}"), "draft": true,
             "created_at": "2026-01-01T00:00:00Z",
             "base": {"repo": {"id": 10, "full_name": "org/code"}, "ref": "main"},
@@ -4260,4 +4266,405 @@ fn initial_rejects_conflicting_session_and_cwd_arguments_before_reservation() {
         assert_eq!(store.reservation_count().unwrap(), 0, "{alteration:?}");
         assert!(store.launch_intent(&attempt).unwrap().is_none());
     }
+}
+
+#[cfg(unix)]
+fn retry_fixture() -> (tempfile::TempDir, Config, StateStore) {
+    retry_fixture_with_saved_budget(None)
+}
+
+#[cfg(unix)]
+fn retry_fixture_with_saved_budget(
+    budget: Option<&str>,
+) -> (tempfile::TempDir, Config, StateStore) {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let (mut config, candidate) = configured(dir.path());
+    let worker = dir.path().join("worker");
+    fs::write(&worker, "#!/bin/sh\nexit 2\n").unwrap();
+    fs::set_permissions(&worker, fs::Permissions::from_mode(0o700)).unwrap();
+    config.initial.executable = worker.clone();
+    config.resume.executable = worker;
+    let mut store = StateStore::open(&config.state_root, 1).unwrap();
+    claimed(&mut store, &config, &candidate, dir.path());
+    if let Some(budget) = budget {
+        // Reproduce a selection saved by a build that accepted the unsupported budget.
+        let mut saved = store.selection_evidence("task").unwrap().unwrap();
+        saved
+            .effective_config
+            .initial
+            .args
+            .extend(["--max-tool-calls".into(), budget.into()]);
+        saved
+            .effective_config
+            .resume
+            .args
+            .extend(["--max-tool-calls".into(), budget.into()]);
+        let db = rusqlite::Connection::open(config.state_root.join("state.sqlite3")).unwrap();
+        db.execute(
+            "UPDATE evidence SET payload=?1 WHERE task_id='task' AND kind='selection'",
+            [serde_json::to_string(&saved).unwrap()],
+        )
+        .unwrap();
+    }
+    let plan = prepare_initial(&mut store, "task", "attempt-real").unwrap();
+    execute_with_binary(&mut store, &plan, Path::new(env!("CARGO_BIN_EXE_luthor"))).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !receipt_path(&config).exists() {
+        assert!(
+            Instant::now() < deadline,
+            "retry fixture receipt missing: {:?}",
+            fs::read_to_string(
+                config
+                    .state_root
+                    .join("attempts/attempt-real.supervisor-error.json")
+            )
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    let selection = store.selection_evidence("task").unwrap().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let result = luthor::coordinator::reconcile_with_pr(
+            &mut store,
+            "task",
+            "attempt-real",
+            &mut OtherProject(selection.candidate.clone(), 1),
+            &mut ExitPr::default(),
+        )
+        .unwrap();
+        if store.task_phase("task").unwrap().as_deref() == Some("attention") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "fixture exit not reconciled: {result:?}"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    // A completed receipt may precede the detached supervisor's own termination.
+    let db = rusqlite::Connection::open(config.state_root.join("state.sqlite3")).unwrap();
+    let ready: String = db.query_row("SELECT payload FROM evidence WHERE attempt_id='attempt-real' AND kind='supervisor_ready'", [], |r| r.get(0)).unwrap();
+    let ready: serde_json::Value = serde_json::from_str(&ready).unwrap();
+    wait_for_process_and_group_absence(ready["pid"].as_i64().unwrap() as i32);
+    assert_eq!(
+        store.task_phase("task").unwrap().as_deref(),
+        Some("attention")
+    );
+    (dir, config, store)
+}
+
+#[cfg(unix)]
+fn retry(
+    store: &mut StateStore,
+    config: &Config,
+    projects: &mut OtherProject,
+    prs: &mut ExitPr,
+    launcher: &mut impl SupervisorLauncher,
+) -> Result<luthor::supervisor::LaunchPlan, luthor::coordinator::DispatchError> {
+    luthor::coordinator::retry_one(
+        store,
+        luthor::coordinator::RetryDependencies {
+            task_id: "task",
+            previous_attempt_id: "attempt-real",
+            attempt_id: "attempt-retry",
+            config,
+            config_revision: "corrected",
+            actor: "operator",
+            reason: "correct worker budget",
+            projects,
+            prs,
+            launcher,
+        },
+    )
+}
+
+#[cfg(unix)]
+#[test]
+fn retry_natural_exit_audits_current_argv_preserves_history_and_reconciles_new_revision() {
+    let (_dir, mut config, mut store) = retry_fixture();
+    let original = store.selection_evidence("task").unwrap().unwrap();
+    let old_plan = store.launch_intent("attempt-real").unwrap().unwrap();
+    let old_receipt = fs::read(receipt_path(&config)).unwrap();
+    config
+        .resume
+        .args
+        .extend(["--max-tool-calls".into(), "512".into()]);
+    let mut prs = ExitPr::default();
+    let mut projects = OtherProject(original.candidate.clone(), 1);
+    let mut launcher = OtherLauncher::default();
+    let plan = retry(&mut store, &config, &mut projects, &mut prs, &mut launcher).unwrap();
+    assert_eq!(launcher.0, 1);
+    assert_eq!(
+        prs.reads, 1,
+        "cached PR absence must not authorize continuation"
+    );
+    assert_eq!(plan.config_revision, "corrected");
+    assert_eq!(plan.session_id, "task");
+    assert_eq!(plan.expected_worktree.branch, "luthor/task");
+    assert!(
+        plan.args
+            .windows(2)
+            .any(|pair| pair == ["--max-tool-calls", "512"])
+    );
+    let prompt = plan.args.windows(2).find(|p| p[0] == "--prompt").unwrap()[1].as_str();
+    assert!(prompt.contains("naturally exited worker"));
+    assert!(!prompt.contains("interrupted or canceled turn"));
+    assert_eq!(store.selection_evidence("task").unwrap().unwrap(), original);
+    assert_eq!(
+        store.launch_intent("attempt-real").unwrap().unwrap(),
+        old_plan
+    );
+    assert_eq!(fs::read(receipt_path(&config)).unwrap(), old_receipt);
+    assert_eq!(store.reservation_count().unwrap(), 1);
+    let audit = store
+        .evidence_payloads("task", "attempt-retry", "retry_authorized")
+        .unwrap();
+    let audit: serde_json::Value = serde_json::from_str(&audit[0]).unwrap();
+    assert_eq!(audit["actor"], "operator");
+    assert_eq!(audit["reason"], "correct worker budget");
+    assert_eq!(audit["previous_plan"]["config_revision"], "rev");
+    assert_eq!(audit["plan"]["attempt_id"], "attempt-retry");
+    assert_eq!(audit["reservation"], "attempt-retry");
+    assert_eq!(audit["pr"]["status"]["status"], "absent");
+    assert!(retry(&mut store, &config, &mut projects, &mut prs, &mut launcher).is_err());
+    assert_eq!(launcher.0, 1);
+    execute_with_binary(&mut store, &plan, Path::new(env!("CARGO_BIN_EXE_luthor"))).unwrap();
+    let path = config
+        .state_root
+        .join("attempts/attempt-retry.receipt.json");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !path.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "authorized new revision did not pass worker gate"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(matches!(
+        reconcile_attempt(&mut store, "task", "attempt-retry").unwrap(),
+        Reconciliation::Completed {
+            exit_code: Some(2),
+            signal: None
+        }
+    ));
+    assert_eq!(store.reservation_count().unwrap(), 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn retry_refusals_never_reserve_or_launch_or_rewrite_selection() {
+    for refusal in [
+        "receipt",
+        "plan",
+        "outcome",
+        "stop",
+        "active",
+        "reserved",
+        "incomplete",
+        "receipt_corrupt",
+        "source",
+        "mapping",
+        "identity",
+        "worktree",
+        "capacity",
+        "pr_error",
+        "pr_present",
+        "pr_ambiguous",
+        "pr_identity",
+        "task_identity",
+        "claim_intent",
+        "tracked_live",
+        "supervisor_error",
+        "invalid_config",
+    ] {
+        let (_dir, mut config, mut store) = retry_fixture();
+        let original = store.selection_evidence("task").unwrap().unwrap();
+        let old_plan = store.launch_intent("attempt-real").unwrap().unwrap();
+        let mut projects = OtherProject(original.candidate.clone(), 1);
+        let mut prs = ExitPr::default();
+        let db = rusqlite::Connection::open(config.state_root.join("state.sqlite3")).unwrap();
+        match refusal {
+            "receipt" => {
+                fs::remove_file(receipt_path(&config)).unwrap();
+            }
+            "plan" => {
+                fs::write(
+                    config.state_root.join("attempts/attempt-real.plan.json"),
+                    "{}",
+                )
+                .unwrap();
+            }
+            "outcome" => {
+                db.execute(
+                    "UPDATE attempts SET outcome='wrong' WHERE id='attempt-real'",
+                    [],
+                )
+                .unwrap();
+            }
+            "stop" => {
+                store
+                    .record_intent("late-stop", "task", Some("attempt-real"), "stop", "{}")
+                    .unwrap();
+            }
+            "active" => {
+                store.set_task_phase("task", "held").unwrap();
+            }
+            "reserved" => {
+                db.execute(
+                    "UPDATE reservations SET status='reserved' WHERE attempt_id='attempt-real'",
+                    [],
+                )
+                .unwrap();
+            }
+            "incomplete" => {
+                db.execute("UPDATE attempts SET lifecycle='launch_intended',outcome=NULL WHERE id='attempt-real'", []).unwrap();
+            }
+            "receipt_corrupt" => {
+                fs::write(receipt_path(&config), "{").unwrap();
+            }
+            "source" => {
+                projects.1 = 0;
+            }
+            "mapping" => {
+                config.mappings[0].base_branch = "other".into();
+            }
+            "identity" => {
+                config.assignment_login = "another".into();
+            }
+            "worktree" => {
+                git(
+                    &config.worktree_root.join("task"),
+                    &["checkout", "--detach"],
+                );
+            }
+            "capacity" => {
+                let mut other = original.candidate.clone();
+                other.issue_node_id = "other".into();
+                other.item_id = "other".into();
+                other.issue_number = 8;
+                other.issue_url = "https://github.com/org/tracker/issues/8".into();
+                store.create_task("other", &other, "rev", &config).unwrap();
+                store.reserve("other", "other-attempt").unwrap();
+            }
+            "pr_error" => {
+                prs.fail = true;
+            }
+            "pr_present" => {
+                prs.matching = Some((original.candidate.issue_url.clone(), "luthor/task".into()));
+            }
+            "pr_ambiguous" => {
+                prs.ambiguous = true;
+                prs.matching = Some((original.candidate.issue_url.clone(), "luthor/task".into()));
+            }
+            "pr_identity" => {
+                prs.login = Some("another".into());
+            }
+            "task_identity" => {
+                db.execute(
+                    "UPDATE tasks SET tracker_repo_id='different' WHERE id='task'",
+                    [],
+                )
+                .unwrap();
+            }
+            "claim_intent" => {
+                db.execute("UPDATE intents SET detail='{}' WHERE task_id='task' AND kind='claim_assignment'", []).unwrap();
+            }
+            "tracked_live" => {
+                let (boot, start) = test_process_identity(std::process::id());
+                store.record_evidence("task", Some("attempt-real"), "tracked_descendant", &serde_json::json!({"pid":std::process::id(), "boot_identity":boot,"start_identity":start}).to_string()).unwrap();
+            }
+            "supervisor_error" => {
+                fs::write(
+                    config
+                        .state_root
+                        .join("attempts/attempt-real.supervisor-error.json"),
+                    "{}",
+                )
+                .unwrap();
+            }
+            "invalid_config" => {
+                config
+                    .resume
+                    .args
+                    .extend(["--max-tool-calls".into(), "1024".into()]);
+            }
+            _ => unreachable!(),
+        }
+        let reservations = store.reservation_count().unwrap();
+        let mut launcher = OtherLauncher::default();
+        assert!(
+            retry(&mut store, &config, &mut projects, &mut prs, &mut launcher).is_err(),
+            "{refusal}"
+        );
+        assert_eq!(launcher.0, 0, "{refusal}");
+        assert_eq!(
+            store.reservation_count().unwrap(),
+            reservations,
+            "{refusal}"
+        );
+        assert_eq!(
+            store.latest_attempt("task").unwrap().as_deref(),
+            Some("attempt-real"),
+            "{refusal}"
+        );
+        assert_eq!(
+            store.selection_evidence("task").unwrap().unwrap(),
+            original,
+            "{refusal}"
+        );
+        assert_eq!(
+            store.launch_intent("attempt-real").unwrap().unwrap(),
+            old_plan,
+            "{refusal}"
+        );
+        assert!(
+            store.launch_intent("attempt-retry").unwrap().is_none(),
+            "{refusal}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn retry_unsupported_saved_budget_uses_corrected_template_without_rewriting_old_argv() {
+    let (_dir, mut config, mut store) = retry_fixture_with_saved_budget(Some("1024"));
+    let original = store.selection_evidence("task").unwrap().unwrap();
+    let old_plan = store.launch_intent("attempt-real").unwrap().unwrap();
+    let old_plan_typed: luthor::supervisor::LaunchPlan = serde_json::from_str(&old_plan).unwrap();
+    assert!(
+        old_plan_typed
+            .args
+            .windows(2)
+            .any(|p| p == ["--max-tool-calls", "1024"])
+    );
+    config
+        .initial
+        .args
+        .extend(["--max-tool-calls".into(), "512".into()]);
+    config
+        .resume
+        .args
+        .extend(["--max-tool-calls".into(), "512".into()]);
+    let mut launcher = OtherLauncher::default();
+    let plan = retry(
+        &mut store,
+        &config,
+        &mut OtherProject(original.candidate.clone(), 1),
+        &mut ExitPr::default(),
+        &mut launcher,
+    )
+    .unwrap();
+    assert!(
+        plan.args
+            .windows(2)
+            .any(|p| p == ["--max-tool-calls", "512"])
+    );
+    assert!(!plan.args.iter().any(|arg| arg == "1024"));
+    assert_eq!(launcher.0, 1);
+    assert_eq!(store.selection_evidence("task").unwrap().unwrap(), original);
+    assert_eq!(
+        store.launch_intent("attempt-real").unwrap().unwrap(),
+        old_plan
+    );
 }

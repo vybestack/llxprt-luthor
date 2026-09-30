@@ -382,7 +382,31 @@ const WORKER_FLAGS_WITHOUT_VALUE: &[&str] = &[
     "--version",
 ];
 
+fn validate_tool_budget(command: &CommandTemplate) -> Result<(), ConfigError> {
+    let mut count = 0;
+    for (index, arg) in command.args.iter().enumerate() {
+        let value = if arg == "--max-tool-calls" {
+            command.args.get(index + 1).map(String::as_str)
+        } else {
+            arg.strip_prefix("--max-tool-calls=")
+        };
+        if arg == "--max-tool-calls" || arg.starts_with("--max-tool-calls=") {
+            count += 1;
+            let valid = value
+                .and_then(|v| v.parse::<i64>().ok())
+                .is_some_and(|v| v == -1 || (1..=512).contains(&v));
+            if !valid || count > 1 {
+                return Err(ConfigError::Invalid(
+                    "--max-tool-calls requires exactly one value: -1 or 1..512".into(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_command(command: &CommandTemplate) -> Result<(), ConfigError> {
+    validate_tool_budget(command)?;
     if command.executable.as_os_str().is_empty() {
         return Err(ConfigError::Invalid(
             "command executable is required".into(),
@@ -394,7 +418,15 @@ fn validate_command(command: &CommandTemplate) -> Result<(), ConfigError> {
         ));
     }
     let mut expects_value = false;
-    for arg in &command.args {
+    for (index, arg) in command.args.iter().enumerate() {
+        if expects_value
+            && arg == "-1"
+            && index > 0
+            && command.args[index - 1] == "--max-tool-calls"
+        {
+            expects_value = false;
+            continue;
+        }
         if matches!(arg.as_str(), "--header" | "-H" | "--env" | "-e")
             || arg.starts_with("--header=")
             || arg.starts_with("--env=")

@@ -241,6 +241,156 @@ pub struct SelectionEvidence {
     pub effective_config: EffectiveConfigSnapshot,
 }
 
+/// Private, append-only authorization for a single natural-exit continuation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetryAuthorization {
+    pub actor: String,
+    pub reason: String,
+    pub previous_plan: crate::supervisor::LaunchPlan,
+    pub previous_config: EffectiveConfigSnapshot,
+    pub config: EffectiveConfigSnapshot,
+    pub plan: crate::supervisor::LaunchPlan,
+    pub reservation: String,
+    pub pr: ExitPrEvidence,
+}
+
+pub(crate) fn same_task_config(
+    original: &EffectiveConfigSnapshot,
+    current: &EffectiveConfigSnapshot,
+) -> bool {
+    let mut comparable = current.clone();
+    comparable.initial = original.initial.clone();
+    comparable.resume = original.resume.clone();
+    comparable == *original
+}
+
+/// Resolve a launch's revision through its exact per-attempt authorization,
+/// never by accepting an arbitrary revision supplied by a plan file.
+pub(crate) fn attempt_selection(
+    connection: &Connection,
+    plan: &crate::supervisor::LaunchPlan,
+) -> Result<SelectionEvidence, StateError> {
+    let selection: String = connection.query_row(
+        "SELECT payload FROM evidence WHERE task_id=?1 AND attempt_id IS NULL AND kind='selection'",
+        [&plan.task_id],
+        |row| row.get(0),
+    )?;
+    let mut selection: SelectionEvidence = serde_json::from_str(&selection)?;
+    let candidate = &selection.candidate;
+    let consistent: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM tasks WHERE id=?1 AND tracker_repo_id=?2
+         AND issue_node_id=?3 AND repository=?4 AND issue_number=?5 AND config_revision=?6)",
+        params![
+            plan.task_id,
+            candidate.tracker_repo_id,
+            candidate.issue_node_id,
+            candidate.repository,
+            candidate.issue_number,
+            selection.config_revision
+        ],
+        |row| row.get(0),
+    )?;
+    if !consistent {
+        return Err(StateError::LaunchBlocked);
+    }
+    let audits: Vec<String> = connection.prepare(
+        "SELECT payload FROM evidence WHERE task_id=?1 AND attempt_id=?2 AND kind='retry_authorized'",
+    )?.query_map(params![plan.task_id, plan.attempt_id], |row| row.get(0))?
+        .collect::<Result<_, _>>()?;
+    match audits.as_slice() {
+        [] if selection.config_revision == plan.config_revision => Ok(selection),
+        [payload] => {
+            let audit: RetryAuthorization = serde_json::from_str(payload)?;
+            let prior: String = connection.query_row(
+                "SELECT i.detail FROM intents i JOIN attempts a ON a.id=i.attempt_id
+                 WHERE i.task_id=?1 AND i.attempt_id=?2 AND i.kind='launch'
+                 AND a.rowid < (SELECT rowid FROM attempts WHERE id=?3 AND task_id=?1)",
+                params![
+                    plan.task_id,
+                    audit.previous_plan.attempt_id,
+                    plan.attempt_id
+                ],
+                |row| row.get(0),
+            )?;
+            let prior: crate::supervisor::LaunchPlan = serde_json::from_str(&prior)?;
+            if audit.plan != *plan
+                || audit.previous_plan != prior
+                || audit.previous_plan.task_id != plan.task_id
+                || audit.actor != selection.candidate.mapping.allowed_pr_author
+                || audit.reason.trim().is_empty()
+                || audit.reservation != plan.attempt_id
+                || audit.pr.status != PausePrStatus::Absent
+                || audit.pr.observed_at_unix_secs == 0
+                || audit.pr.repository != selection.candidate.mapping.code_repository
+                || !same_task_config(&selection.effective_config, &audit.config)
+                || attempt_selection(connection, &prior)?.effective_config != audit.previous_config
+                || plan.config_revision.trim().is_empty()
+            {
+                return Err(StateError::LaunchBlocked);
+            }
+            selection.config_revision = plan.config_revision.clone();
+            selection.effective_config = audit.config;
+            Ok(selection)
+        }
+        _ => Err(StateError::LaunchBlocked),
+    }
+}
+
+fn retry_context(
+    connection: &Connection,
+    task_id: &str,
+    previous_attempt_id: &str,
+) -> Result<
+    (
+        crate::supervisor::LaunchPlan,
+        crate::supervisor::ExitReceipt,
+    ),
+    StateError,
+> {
+    let context: Option<(String, String, String)> = connection.query_row(
+        "SELECT i.detail,e.payload,a.outcome FROM attempts a
+         JOIN tasks t ON t.id=a.task_id
+         JOIN reservations r ON r.attempt_id=a.id AND r.task_id=t.id
+         JOIN intents i ON i.task_id=t.id AND i.attempt_id=a.id AND i.kind='launch'
+         JOIN evidence e ON e.task_id=t.id AND e.attempt_id=a.id AND e.kind='attempt_exit'
+         WHERE t.id=?1 AND a.id=?2 AND t.state='attention'
+         AND a.lifecycle='completed' AND a.outcome IS NOT NULL AND r.status='released'
+         AND a.id=(SELECT id FROM attempts WHERE task_id=?1 ORDER BY rowid DESC LIMIT 1)
+         AND (SELECT COUNT(*) FROM intents WHERE attempt_id=?2 AND kind='launch')=1
+         AND (SELECT COUNT(*) FROM evidence WHERE attempt_id=?2 AND kind='attempt_exit')=1
+         AND (SELECT COUNT(*) FROM evidence WHERE task_id=?1 AND kind='claim_verified')=1
+         AND (SELECT COUNT(*) FROM intents WHERE task_id=?1 AND kind='claim_assignment')=1
+         AND (SELECT COUNT(*) FROM evidence WHERE task_id=?1 AND kind='worktree_created')=1
+         AND NOT EXISTS(SELECT 1 FROM intents WHERE task_id=?1 AND attempt_id=?2 AND kind='stop')
+         AND NOT EXISTS(SELECT 1 FROM reservations WHERE task_id=?1 AND status='reserved')
+         AND NOT EXISTS(SELECT 1 FROM attempts WHERE task_id=?1 AND (lifecycle!='completed' OR outcome IS NULL))
+         AND EXISTS(SELECT 1 FROM evidence WHERE task_id=?1 AND attempt_id=?2 AND kind='exit_pr_lookup'
+             AND json_extract(payload,'$.status.status')='absent')",
+        params![task_id, previous_attempt_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    ).optional()?;
+    let (plan, receipt, outcome) = context.ok_or(StateError::LaunchBlocked)?;
+    let plan: crate::supervisor::LaunchPlan = serde_json::from_str(&plan)?;
+    let receipt: crate::supervisor::ExitReceipt = serde_json::from_str(&receipt)?;
+    if plan.task_id != task_id
+        || plan.attempt_id != previous_attempt_id
+        || plan.session_id != task_id
+        || receipt.attempt_id != previous_attempt_id
+        || receipt.exit_code.is_none()
+        || receipt.signal.is_some()
+        || !receipt.stop_signals.is_empty()
+        || outcome
+            != format!(
+                "exit_code={:?};signal={:?}",
+                receipt.exit_code, receipt.signal
+            )
+    {
+        return Err(StateError::LaunchBlocked);
+    }
+    attempt_selection(connection, &plan)?;
+    Ok((plan, receipt))
+}
+
 fn validate_verified_open_pr(
     tx: &Transaction<'_>,
     task_id: &str,
@@ -1005,12 +1155,65 @@ impl StateStore {
         resume_context(&self.connection, task_id)
     }
 
+    pub(crate) fn initial_launch(&self, task_id: &str) -> Result<String, StateError> {
+        let first: String = self.connection.query_row(
+            "SELECT i.detail FROM attempts a JOIN intents i ON i.attempt_id=a.id
+             WHERE a.task_id=?1 AND i.task_id=?1 AND i.kind='launch' ORDER BY a.rowid LIMIT 1",
+            [task_id],
+            |row| row.get(0),
+        )?;
+        Ok(first)
+    }
+
+    pub fn retry_context(
+        &self,
+        task_id: &str,
+        previous_attempt_id: &str,
+    ) -> Result<
+        (
+            crate::supervisor::LaunchPlan,
+            crate::supervisor::ExitReceipt,
+        ),
+        StateError,
+    > {
+        retry_context(&self.connection, task_id, previous_attempt_id)
+    }
+
+    pub(crate) fn selection_for_attempt(
+        &self,
+        plan: &crate::supervisor::LaunchPlan,
+    ) -> Result<SelectionEvidence, StateError> {
+        attempt_selection(&self.connection, plan)
+    }
+
+    pub(crate) fn hold_retry_intent(
+        &mut self,
+        audit: &RetryAuthorization,
+    ) -> Result<(), StateError> {
+        self.hold_launch(
+            &audit.plan.task_id,
+            &audit.plan.attempt_id,
+            &serde_json::to_string(&audit.plan)?,
+            Some(audit),
+        )
+    }
+
     /// Persists a plan without granting permission to start a process.
     pub fn hold_launch_intent(
         &mut self,
         task_id: &str,
         attempt_id: &str,
         detail: &str,
+    ) -> Result<(), StateError> {
+        self.hold_launch(task_id, attempt_id, detail, None)
+    }
+
+    fn hold_launch(
+        &mut self,
+        task_id: &str,
+        attempt_id: &str,
+        detail: &str,
+        retry: Option<&RetryAuthorization>,
     ) -> Result<(), StateError> {
         if attempt_id.is_empty()
             || attempt_id.len() > 128
@@ -1042,9 +1245,31 @@ impl StateStore {
             |row| row.get(0),
         )?;
         match phase.as_deref() {
-            Some("claimed") if attempts == 0 && claims == 1 && worktrees == 1 => {}
-            Some("paused") if claims == 1 && worktrees == 1 => {
+            Some("claimed")
+                if retry.is_none() && attempts == 0 && claims == 1 && worktrees == 1 => {}
+            Some("paused") if retry.is_none() && claims == 1 && worktrees == 1 => {
                 resume_context(&tx, task_id)?;
+            }
+            Some("attention") if retry.is_some() && claims == 1 && worktrees == 1 => {
+                let audit = retry.expect("retry checked above");
+                let (prior, _) = retry_context(&tx, task_id, &audit.previous_plan.attempt_id)?;
+                let previous = attempt_selection(&tx, &prior)?;
+                if audit.previous_plan != prior
+                    || audit.previous_config != previous.effective_config
+                    || !same_task_config(&previous.effective_config, &audit.config)
+                    || audit.actor != previous.candidate.mapping.allowed_pr_author
+                    || audit.reason.trim().is_empty()
+                    || audit.plan.attempt_id != attempt_id
+                    || audit.plan.task_id != task_id
+                    || audit.reservation != attempt_id
+                    || audit.pr.status != PausePrStatus::Absent
+                    || audit.pr.observed_at_unix_secs == 0
+                    || audit.pr.repository != previous.candidate.mapping.code_repository
+                    || audit.plan.config_revision.trim().is_empty()
+                    || audit.plan.config_revision == prior.config_revision
+                {
+                    return Err(StateError::LaunchBlocked);
+                }
             }
             _ => return Err(StateError::LaunchBlocked),
         }
@@ -1081,6 +1306,12 @@ impl StateStore {
             "INSERT INTO intents(id,task_id,attempt_id,kind,detail) VALUES(?1,?2,?3,'launch',?4)",
             params![format!("launch-{attempt_id}"), task_id, attempt_id, detail],
         )?;
+        if let Some(audit) = retry {
+            tx.execute(
+                "INSERT INTO evidence(task_id,attempt_id,kind,payload) VALUES(?1,?2,'retry_authorized',?3)",
+                params![task_id, attempt_id, serde_json::to_string(audit)?],
+            )?;
+        }
         tx.execute("UPDATE tasks SET state='held' WHERE id=?1", [task_id])?;
         tx.commit()?;
         Ok(())

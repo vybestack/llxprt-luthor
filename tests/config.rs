@@ -282,3 +282,31 @@ fn accepts_verified_rs_arguments_and_renders_task_placeholders() {
         ]
     );
 }
+
+#[test]
+fn native_tool_budget_rejects_unsupported_values_and_accepts_unlimited() {
+    for value in ["-1", "1", "512", "0", "513", "1024", "no", "{attempt.id}"] {
+        for inline in [false, true] {
+            let mut config = Config::from_json(valid()).unwrap();
+            if inline {
+                config.resume.args.push(format!("--max-tool-calls={value}"));
+            } else {
+                config
+                    .resume
+                    .args
+                    .extend(["--max-tool-calls".into(), value.into()]);
+            }
+            assert_eq!(
+                config.validate().is_ok(),
+                ["-1", "1", "512"].contains(&value),
+                "{value}, inline={inline}"
+            );
+        }
+    }
+    let mut config = Config::from_json(valid()).unwrap();
+    config
+        .resume
+        .args
+        .extend(["--max-tool-calls=512".into(), "--max-tool-calls=-1".into()]);
+    assert!(config.validate().is_err());
+}

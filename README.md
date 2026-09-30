@@ -31,6 +31,7 @@ Usage: luthor discover --config <path>
        luthor daemon --config PATH --config-revision REV [--repository owner/repo --issues N,N,...] [--once] [--execute]
        luthor dispatch --config <path> --repository owner/repo --issue N --config-revision REV [--execute]
        luthor resume TASK --config <path> --execute
+       luthor retry TASK --attempt ID --config PATH --config-revision REV --actor LOGIN --reason TEXT --execute
        luthor recover TASK --attempt ID --config PATH --actor LOGIN --reason TEXT --execute
        luthor status --config <path>
        luthor show TASK --config <path>
@@ -134,3 +135,42 @@ Use pause only when you intend to stop that task. Reconciliation can leave a tas
 - **Offline Cargo commands cannot resolve dependencies**: the locked dependencies are not cached locally. Populate Cargo's cache through your approved environment before repeating the commands.
 
 For state layout, migrations, and configuration details, see [Configuration and state](dev-docs/config-and-state.md). For what validation has and has not established, see [WP05 validation](dev-docs/wp05-validation.md).
+
+
+### Continue after a natural worker exit
+
+`retry` is an explicit authorization for one existing task in `attention`, naming
+its latest completed, released attempt. It requires a natural exit with no signal
+or stop intent, rechecks the private receipt and registered process absence, then
+reads the source claim and exhaustive open-PR list again. It never reassigns the
+issue, creates another task or worktree, or retries on daemon startup.
+
+```sh
+luthor retry TASK --attempt PREVIOUS_ATTEMPT --config /private/luthor.json --config-revision corrected-budget-512 --actor acoliver --reason 'Correct unsupported worker budget from 1024 to 512' --execute
+```
+
+The new attempt uses the current private config's `resume` executable and argv.
+Its session, task branch, worktree identity, source rules, mappings, assignment
+login, state/worktree roots, and capacity must remain unchanged. Only the two
+worker command templates may change. Give the new attempt a revision different
+from the previous attempt's revision. Keep both current templates valid, including
+`--max-tool-calls 512` instead of `1024`; `-1` also means unlimited. The original
+selection and previous attempts remain unchanged, including an old unsupported
+argument. The private `retry_authorized` evidence records the actor, reason,
+previous plan/config, new plan/config, fresh PR absence, and reservation ID in the
+same transaction as the new launch intent and reservation.
+
+`--execute` is required. Missing or uncertain receipts/processes, pending stops,
+PR errors/ambiguity/presence, claim or identity drift, conflicting worktrees,
+invalid configuration, and unavailable capacity refuse the continuation. An
+uncertain launch keeps its new reservation and must be reconciled; running the
+same command again does not launch another worker. No SQLite edits or worker
+wrappers are needed.
+
+Normal `resume` retains its original stopped-attempt and selection-configuration
+requirements. It does not adopt a retry's changed revision. A revised retry that
+is subsequently paused cannot be resumed through that original-config path.
+Another natural exit may be explicitly retried with a different revision and
+fresh proof, but there is no automatic retry loop. The process-absence check covers
+registered processes and tracked descendants, not deliberately untracked escaped
+children. A reused PID or boot change fails closed.

@@ -89,6 +89,7 @@ fn observation_summary(
     let stage = match kind {
         "pause_pr_lookup" => "pause_pr_lookup",
         "exit_pr_lookup" => "exit_pr_lookup",
+        "retry_pr_lookup" => "retry_pr_lookup",
         "source_observation" => "source_observation",
         _ => unreachable!(),
     };
@@ -218,7 +219,7 @@ fn observations(conn: &Connection, task: &str) -> Result<ObservationSummaries, C
         .prepare(
             "SELECT sequence,kind,attempt_id,payload,
         CAST(strftime('%s',created_at) AS INTEGER) FROM evidence
-        WHERE task_id=?1 AND kind IN ('pause_pr_lookup','exit_pr_lookup','source_observation')
+        WHERE task_id=?1 AND kind IN ('pause_pr_lookup','exit_pr_lookup','retry_pr_lookup','source_observation')
         ORDER BY sequence",
         )
         .map_err(|_| CliError::Database)?;
@@ -275,6 +276,8 @@ fn displayed_reason(
         }
         let stage = if summary["stage"] == "pause_pr_lookup" {
             "pause"
+        } else if summary["stage"] == "retry_pr_lookup" {
+            "retry"
         } else {
             "exit"
         };
@@ -659,16 +662,17 @@ fn events(conn: &Connection, table: &str, task: &str) -> Result<Vec<Value>, CliE
         // Launch and dispatch details contain executable arguments and prompts.
         let detail = match (table, kind.as_str()) {
             ("evidence", "held_reason" | "claim_verified") => Some(json!(payload)),
-            ("evidence", "pause_pr_lookup" | "exit_pr_lookup" | "source_observation") => {
-                Some(observation_summary(
-                    conn,
-                    task,
-                    &kind,
-                    attempt_id.as_deref(),
-                    &payload,
-                    created_at_unix_secs,
-                ))
-            }
+            (
+                "evidence",
+                "pause_pr_lookup" | "exit_pr_lookup" | "retry_pr_lookup" | "source_observation",
+            ) => Some(observation_summary(
+                conn,
+                task,
+                &kind,
+                attempt_id.as_deref(),
+                &payload,
+                created_at_unix_secs,
+            )),
             ("evidence", "attempt_exit") => serde_json::from_str::<ExitReceipt>(&payload)
                 .ok()
                 .map(|receipt| receipt_summary(&receipt)),

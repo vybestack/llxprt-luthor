@@ -1,8 +1,9 @@
 //! Launch planning and the Unix gated child runner.
 use crate::{
-    config::{ConfigError, RenderedCommand, TaskValues},
+    config::{Config, ConfigError, RenderedCommand, TaskValues},
     state::{
-        SelectionEvidence, StateError, StateStore, WorktreeIdentity, WorktreeIntent, WorktreeRecord,
+        ExitPrEvidence, RetryAuthorization, SelectionEvidence, StateError, StateStore,
+        WorktreeIdentity, WorktreeIntent, WorktreeRecord,
     },
     worktree::{self, WorktreeError},
 };
@@ -166,7 +167,7 @@ pub fn inspect_recovery_quiescence(
     let Some(selection) = store.selection_evidence(task_id)? else {
         return held("missing selection");
     };
-    if selection.config_revision != plan.config_revision
+    if store.selection_for_attempt(&plan).is_err()
         || selection.candidate.mapping.code_repository != worktree.repository
     {
         return held("selection mismatch");
@@ -541,7 +542,7 @@ fn enforce_prompt(
     Ok(())
 }
 
-fn enforce_resume_inspection(args: &mut [String]) -> Result<(), SupervisorError> {
+fn enforce_worktree_inspection(args: &mut [String], previous: &str) -> Result<(), SupervisorError> {
     let indexes: Vec<usize> = args
         .windows(2)
         .enumerate()
@@ -550,9 +551,9 @@ fn enforce_resume_inspection(args: &mut [String]) -> Result<(), SupervisorError>
     if indexes.len() != 1 {
         return Err(SupervisorError::Conflict);
     }
-    args[indexes[0] + 1].push_str(
-        "\n\nBefore continuing, inspect the files left in the worktree by the interrupted or canceled turn. Do not assume its transcript was restored; use the files as the source of truth for what remains to be done.",
-    );
+    args[indexes[0] + 1].push_str(&format!(
+        "\n\nBefore continuing, inspect the files left in the worktree by the {previous}. Do not assume its transcript was restored; use the files as the source of truth for what remains to be done.",
+    ));
     Ok(())
 }
 
@@ -694,7 +695,7 @@ pub fn prepare_resume(
             assignee: &selection.effective_config.assignment_login,
         },
     )?;
-    enforce_resume_inspection(&mut args)?;
+    enforce_worktree_inspection(&mut args, "interrupted or canceled turn")?;
     ensure_distinct_resume_prompt(&first, &latest, &args)?;
     let plan = LaunchPlan {
         task_id: task_id.to_owned(),
@@ -708,6 +709,113 @@ pub fn prepare_resume(
         session_environment: first.session_environment.clone(),
     };
     store.hold_launch_intent(task_id, attempt_id, &serde_json::to_string(&plan)?)?;
+    Ok(plan)
+}
+
+pub(crate) struct RetryPlanAuthorization<'a> {
+    pub attempt_id: &'a str,
+    pub config: &'a Config,
+    pub revision: &'a str,
+    pub actor: &'a str,
+    pub reason: &'a str,
+    pub pr: ExitPrEvidence,
+}
+
+/// Renders a separately authorized natural-exit continuation without starting a worker.
+pub(crate) fn prepare_retry(
+    store: &mut StateStore,
+    previous: &LaunchPlan,
+    authorization: RetryPlanAuthorization<'_>,
+) -> Result<LaunchPlan, SupervisorError> {
+    let RetryPlanAuthorization {
+        attempt_id,
+        config,
+        revision,
+        actor,
+        reason,
+        pr,
+    } = authorization;
+    let task_id = previous.task_id.as_str();
+    let first = store.initial_launch(task_id)?;
+    let first: LaunchPlan = serde_json::from_str(&first)?;
+    let latest = previous;
+    if !first.session_environment.matches_current()? {
+        return Err(SupervisorError::Conflict);
+    }
+    let mut selection = store.selection_for_attempt(previous)?;
+    let previous_config = selection.effective_config.clone();
+    selection.effective_config = config.into();
+    let identity = worktree::verify_existing_worktree(store, task_id)?;
+    if first.task_id != task_id
+        || latest.task_id != task_id
+        || first.session_id != task_id
+        || latest.session_id != task_id
+        || first.worktree != identity.path
+        || latest.worktree != identity.path
+        || !worktree::matches_snapshot(&first.expected_worktree, &identity)?
+        || !worktree::matches_snapshot(&latest.expected_worktree, &identity)?
+    {
+        return Err(SupervisorError::Conflict);
+    }
+    let worktree = identity.path.clone();
+    let cwd = worktree.to_str().ok_or(SupervisorError::Conflict)?;
+    let values = TaskValues {
+        task_issue_number: selection.candidate.issue_number.to_string(),
+        task_repository: selection.candidate.repository.clone(),
+        task_issue_url: selection.candidate.issue_url.clone(),
+        task_id: task_id.to_owned(),
+        attempt_id: attempt_id.to_owned(),
+        worktree: cwd.to_owned(),
+    };
+    let RenderedCommand {
+        executable,
+        mut args,
+    } = selection.effective_config.resume.render(&values)?;
+    let raw_continuation = prompt(&args).ok_or(SupervisorError::Conflict)?;
+    if selection.effective_config.resume.args == selection.effective_config.initial.args
+        || !requires_pair(&args, "--session", task_id)
+        || !requires_pair(&args, "--cwd", cwd)
+        || raw_continuation.trim().is_empty()
+    {
+        return Err(SupervisorError::Conflict);
+    }
+    enforce_prompt(
+        &mut args,
+        PromptRequirements {
+            tracker_repository: &selection.candidate.repository,
+            issue_url: &selection.candidate.issue_url,
+            code_repository: &selection.candidate.mapping.code_repository,
+            base: &identity.base,
+            head_repository: &selection.candidate.mapping.allowed_pr_head_repository,
+            branch: &identity.branch,
+            remote: &identity.remote,
+            author: &selection.candidate.mapping.allowed_pr_author,
+            assignee: &selection.effective_config.assignment_login,
+        },
+    )?;
+    enforce_worktree_inspection(&mut args, "naturally exited worker")?;
+    ensure_distinct_resume_prompt(&first, latest, &args)?;
+    let plan = LaunchPlan {
+        task_id: task_id.to_owned(),
+        attempt_id: attempt_id.to_owned(),
+        session_id: task_id.to_owned(),
+        worktree,
+        expected_worktree: identity,
+        executable,
+        args,
+        config_revision: revision.to_owned(),
+        session_environment: first.session_environment.clone(),
+    };
+    store.hold_retry_intent(&RetryAuthorization {
+        actor: actor.to_owned(),
+        reason: reason.to_owned(),
+        previous_plan: previous.clone(),
+        previous_config,
+        config: config.into(),
+        plan: plan.clone(),
+        reservation: attempt_id.to_owned(),
+        pr,
+    })?;
     Ok(plan)
 }
 
@@ -1201,7 +1309,7 @@ fn verify_launch_worktree(
         intent: serde_json::from_str::<WorktreeIntent>(&intent)?,
         identity: Some(serde_json::from_str(&identity)?),
     };
-    if selection.config_revision != plan.config_revision
+    if crate::state::attempt_selection(connection, plan).is_err()
         || plan.worktree != plan.expected_worktree.path
         || !worktree::matches_snapshot(
             &plan.expected_worktree,
@@ -1829,6 +1937,25 @@ pub fn reconcile_attempt(
     task_id: &str,
     attempt_id: &str,
 ) -> Result<Reconciliation, SupervisorError> {
+    reconcile_attempt_inner(store, task_id, attempt_id, false)
+}
+
+#[cfg(unix)]
+pub(crate) fn recheck_retry_exit(
+    store: &mut StateStore,
+    task_id: &str,
+    attempt_id: &str,
+) -> Result<Reconciliation, SupervisorError> {
+    reconcile_attempt_inner(store, task_id, attempt_id, true)
+}
+
+#[cfg(unix)]
+fn reconcile_attempt_inner(
+    store: &mut StateStore,
+    task_id: &str,
+    attempt_id: &str,
+    recheck_processes: bool,
+) -> Result<Reconciliation, SupervisorError> {
     if !valid_attempt(attempt_id) {
         return Err(SupervisorError::Conflict);
     }
@@ -1889,7 +2016,7 @@ pub fn reconcile_attempt(
     let Some(selection) = store.selection_evidence(task_id)? else {
         return Ok(held("missing selection"));
     };
-    if selection.config_revision != plan.config_revision
+    if store.selection_for_attempt(&plan).is_err()
         || selection.candidate.mapping.code_repository != worktree.repository
     {
         return Ok(held("selection mismatch"));
@@ -1975,6 +2102,12 @@ pub fn reconcile_attempt(
         }
         return Ok(Reconciliation::Running);
     }
+    if recheck_processes
+        && !matches!(fs::symlink_metadata(attempts.join(format!("{attempt_id}.supervisor-error.json"))),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+    {
+        return Ok(held("supervisor error receipt exists"));
+    }
     let receipt: ExitReceipt =
         match private_bytes(&receipt_path).and_then(|bytes| serde_json::from_slice(&bytes).ok()) {
             Some(receipt) => receipt,
@@ -2010,8 +2143,11 @@ pub fn reconcile_attempt(
         exit_code: receipt.exit_code,
         signal: receipt.signal,
     };
-    if store.reconciled_exit(task_id, attempt_id, &evidence, &outcome)? {
+    if store.reconciled_exit(task_id, attempt_id, &evidence, &outcome)? && !recheck_processes {
         return Ok(completed);
+    }
+    if recheck_processes && !registered_processes_absent(&child_file, &supervisor, &tracked) {
+        return Ok(held("registered process absence is unproven"));
     }
     match identity(supervisor.pid) {
         Ok((boot, start))
@@ -2073,6 +2209,15 @@ pub fn reconcile_attempt(
     }
     store.reconcile_verified_exit(task_id, attempt_id, &evidence, &outcome)?;
     Ok(completed)
+}
+
+#[cfg(not(unix))]
+pub(crate) fn recheck_retry_exit(
+    _store: &mut StateStore,
+    _task_id: &str,
+    _attempt_id: &str,
+) -> Result<Reconciliation, SupervisorError> {
+    Err(SupervisorError::ExecutionUnavailable)
 }
 
 #[cfg(not(unix))]
