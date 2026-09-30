@@ -40,7 +40,7 @@ fn installed_rs_initial_turn_uses_private_config_and_loopback_provider() {
     };
     use std::{
         fs,
-        io::{Read, Write},
+        io::Read,
         net::TcpListener,
         path::Path,
         process::Command,
@@ -322,48 +322,84 @@ fn installed_rs_stop_uses_private_supervisor_and_reconciles() {
     let (request_tx, request_rx) = std::sync::mpsc::channel();
     let server = thread::spawn(move || {
         let deadline = Instant::now() + Duration::from_secs(20);
-        loop {
-            match listener.accept() {
-                Ok((mut stream, _)) => {
-                    stream
-                        .set_read_timeout(Some(Duration::from_secs(5)))
-                        .unwrap();
-                    let mut bytes = Vec::new();
-                    let mut chunk = [0; 4096];
-                    loop {
-                        let n = stream.read(&mut chunk).unwrap_or(0);
-                        if n == 0 {
+        for _ in 0..2 {
+            loop {
+                let (mut stream, _) = loop {
+                    match listener.accept() {
+                        Ok(connection) => break connection,
+                        Err(error)
+                            if error.kind() == std::io::ErrorKind::WouldBlock
+                                && Instant::now() < deadline =>
+                        {
+                            thread::sleep(Duration::from_millis(20))
+                        }
+                        Err(error) => panic!(
+                            "loopback provider did not receive a request before deadline: {error}"
+                        ),
+                    }
+                };
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut bytes = Vec::new();
+                let mut chunk = [0; 4096];
+                loop {
+                    match stream.read(&mut chunk) {
+                        Ok(0) if bytes.is_empty() => break,
+                        Ok(0) => break,
+                        Ok(n) => bytes.extend_from_slice(&chunk[..n]),
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            panic!("loopback provider request read timed out")
+                        }
+                        Err(error) => panic!("loopback provider request read failed: {error}"),
+                    }
+                    if let Some(split) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&bytes[..split]);
+                        let length = headers
+                            .lines()
+                            .find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                name.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse::<usize>().ok())
+                                    .flatten()
+                            })
+                            .unwrap_or(0);
+                        if bytes.len() >= split + 4 + length {
                             break;
                         }
-                        bytes.extend_from_slice(&chunk[..n]);
-                        if let Some(split) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
-                            let headers = String::from_utf8_lossy(&bytes[..split]);
-                            let length = headers
-                                .lines()
-                                .find_map(|line| {
-                                    let (name, value) = line.split_once(':')?;
-                                    name.eq_ignore_ascii_case("content-length")
-                                        .then(|| value.trim().parse::<usize>().ok())
-                                        .flatten()
-                                })
-                                .unwrap_or(0);
-                            if bytes.len() >= split + 4 + length {
-                                break;
-                            }
-                        }
                     }
-                    request_tx
-                        .send(String::from_utf8_lossy(&bytes).into_owned())
-                        .unwrap();
-                    return;
                 }
-                Err(error)
-                    if error.kind() == std::io::ErrorKind::WouldBlock
-                        && Instant::now() < deadline =>
+                if bytes.is_empty() {
+                    continue;
+                }
+                let split = bytes
+                    .windows(4)
+                    .position(|window| window == b"\r\n\r\n")
+                    .unwrap_or_else(|| panic!("loopback provider received nonempty malformed request without header terminator ({} bytes)", bytes.len()));
+                let headers = String::from_utf8_lossy(&bytes[..split]);
+                if !headers
+                    .lines()
+                    .next()
+                    .is_some_and(|line| line.starts_with("POST "))
                 {
-                    thread::sleep(Duration::from_millis(20))
+                    panic!(
+                        "loopback provider received malformed request line: {}",
+                        headers.lines().next().unwrap_or("<empty>")
+                    );
                 }
-                Err(error) => panic!("loopback provider did not receive a request: {error}"),
+                let request_line = headers.lines().next().unwrap();
+                let body_start = split + 4;
+                let request_body = String::from_utf8_lossy(&bytes[body_start..])
+                    .chars()
+                    .take(8192)
+                    .collect::<String>();
+                request_tx
+                    .send(format!("{request_line}\n{request_body}"))
+                    .unwrap();
+                let body = r#"{"id":"chatcmpl-test","object":"chat.completion","created":0,"model":"loopback","choices":[{"index":0,"message":{"role":"assistant","content":"Hello again."},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}"#;
+                write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+                stream.flush().unwrap();
+                break;
             }
         }
     });
@@ -495,36 +531,36 @@ fn installed_rs_stop_uses_private_supervisor_and_reconciles() {
             receipt_path.exists(),
             intent.as_deref().map(|_| "present").unwrap_or("absent")
         );
-        if let Ok(bytes) = fs::read(&receipt_path) {
-            if let Ok(receipt) = serde_json::from_slice::<luthor::supervisor::ExitReceipt>(&bytes) {
-                eprintln!(
-                    "STOP receipt: exit_code={:?}, signal={:?}, stop_signals={:?}, stdout_bytes={}, stderr_bytes={}",
-                    receipt.exit_code,
-                    receipt.signal,
-                    receipt.stop_signals,
-                    receipt.stdout_bytes,
-                    receipt.stderr_bytes
-                );
-                for (label, path) in [
-                    ("stdout", &receipt.stdout_path),
-                    ("stderr", &receipt.stderr_path),
-                ] {
-                    let text = fs::read_to_string(path).unwrap_or_default();
-                    let safe_lines = text
-                        .lines()
-                        .map(|line| {
-                            if line.to_ascii_lowercase().contains("token")
-                                || line.to_ascii_lowercase().contains("authorization")
-                            {
-                                "[redacted sensitive log line]"
-                            } else {
-                                line
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    eprintln!("STOP {label} log:\n{safe_lines}");
-                }
+        if let Ok(bytes) = fs::read(&receipt_path)
+            && let Ok(receipt) = serde_json::from_slice::<luthor::supervisor::ExitReceipt>(&bytes)
+        {
+            eprintln!(
+                "STOP receipt: exit_code={:?}, signal={:?}, stop_signals={:?}, stdout_bytes={}, stderr_bytes={}",
+                receipt.exit_code,
+                receipt.signal,
+                receipt.stop_signals,
+                receipt.stdout_bytes,
+                receipt.stderr_bytes
+            );
+            for (label, path) in [
+                ("stdout", &receipt.stdout_path),
+                ("stderr", &receipt.stderr_path),
+            ] {
+                let text = fs::read_to_string(path).unwrap_or_default();
+                let safe_lines = text
+                    .lines()
+                    .map(|line| {
+                        if line.to_ascii_lowercase().contains("token")
+                            || line.to_ascii_lowercase().contains("authorization")
+                        {
+                            "[redacted sensitive log line]"
+                        } else {
+                            line
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                eprintln!("STOP {label} log:\n{safe_lines}");
             }
         }
     }
@@ -580,6 +616,75 @@ fn installed_rs_stop_uses_private_supervisor_and_reconciles() {
             .contains("Distinct second turn after stop for installed-resume")
     );
     assert_eq!(reopened.reservation_count().unwrap(), 1);
+    execute_with_binary(
+        &mut reopened,
+        &resume,
+        Path::new(env!("CARGO_BIN_EXE_luthor")),
+    )
+    .unwrap();
+    let resume_receipt_path = config
+        .state_root
+        .join("attempts/installed-resume.receipt.json");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !resume_receipt_path.exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        resume_receipt_path.exists(),
+        "real rs resume produced no exit receipt"
+    );
+    let resume_receipt: luthor::supervisor::ExitReceipt =
+        serde_json::from_slice(&fs::read(&resume_receipt_path).unwrap()).unwrap();
+    let stream_tail = |path: &Path| {
+        let contents = fs::read_to_string(path).unwrap_or_default();
+        let tail = contents.chars().rev().take(3000).collect::<String>();
+        let tail = tail.chars().rev().collect::<String>();
+        tail.lines()
+            .map(|line| {
+                if line.to_ascii_lowercase().contains("authorization")
+                    || line.to_ascii_lowercase().contains("api-key")
+                {
+                    "[redacted authentication line]"
+                } else {
+                    line
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert_eq!(
+        resume_receipt.exit_code,
+        Some(0),
+        "rs resume stdout tail:\n{}\nrs resume stderr tail:\n{}",
+        stream_tail(&resume_receipt.stdout_path),
+        stream_tail(&resume_receipt.stderr_path)
+    );
+    let resumed_request = request_rx
+        .recv_timeout(Duration::from_secs(20))
+        .expect("resume provider request");
+    assert!(
+        resumed_request.contains("Distinct second turn after stop for installed-resume"),
+        "{resumed_request}"
+    );
+    assert!(
+        resumed_request.contains(&plan.session_id),
+        "session id missing: {resumed_request}"
+    );
+    assert!(
+        resumed_request.contains(&plan.worktree.display().to_string()),
+        "worktree missing: {resumed_request}"
+    );
+    for (path, expected) in [
+        (&resume_receipt.stdout_path, resume_receipt.stdout_bytes),
+        (&resume_receipt.stderr_path, resume_receipt.stderr_bytes),
+    ] {
+        assert_eq!(fs::metadata(path).unwrap().len(), expected);
+    }
+    assert!(matches!(
+        luthor::supervisor::reconcile_attempt(&mut reopened, "task", "installed-resume").unwrap(),
+        luthor::supervisor::Reconciliation::Completed { .. }
+    ));
+    assert_eq!(reopened.reservation_count().unwrap(), 0);
     let stdout = fs::metadata(&receipt.stdout_path).unwrap();
     let stderr = fs::metadata(&receipt.stderr_path).unwrap();
     assert_eq!(stdout.len(), receipt.stdout_bytes);
