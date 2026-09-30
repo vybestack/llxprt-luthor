@@ -2,7 +2,7 @@
 
 Luthor is a local Rust daemon for selecting eligible GitHub Project issues, assigning them to a configured login, launching `llxprt-code-rs` in isolated worktrees, and checking whether each task produced a matching pull request. Discovery and operator inspection are read-only with respect to GitHub. Assignment, worker launch, pause, and reconciliation are separate actions with different effects; read the command behavior below before using them.
 
-**Live provider and live acceptance are not validated.** The recorded installed-worker checks use a synthetic localhost provider and fixtures, with GitHub writes disabled. Do not treat those checks as authorization or evidence for a first live dispatch. See [WP05 validation](dev-docs/wp05-validation.md) for the evidence boundary.
+WP05 delivery is complete, and Luthor completed a separately authorized five-issue live acceptance run. The implementation delivery PR is [Luthor PR #1](https://github.com/vybestack/llxprt-luthor/pull/1); the five issue PRs and their observed check states are recorded in [WP05 validation](dev-docs/wp05-validation.md). Synthetic macOS/Linux dry-run results remain separate from that live evidence. Several issue PR checks are failing or still running, so this acceptance record does not claim green CI.
 
 ## Build and test offline
 
