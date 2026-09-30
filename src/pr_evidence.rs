@@ -18,7 +18,7 @@ pub struct PrIdentityEvidence {
     pub author: String,
     pub open: bool,
     pub draft: bool,
-    pub checks: Vec<String>,
+    pub checks: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -147,7 +147,7 @@ pub struct VerifiedOpenPr {
     pub(crate) active_login: String,
     pub(crate) tracker_issue_url: String,
     pub(crate) draft: bool,
-    pub(crate) checks: Vec<String>,
+    pub(crate) checks: Option<Vec<String>>,
     pub(crate) created_at: String,
     pub(crate) head_commit_sha: String,
     pub(crate) observed_at: u64,

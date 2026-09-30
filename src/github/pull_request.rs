@@ -20,7 +20,7 @@ pub struct PullRequestEvidence {
     pub draft: bool,
     pub tracker_issue_url: String,
     pub body: String,
-    pub checks: Vec<String>,
+    pub checks: Option<Vec<String>>,
     pub created_at: String,
     pub commit_sha: String,
 }
@@ -351,7 +351,7 @@ fn parse_evidence(value: &Value, repository: &str) -> Result<PullRequestEvidence
         draft,
         tracker_issue_url,
         body: body.to_owned(),
-        checks: Vec::new(),
+        checks: None,
         created_at,
         commit_sha,
     })

@@ -641,7 +641,7 @@ fn verified_open_pr_requires_a_terminal_attempt() {
             draft: false,
             tracker_issue_url: "https://github.com/org/tracker/issues/4".into(),
             body: "Tracker-Issue: https://github.com/org/tracker/issues/4".into(),
-            checks: vec![],
+            checks: Some(vec![]),
             created_at: "2026-09-29T00:00:00Z".into(),
             commit_sha: "abc123".into(),
         },

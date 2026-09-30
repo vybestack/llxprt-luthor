@@ -30,7 +30,7 @@ fn evidence() -> PrIdentityEvidence {
         author: "worker".into(),
         open: true,
         draft: true,
-        checks: vec!["failure".into()],
+        checks: Some(vec!["failure".into()]),
     }
 }
 
@@ -140,4 +140,23 @@ fn denies_forged_tracker_body_and_head() {
     assert!(
         VerifiedOpenPr::from_matching(forged_head, &expected, "worker", "attempt-1", 42).is_err()
     );
+}
+#[test]
+fn unavailable_checks_are_distinct_from_observed_empty_checks() {
+    let mut unavailable_pr =
+        pull_request("Tracker-Issue: https://github.com/tracker/repo/issues/4");
+    unavailable_pr.checks = None;
+    let unavailable =
+        VerifiedOpenPr::from_matching(unavailable_pr, &expected(), "worker", "attempt-1", 42)
+            .unwrap();
+    let mut empty_checks_pr =
+        pull_request("Tracker-Issue: https://github.com/tracker/repo/issues/4");
+    empty_checks_pr.checks = Some(vec![]);
+    let observed_empty =
+        VerifiedOpenPr::from_matching(empty_checks_pr, &expected(), "worker", "attempt-2", 43)
+            .unwrap();
+    let unavailable = serde_json::to_value(unavailable).unwrap();
+    let observed_empty = serde_json::to_value(observed_empty).unwrap();
+    assert_eq!(unavailable["checks"], serde_json::Value::Null);
+    assert_eq!(observed_empty["checks"], serde_json::json!([]));
 }

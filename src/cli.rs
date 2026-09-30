@@ -465,10 +465,11 @@ fn cached_verified_pr(conn: &Connection, task: &str) -> Result<Value, CliError> 
         .filter(|value| !value.is_empty())
         .ok_or(CliError::Database)?;
     let draft = detail["draft"].as_bool().ok_or(CliError::Database)?;
-    let checks = detail["checks"]
-        .as_array()
-        .filter(|checks| checks.iter().all(Value::is_string))
-        .ok_or(CliError::Database)?;
+    let checks = match &detail["checks"] {
+        Value::Null => Value::Null,
+        Value::Array(checks) if checks.iter().all(Value::is_string) => json!(checks),
+        _ => return Err(CliError::Database),
+    };
     let observed_at = detail["observed_at"]
         .as_u64()
         .filter(|value| *value > 0)
