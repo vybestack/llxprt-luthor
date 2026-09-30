@@ -3092,6 +3092,25 @@ fn same_binary_ready_without_release_does_not_launch_worker() {
 #[cfg(unix)]
 #[test]
 fn registered_shim_stays_gated_and_survives_supervisor_crash_after_release() {
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("LUTHOR_STOP_TEST_SUBREAPER").is_none() {
+        let status = Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("registered_shim_stays_gated_and_survives_supervisor_crash_after_release")
+            .env("LUTHOR_STOP_TEST_SUBREAPER", "1")
+            .status()
+            .unwrap();
+        assert!(
+            status.success(),
+            "isolated subreaper test process failed: {status}"
+        );
+        return;
+    }
+    #[cfg(target_os = "linux")]
+    assert_eq!(
+        unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) },
+        0
+    );
     use std::{
         io::Write,
         os::unix::fs::{DirBuilderExt, OpenOptionsExt},
@@ -3146,6 +3165,18 @@ fn registered_shim_stays_gated_and_survives_supervisor_crash_after_release() {
     let pid = identity["pid"].as_i64().unwrap() as i32;
     assert_eq!(identity["group_id"].as_i64().unwrap(), i64::from(pid));
     assert_eq!(unsafe { libc::getpgid(pid) }, pid);
+    #[cfg(target_os = "linux")]
+    let reaper = thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while Instant::now() < deadline {
+            let result = unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) };
+            if result == pid {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        false
+    });
     assert!(!marker.exists());
     store
         .record_evidence(
@@ -3208,13 +3239,23 @@ fn registered_shim_stays_gated_and_survives_supervisor_crash_after_release() {
         identity,
         serde_json::from_slice::<serde_json::Value>(&fs::read(identity_path).unwrap()).unwrap()
     );
-    assert!(!attempts.join("attempt-real.receipt.json").exists());
     assert!(matches!(
         reconcile_attempt(&mut store, "task", "attempt-real").unwrap(),
         Reconciliation::Held { .. }
     ));
     assert_eq!(store.reservation_count().unwrap(), 1);
-    request_stop(&mut store, "task", "attempt-real").unwrap();
+    request_stop(&mut store, "task", "attempt-real").unwrap_or_else(|error| {
+        panic!(
+            "request_stop failed: {error}; evidence_kinds={:?}",
+            store.evidence_kinds("task").unwrap()
+        )
+    });
+    #[cfg(target_os = "linux")]
+    assert!(
+        reaper.join().unwrap(),
+        "adopted worker was not reaped within the bound"
+    );
+    assert!(!attempts.join("attempt-real.receipt.json").exists());
     assert!(store.stop_intent("task", "attempt-real").unwrap().is_some());
     assert_eq!(unsafe { libc::kill(-pid, 0) }, -1);
     assert_eq!(
