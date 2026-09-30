@@ -728,16 +728,8 @@ fn identity(pid: u32) -> Result<(String, String), SupervisorError> {
 #[cfg(target_os = "linux")]
 fn identity(pid: u32) -> Result<(String, String), SupervisorError> {
     let boot = fs::read_to_string("/proc/sys/kernel/random/boot_id")?;
-    let stat = fs::read_to_string(format!("/proc/{pid}/stat"))?;
-    let fields = stat
-        .rsplit_once(')')
-        .ok_or(SupervisorError::IdentityUnavailable)?
-        .1;
-    let start = fields
-        .split_whitespace()
-        .nth(19)
-        .ok_or(SupervisorError::IdentityUnavailable)?;
-    Ok((boot.trim().to_owned(), start.to_owned()))
+    let process = crate::platform::observe_linux_process(pid)?;
+    Ok((boot.trim().to_owned(), process.start_time_ticks))
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
