@@ -429,8 +429,19 @@ fn installed_rs_stop_uses_private_supervisor_and_reconciles() {
             ],
         },
         resume: CommandTemplate {
-            executable: "/usr/bin/true".into(),
-            args: vec![],
+            executable: "/usr/bin/env".into(),
+            args: vec![
+                format!("LLXPRT_CONFIG_HOME={}", config_root.display()),
+                binary.display().to_string(),
+                "--profile-load".into(),
+                profile.display().to_string(),
+                "--session".into(),
+                "{task.id}".into(),
+                "--cwd".into(),
+                "{worktree}".into(),
+                "-p".into(),
+                "Distinct second turn after stop for {attempt.id}".into(),
+            ],
         },
     };
     let candidate = Candidate {
