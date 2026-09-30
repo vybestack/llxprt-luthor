@@ -851,7 +851,7 @@ mod resume_cli {
         thread,
         time::{Duration, Instant},
     };
-    use tempfile::{TempDir, tempdir};
+    use tempfile::{Builder, TempDir};
 
     struct Harness {
         _dir: TempDir,
@@ -863,7 +863,10 @@ mod resume_cli {
 
     impl Harness {
         fn new() -> Self {
-            let dir = tempdir().unwrap();
+            let dir = Builder::new()
+                .prefix("luthor-cli-")
+                .tempdir_in("/tmp")
+                .unwrap();
             let gh = dir.path().join("gh");
             let log = dir.path().join("invocations.log");
             fs::write(
@@ -1067,8 +1070,10 @@ printf '%s\n' "$*" >> '{}'
 case "$*" in
   *initial-worker*|*resume-worker*) touch '{}' ;;
   *"api -X POST "*) printf '%s\n' "$*" >> '{}' ;;
-  *graphql*) printf '%s\n' '{{"data":{{"node":{{"items":{{"nodes":[{{"id":"ITEM-8","content":{{"__typename":"Issue","id":"ISSUE-8","number":8,"repository":{{"id":"REPO","nameWithOwner":"org/tracker"}}}},"fieldValues":{{"nodes":[],"pageInfo":{{"hasNextPage":false}}}}}}],"pageInfo":{{"hasNextPage":false,"endCursor":null}}}}}}}}}}' ;;
+  *graphql*) printf '%s\n' '{{"data":{{"node":{{"items":{{"nodes":[{{"id":"ITEM","content":{{"__typename":"Issue","id":"ISSUE","number":7,"repository":{{"id":"REPO","nameWithOwner":"org/tracker"}}}},"fieldValues":{{"nodes":[],"pageInfo":{{"hasNextPage":false}}}}}},{{"id":"ITEM-8","content":{{"__typename":"Issue","id":"ISSUE-8","number":8,"repository":{{"id":"REPO","nameWithOwner":"org/tracker"}}}},"fieldValues":{{"nodes":[],"pageInfo":{{"hasNextPage":false}}}}}}],"pageInfo":{{"hasNextPage":false,"endCursor":null}}}}}}}}}}' ;;
   *repos/org/tracker/issues/8*) printf '%s\n' '{{"node_id":"ISSUE-8","number":8,"repository_url":"https://api.github.com/repos/org/tracker","html_url":"https://github.com/org/tracker/issues/8","state":"open","assignees":[],"labels":[{{"name":"ready"}}],"milestone":null}}' ;;
+  *repos/org/tracker/issues/7*) printf '%s\n' '{{"node_id":"ISSUE","number":7,"html_url":"https://github.com/org/tracker/issues/7","repository_url":"https://api.github.com/repos/org/tracker","state":"open","assignees":[{{"login":"agent"}}],"labels":[{{"name":"ready"}}],"milestone":null}}' ;;
+  *repos/org/code/pulls*) printf '%s\n' '[]' ;;
   *repos/org/tracker*) printf '%s\n' '{{"node_id":"REPO"}}' ;;
   *"api user --jq .login"*) printf '%s\n' 'acoliver' ;;
   *) exit 91 ;;
@@ -1386,7 +1391,15 @@ esac
         let calls = fs::read_to_string(&h.log).unwrap();
         assert!(calls.contains("api graphql"), "{calls}");
         assert!(calls.contains("api user --jq .login"), "{calls}");
-        assert_eq!(fs::read_to_string(assignments).unwrap(), "");
+        let assignment_calls = fs::read_to_string(assignments).unwrap();
+        let assignment_calls: Vec<_> = assignment_calls.lines().collect();
+        assert_eq!(assignment_calls.len(), 1, "{assignment_calls:?}");
+        assert!(
+            assignment_calls[0].contains("repos/org/tracker/issues/8/assignees")
+                && assignment_calls[0].contains("assignees[]=agent"),
+            "{assignment_calls:?}"
+        );
+        assert!(!assignment_calls[0].contains("issues/7"));
         assert!(!worker.exists());
         let store = StateStore::open(&h.state, 2).unwrap();
         assert_eq!(
