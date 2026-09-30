@@ -1105,6 +1105,120 @@ fn live_running_lost_claim_requests_stop_and_holds_reservation_until_exit() {
 
 #[cfg(unix)]
 #[test]
+fn live_matching_pr_requests_stop_but_waits_for_exit_and_independent_rechecks() {
+    let dir = tempfile::tempdir().unwrap();
+    let (config, mut store, plan, _) = prepared_fake_worker(&dir);
+    fs::write(&plan.executable, "#!/bin/sh\nexec /bin/sleep 15\n").unwrap();
+    let child_path = config.state_root.join("attempts/attempt-real.child.json");
+    let _guard = FixtureGroupGuard(child_path);
+    execute_with_binary(&mut store, &plan, Path::new(env!("CARGO_BIN_EXE_luthor"))).unwrap();
+
+    assert_eq!(
+        reconcile_attempt(&mut store, "task", "attempt-real").unwrap(),
+        Reconciliation::Running
+    );
+    let selection = store.selection_evidence("task").unwrap().unwrap();
+    let identity = store
+        .worktree_record("task")
+        .unwrap()
+        .unwrap()
+        .identity
+        .unwrap();
+    let mut prs = ExitPr {
+        matching: Some((selection.candidate.issue_url.clone(), identity.branch)),
+        author: Some("operator".into()),
+        ..ExitPr::default()
+    };
+    let mut projects = OtherProject(selection.candidate, 1);
+    assert!(matches!(
+        luthor::coordinator::reconcile_with_pr(
+            &mut store,
+            "task",
+            "attempt-real",
+            &mut projects,
+            &mut prs,
+        )
+        .unwrap(),
+        Reconciliation::Held { .. }
+    ));
+
+    assert_eq!(projects.1, 2, "active claim was not checked");
+    assert_eq!(prs.reads, 1, "matching PR was not looked up while Running");
+    assert!(store.stop_intent("task", "attempt-real").unwrap().is_some());
+    assert_eq!(store.task_phase("task").unwrap().as_deref(), Some("held"));
+    assert_eq!(store.reservation_count().unwrap(), 1);
+    assert!(
+        !store
+            .evidence_kinds("task")
+            .unwrap()
+            .contains(&"attempt_exit".into())
+    );
+    assert!(
+        !store
+            .evidence_kinds("task")
+            .unwrap()
+            .contains(&"verified_open_pr".into())
+    );
+    assert!(matches!(
+        store.ensure_dispatch_capacity(),
+        Err(StateError::Capacity { .. })
+    ));
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let completed = loop {
+        let result = reconcile_attempt(&mut store, "task", "attempt-real").unwrap();
+        if matches!(result, Reconciliation::Completed { .. }) {
+            break result;
+        }
+        assert!(Instant::now() < deadline, "worker did not exit after stop");
+        thread::sleep(Duration::from_millis(10));
+    };
+    assert!(matches!(completed, Reconciliation::Completed { .. }));
+    assert_eq!(store.reservation_count().unwrap(), 0);
+    assert!(
+        !store
+            .evidence_kinds("task")
+            .unwrap()
+            .contains(&"verified_open_pr".into())
+    );
+    assert_ne!(
+        store.task_phase("task").unwrap().as_deref(),
+        Some("pr_complete")
+    );
+
+    let result = luthor::coordinator::reconcile_with_pr(
+        &mut store,
+        "task",
+        "attempt-real",
+        &mut projects,
+        &mut prs,
+    )
+    .unwrap();
+    assert!(matches!(result, Reconciliation::Completed { .. }));
+    assert_eq!(
+        projects.1, 3,
+        "claim was not independently rechecked after stop"
+    );
+    assert_eq!(
+        prs.reads, 2,
+        "PR was not independently rechecked after stop"
+    );
+    assert_eq!(pause_proof(&config).status, PausePrStatus::Open);
+    assert!(
+        store
+            .evidence_kinds("task")
+            .unwrap()
+            .contains(&"verified_open_pr".into())
+    );
+    assert_eq!(
+        store.task_phase("task").unwrap().as_deref(),
+        Some("pr_complete")
+    );
+    assert_eq!(store.reservation_count().unwrap(), 0);
+}
+
+#[cfg(unix)]
+#[test]
 fn natural_exit_matching_pr_is_proved_and_persisted() {
     let (_dir, mut config, mut store) = dispatched_fixture(7);
     config.capacity = 1;
