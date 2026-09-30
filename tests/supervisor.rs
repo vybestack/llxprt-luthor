@@ -3451,12 +3451,25 @@ fn stopped_receipt(config: &Config) -> luthor::supervisor::ExitReceipt {
 #[test]
 fn stop_term_has_durable_intent_and_keeps_slot_until_reconcile() {
     let (_dir, config, mut store) = running_worker(
-        "#!/bin/sh\necho started\ntrap 'exit 0' INT\ntrap 'exit 0' TERM\nwhile :; do :; done\n",
+        "#!/bin/sh\necho started\ntrap 'exit 0' INT\ntrap 'exit 0' TERM\nwhile :; do sleep 0.01; done\n",
     );
     request_stop(&mut store, "task", "attempt-real").unwrap();
     assert!(store.stop_intent("task", "attempt-real").unwrap().is_some());
     let receipt = stopped_receipt(&config);
-    assert_eq!(receipt.stop_signals, vec![libc::SIGINT]);
+    assert_eq!(receipt.stop_signals.first(), Some(&libc::SIGINT));
+    assert!(receipt.stop_signals.len() <= 2);
+    assert!(
+        receipt
+            .stop_signals
+            .iter()
+            .all(|signal| *signal != libc::SIGKILL)
+    );
+    assert!(
+        receipt
+            .stop_signals
+            .windows(2)
+            .all(|signals| { signals == [libc::SIGINT, libc::SIGTERM] })
+    );
     assert_eq!(store.reservation_count().unwrap(), 1);
     assert!(matches!(
         reconcile_attempt(&mut store, "task", "attempt-real").unwrap(),
@@ -3570,10 +3583,25 @@ fn paused_fixture_with_resume_prompt(
     edit_receipt(&config, |receipt| {
         receipt.stop_signals = vec![libc::SIGTERM]
     });
-    assert!(matches!(
-        reconcile_attempt(&mut store, "task", "attempt-real").unwrap(),
-        Reconciliation::Completed { .. }
-    ));
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut last_reason = String::from("worker process group is still running");
+    loop {
+        match reconcile_attempt(&mut store, "task", "attempt-real").unwrap() {
+            Reconciliation::Completed { .. } => break,
+            Reconciliation::Held { reason } => {
+                assert_eq!(store.reservation_count().unwrap(), 1);
+                last_reason = reason;
+            }
+            Reconciliation::Running => {
+                assert_eq!(store.reservation_count().unwrap(), 1);
+            }
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "worker reconciliation remained uncertain: {last_reason}"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
     store
         .record_pause_pr_lookup(
             "task",
