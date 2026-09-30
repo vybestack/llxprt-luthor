@@ -127,18 +127,19 @@
       "last_transition_at": "2026-09-30T00:36:39.889896+00:00",
       "model": "__resolved_model_absent__",
       "provider": "__resolved_provider_absent__",
+      "review": null,
       "review_result": {
         "feedback_path": "/Volumes/XS1000/acoliver/projects/llxprt-luthor/branch-1/kitty-specs/luthor-issue-to-pr-daemon-01M3N2VK/tasks/WP04-pr-proof-recovery-tests/review-cycle-1.md",
         "reference": "review-cycle://luthor-issue-to-pr-daemon-01M3N2VK/WP04-pr-proof-recovery-tests/review-cycle-1.md",
         "reviewer": "deepthinker",
         "verdict": "changes_requested"
       },
-      "role": "reviewer",
-      "shell_pid": 67199,
-      "shell_pid_created_at": "1790727794.126566",
+      "role": "implementer",
+      "shell_pid": null,
+      "shell_pid_created_at": null,
       "subtasks": {
-        "T009": "done",
-        "T010": "done"
+        "T009": "planned",
+        "T010": "planned"
       }
     },
     "WP05": {
