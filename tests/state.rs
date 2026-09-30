@@ -667,3 +667,43 @@ fn verified_open_pr_requires_a_terminal_attempt() {
             .contains(&"verified_open_pr".to_owned())
     );
 }
+
+#[test]
+fn audited_telemetry_lost_pr_completion_is_terminal_after_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = StateStore::open(dir.path(), 1).unwrap();
+    store
+        .create_task(
+            "recovered",
+            &candidate("recovered-issue", 1),
+            "rev",
+            &config(),
+        )
+        .unwrap();
+
+    let connection = Connection::open(dir.path().join("state.sqlite3")).unwrap();
+    connection.execute_batch(
+        "INSERT INTO attempts(id,task_id,lifecycle,outcome) VALUES('prior-attempt','recovered','completed','success');
+         INSERT INTO attempts(id,task_id,lifecycle,outcome) VALUES('recovered-attempt','recovered','telemetry_lost',NULL);
+         INSERT INTO reservations(attempt_id,task_id,status) VALUES('prior-attempt','recovered','released');
+         INSERT INTO evidence(task_id,attempt_id,kind,payload) VALUES('recovered','prior-attempt','attempt_exit','{}'),('recovered','prior-attempt','exit_pr_lookup','{\"status\":{\"status\":\"absent\"}}');
+         INSERT INTO reservations(attempt_id,task_id,status) VALUES('recovered-attempt','recovered','released');
+         INSERT INTO evidence(task_id,attempt_id,kind,payload) VALUES
+           ('recovered','recovered-attempt','telemetry_lost','{\"actor\":\"operator\",\"reason\":\"lost receipt\",\"observed_at_unix_secs\":10,\"os_ids\":[123],\"evidence\":{\"worker_absent\":true}}'),
+           ('recovered','recovered-attempt','exit_pr_lookup','{\"observed_at_unix_secs\":11,\"repository\":\"org/code\",\"status\":{\"status\":\"open\"}}'),
+           ('recovered','recovered-attempt','verified_open_pr','{\"id\":99}'),
+           ('recovered',NULL,'claim_verified','{}'),
+           ('recovered',NULL,'worktree_created','{}');
+         UPDATE tasks SET state='pr_complete' WHERE id='recovered';",
+    )
+    .unwrap();
+    drop(connection);
+    drop(store);
+
+    let reopened = StateStore::open(dir.path(), 1).unwrap();
+    assert_eq!(
+        reopened.pending_attempts().unwrap(),
+        Vec::<(String, String)>::new()
+    );
+    reopened.ensure_dispatch_capacity().unwrap();
+}
