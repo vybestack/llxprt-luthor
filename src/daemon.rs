@@ -2,7 +2,8 @@ use crate::{
     claim::GhAssignmentWriter,
     config::Config,
     coordinator::{
-        AttemptReview, OsIdCreator, ProductionLauncher, ScheduleDependencies, schedule_candidates,
+        AttemptReview, OsIdCreator, ProductionLauncher, ScheduleDependencies,
+        schedule_candidates_after_startup, startup_reconcile_all,
     },
     eligibility::{self, Candidate},
     github::{
@@ -103,6 +104,7 @@ fn candidates(
     reader: &mut GhProjectReader,
     config: &Config,
     targets: Option<&(String, Vec<u64>)>,
+    store: Option<&StateStore>,
 ) -> Result<Vec<Candidate>, Error> {
     let mut selected = Vec::new();
     if let Some((repository, numbers)) = targets {
@@ -125,6 +127,12 @@ fn candidates(
                 repository,
                 *number,
             )?;
+            if matches.is_empty()
+                && let Some(store) = store
+                && store.existing_target(repository, *number)?
+            {
+                continue;
+            }
             if matches.len() != 1 {
                 return Err(format!("target {repository}#{number} selected {} eligible candidates; exactly one required", matches.len()).into());
             }
@@ -149,8 +157,8 @@ fn candidates(
 fn cycle(config: &Config, options: &Options) -> Result<(), Error> {
     let gh = PathBuf::from("gh");
     let mut projects = GhProjectReader::new(gh.clone());
-    let selected = candidates(&mut projects, config, options.targets.as_ref())?;
     if !options.execute {
+        let selected = candidates(&mut projects, config, options.targets.as_ref(), None)?;
         println!(
             "{}",
             json!({"mode":"preview","candidates":selected.iter().map(|c| json!({
@@ -160,15 +168,26 @@ fn cycle(config: &Config, options: &Options) -> Result<(), Error> {
         );
         return Ok(());
     }
+    let mut store = StateStore::open(&config.state_root, config.capacity)?;
+    let mut prs = GhPullRequestReader::new(gh.clone());
+    let startup = startup_reconcile_all(&mut store, &mut projects, &mut prs)?;
+    if startup.scheduling_blocked() {
+        println!("{}", json!({"mode":"execute", "blocked":true}));
+        return Err("startup reconciliation blocked scheduling".into());
+    }
+    let selected = candidates(
+        &mut projects,
+        config,
+        options.targets.as_ref(),
+        Some(&store),
+    )?;
     for candidate in &selected {
         verify_authenticated_account(&gh, candidate)?;
     }
-    let mut store = StateStore::open(&config.state_root, config.capacity)?;
-    let mut prs = GhPullRequestReader::new(gh.clone());
     let mut assignments = GhAssignmentWriter { executable: gh };
     let mut launcher = ProductionLauncher;
     let mut ids = OsIdCreator;
-    let result = schedule_candidates(
+    let result = schedule_candidates_after_startup(
         &mut store,
         selected,
         ScheduleDependencies {
@@ -180,6 +199,7 @@ fn cycle(config: &Config, options: &Options) -> Result<(), Error> {
             launcher: &mut launcher,
             ids: &mut ids,
         },
+        startup,
     );
     // Keep task and attempt identities visible without echoing prompts, shell stderr or API responses.
     let report = result.map_err(|_| "daemon scheduling failed; inspect local task state")?;

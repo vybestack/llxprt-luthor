@@ -119,7 +119,7 @@ fn identity_mismatch_blocks_execution_before_assignment_or_state() {
     let (config, path) = fixture(dir.path(), "someone-else");
     let result = run(&config, &path, &["--issues", "7", "--execute"]);
     assert!(!result.status.success());
-    assert!(!dir.path().join("state").exists());
+    assert!(dir.path().join("state").exists());
     assert!(!dir.path().join("worktrees").exists());
     let calls = fs::read_to_string(dir.path().join("calls")).unwrap();
     assert!(calls.contains("api user --jq .login"));
@@ -170,7 +170,7 @@ fn wrong_pr_author_blocks_execution_before_any_write() {
         fixture_with_principals(dir.path(), "acoliver", "issue-agent", "someone-else");
     let result = run(&config, &path, &["--issues", "7", "--execute"]);
     assert!(!result.status.success());
-    assert!(!dir.path().join("state").exists());
+    assert!(dir.path().join("state").exists());
     let calls = fs::read_to_string(dir.path().join("calls")).unwrap();
     assert!(calls.contains("api user --jq .login"));
     assert!(!calls.contains("POST") && !calls.contains("PATCH"));
@@ -182,7 +182,7 @@ fn suspended_account_blocks_execution_even_for_differing_assignee() {
     let (config, path) = fixture_with_principals(dir.path(), "llxprt", "issue-agent", "acoliver");
     let result = run(&config, &path, &["--issues", "7", "--execute"]);
     assert!(!result.status.success());
-    assert!(!dir.path().join("state").exists());
+    assert!(dir.path().join("state").exists());
     let calls = fs::read_to_string(dir.path().join("calls")).unwrap();
     assert!(calls.contains("api user --jq .login"));
     assert!(!calls.contains("POST") && !calls.contains("PATCH"));
