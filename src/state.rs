@@ -29,6 +29,10 @@ pub enum StateError {
     InvalidCapacity,
     #[error("invalid configuration")]
     InvalidConfig,
+    #[error("invalid explicit target")]
+    InvalidTarget,
+    #[error("multiple tasks match explicit target {0}/{1}")]
+    AmbiguousTarget(String, u64),
     #[error("candidate selection does not match effective configuration")]
     InvalidSelection,
     #[error("launch requires a verified worktree and an unused, accounted task")]
@@ -653,6 +657,26 @@ impl StateStore {
             params![repo_id, issue_id],
             |row| row.get(0),
         )?)
+    }
+
+    /// Looks up persisted selection only; this does not establish eligibility or authorize dispatch.
+    pub fn existing_target(&self, repository: &str, issue_number: u64) -> Result<bool, StateError> {
+        if repository.trim().is_empty() || issue_number == 0 {
+            return Err(StateError::InvalidTarget);
+        }
+        let mut statement = self
+            .connection
+            .prepare("SELECT COUNT(*) FROM tasks WHERE repository=?1 AND issue_number=?2")?;
+        let count: i64 =
+            statement.query_row(params![repository, issue_number], |row| row.get(0))?;
+        match count {
+            0 => Ok(false),
+            1 => Ok(true),
+            _ => Err(StateError::AmbiguousTarget(
+                repository.to_owned(),
+                issue_number,
+            )),
+        }
     }
 
     /// A selected task occupies a scheduling slot even if it is held before launch.

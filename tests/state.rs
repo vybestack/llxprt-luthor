@@ -193,6 +193,41 @@ use luthor::{
 };
 use rusqlite::Connection;
 
+#[test]
+fn existing_target_matches_only_one_persisted_target_and_rejects_bad_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = StateStore::open(dir.path(), 1).unwrap();
+    let mut selected = candidate("node-7", 7);
+    selected.repository = "org/tracker".into();
+    store
+        .create_task("task-7", &selected, "rev", &config())
+        .unwrap();
+
+    assert!(store.existing_target("org/tracker", 7).unwrap());
+    assert!(!store.existing_target("other/tracker", 7).unwrap());
+    assert!(!store.existing_target("org/tracker", 8).unwrap());
+    assert!(store.existing_target("", 7).is_err());
+    assert!(store.existing_target("org/tracker", 0).is_err());
+}
+
+#[test]
+fn existing_target_rejects_ambiguous_persisted_tasks() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = StateStore::open(dir.path(), 1).unwrap();
+    let first = candidate("node-7", 7);
+    let second = candidate("node-8", 7);
+    store
+        .create_task("task-7", &first, "rev", &config())
+        .unwrap();
+    store
+        .create_task("task-8", &second, "rev", &config())
+        .unwrap();
+    assert!(matches!(
+        store.existing_target("org/tracker", 7),
+        Err(StateError::AmbiguousTarget(_, 7))
+    ));
+}
+
 fn candidate(issue_id: &str, number: u64) -> Candidate {
     Candidate {
         project_id: "project-1".into(),
