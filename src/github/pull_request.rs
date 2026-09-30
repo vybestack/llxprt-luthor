@@ -134,6 +134,58 @@ impl GhPullRequestReader {
     }
 }
 
+impl GhPullRequestReader {
+    fn checks(&self, repository: &str, sha: &str) -> Option<Vec<Value>> {
+        let mut result = Vec::new();
+        for page in 1..=10 {
+            let path =
+                format!("repos/{repository}/commits/{sha}/check-runs?per_page=100&page={page}");
+            let response = self.api(&["api", &path]).ok()?;
+            let runs = response.get("check_runs")?.as_array()?;
+            let total = response.get("total_count")?.as_u64()? as usize;
+            if runs.len() > 100 || result.len().saturating_add(runs.len()) > total {
+                return None;
+            }
+            for run in runs {
+                let name = run.get("name")?.as_str()?;
+                let status = run.get("status")?.as_str()?;
+                if name.is_empty()
+                    || name.len() > 128
+                    || !name.bytes().all(|b| b.is_ascii_graphic() || b == b' ')
+                    || status.is_empty()
+                    || status.len() > 32
+                    || !status.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
+                {
+                    return None;
+                }
+                let conclusion = run
+                    .get("conclusion")
+                    .and_then(Value::as_str)
+                    .unwrap_or("pending");
+                if conclusion.len() > 32
+                    || !conclusion
+                        .bytes()
+                        .all(|b| b.is_ascii_lowercase() || b == b'_')
+                {
+                    return None;
+                }
+                result.push(Value::String(format!("{}:{}:{}", name, status, conclusion)));
+            }
+            if result.len() == total {
+                return Some(result);
+            }
+            if runs.is_empty() {
+                return None;
+            }
+        }
+        None
+    }
+}
+
+fn valid_sha(sha: &str) -> bool {
+    sha.len() == 40 && sha.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 fn valid_repository_segment(segment: &str) -> bool {
     !segment.is_empty()
         && segment
@@ -184,7 +236,18 @@ impl PullRequestReader for GhPullRequestReader {
             .ok_or_else(|| error(ErrorCategory::Malformed, "invalid-page", None))
     }
     fn detail(&mut self, repository: &str, number: u64) -> Result<Value, LookupError> {
-        self.api(&["api", &format!("repos/{repository}/pulls/{number}")])
+        let mut detail = self.api(&["api", &format!("repos/{repository}/pulls/{number}")])?;
+        let valid_repo = repository.split('/').count() == 2
+            && repository.split('/').all(valid_repository_segment);
+        let sha = detail.pointer("/head/sha").and_then(Value::as_str);
+        if valid_repo
+            && let Some(sha) = sha.filter(|sha| valid_sha(sha))
+            && let Some(checks) = self.checks(repository, sha)
+            && let Some(object) = detail.as_object_mut()
+        {
+            object.insert("luthor_checks".to_owned(), Value::Array(checks));
+        }
+        Ok(detail)
     }
 
     fn repository_identity(&mut self, name: &str) -> Result<u64, LookupError> {
@@ -351,7 +414,16 @@ fn parse_evidence(value: &Value, repository: &str) -> Result<PullRequestEvidence
         draft,
         tracker_issue_url,
         body: body.to_owned(),
-        checks: None,
+        checks: value
+            .get("luthor_checks")
+            .and_then(Value::as_array)
+            .map(|checks| {
+                checks
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            }),
         created_at,
         commit_sha,
     })
