@@ -39,6 +39,7 @@ owned_files:
 - src/daemon.rs
 - src/coordinator.rs
 - src/state.rs
+- tests/state.rs
 - tests/daemon.rs
 - src/platform.rs
 - src/lib.rs

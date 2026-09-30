@@ -804,3 +804,42 @@ fn audited_pr_completion_missing_any_recovery_evidence_is_not_terminal() {
         );
     }
 }
+
+#[test]
+fn exit_lookup_capacity_uses_latest_evidence_only() {
+    for (statuses, releases_capacity) in [
+        (&["error", "absent"][..], true),
+        (&["absent", "error"][..], false),
+        (&["error"][..], false),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = StateStore::open(dir.path(), 1).unwrap();
+        store
+            .create_task("task", &candidate("issue", 1), "rev", &config())
+            .unwrap();
+        let connection = Connection::open(dir.path().join("state.sqlite3")).unwrap();
+        connection.execute_batch(
+            "INSERT INTO attempts(id,task_id,lifecycle,outcome) VALUES('attempt','task','completed','success');
+             INSERT INTO reservations(attempt_id,task_id,status) VALUES('attempt','task','released');
+             INSERT INTO intents(id,task_id,attempt_id,kind,detail) VALUES('launch','task','attempt','launch','{}');
+             INSERT INTO evidence(task_id,attempt_id,kind,payload) VALUES
+               ('task','attempt','attempt_exit','{\"stop_signals\":[]}'),
+               ('task',NULL,'claim_verified','{}'),('task',NULL,'worktree_created','{}');
+             UPDATE tasks SET state='attention' WHERE id='task';",
+        ).unwrap();
+        for status in statuses {
+            connection.execute(
+                "INSERT INTO evidence(task_id,attempt_id,kind,payload) VALUES('task','attempt','exit_pr_lookup',?1)",
+                [format!("{{\"status\":{{\"status\":\"{status}\"}}}}")],
+            ).unwrap();
+        }
+        drop(connection);
+        drop(store);
+        let reopened = StateStore::open(dir.path(), 1).unwrap();
+        assert_eq!(
+            reopened.ensure_dispatch_capacity().is_ok(),
+            releases_capacity,
+            "lookup sequence: {statuses:?}"
+        );
+    }
+}
