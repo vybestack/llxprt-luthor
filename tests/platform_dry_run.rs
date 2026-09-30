@@ -27,6 +27,34 @@ fn linux_process_observation_rejects_missing_identity_fields() {
     );
 }
 
+fn bounded_sanitized_output(path: &std::path::Path) -> String {
+    use std::fs;
+
+    let bytes = fs::read(path).unwrap_or_default();
+    let text = String::from_utf8_lossy(&bytes[..bytes.len().min(4096)]);
+    let mut sanitized = String::new();
+    let mut redact_next = false;
+    for word in text.split_whitespace() {
+        if redact_next {
+            sanitized.push_str("[REDACTED]");
+            redact_next = false;
+        } else if word.eq_ignore_ascii_case("authorization:") || word.eq_ignore_ascii_case("bearer")
+        {
+            sanitized.push_str(word);
+            sanitized.push(' ');
+            sanitized.push_str("[REDACTED]");
+            redact_next = true;
+        } else {
+            sanitized.push_str(word);
+        }
+        sanitized.push(' ');
+    }
+    if bytes.len() > 4096 {
+        sanitized.push_str("[truncated]");
+    }
+    sanitized
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 #[ignore = "requires an installed LLxprt rs binary; set LUTHOR_RS_BINARY"]
@@ -40,7 +68,7 @@ fn installed_rs_initial_turn_uses_private_config_and_loopback_provider() {
     };
     use std::{
         fs,
-        io::Read,
+        io::{Read, Write},
         net::TcpListener,
         path::Path,
         process::Command,
@@ -111,6 +139,9 @@ fn installed_rs_initial_turn_uses_private_config_and_loopback_provider() {
                     request_tx
                         .send(String::from_utf8_lossy(&bytes).into_owned())
                         .unwrap();
+                    let body = r#"{"id":"chatcmpl-test","object":"chat.completion","created":0,"model":"loopback","choices":[{"index":0,"message":{"role":"assistant","content":"Hello."},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#;
+                    write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+                    stream.flush().unwrap();
                     return;
                 }
                 Err(error)
@@ -241,7 +272,13 @@ fn installed_rs_initial_turn_uses_private_config_and_loopback_provider() {
     );
     let receipt: luthor::supervisor::ExitReceipt =
         serde_json::from_slice(&fs::read(receipt_path).unwrap()).unwrap();
-    assert_eq!(receipt.exit_code, Some(0));
+    assert_eq!(
+        receipt.exit_code,
+        Some(0),
+        "installed rs initial turn failed; stdout={}, stderr={}",
+        bounded_sanitized_output(&receipt.stdout_path),
+        bounded_sanitized_output(&receipt.stderr_path),
+    );
     let stdout = fs::metadata(&receipt.stdout_path).unwrap();
     let stderr = fs::metadata(&receipt.stderr_path).unwrap();
     assert_eq!(stdout.len(), receipt.stdout_bytes);
