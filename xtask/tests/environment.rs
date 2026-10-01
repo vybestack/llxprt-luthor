@@ -33,3 +33,32 @@ fn malformed_or_weaker_root_clippy_policy_fails_closed() {
         assert!(clippy_policy(text).is_err());
     }
 }
+
+#[test]
+fn cargo_encoded_build_and_target_overrides_cannot_substitute_weaker_compiler_or_config() {
+    for key in [
+        "CARGO_BUILD_RUSTFLAGS",
+        "CARGO_BUILD_RUSTC_WRAPPER",
+        "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS",
+        "CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS",
+        "CARGO_ALIAS_XTASK",
+        "CARGO_HOME",
+    ] {
+        let value = if key == "CARGO_HOME" {
+            format!(
+                "{}/tmp/../outside",
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .display()
+            )
+        } else {
+            "-A warnings".into()
+        };
+        let error = validate(&BTreeMap::from([(key.into(), value)])).unwrap_err();
+        assert!(
+            error.contains("override") || error.contains("confined"),
+            "{error}"
+        );
+    }
+}

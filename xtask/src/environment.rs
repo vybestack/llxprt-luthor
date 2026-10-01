@@ -13,11 +13,25 @@ pub fn validate(values: &BTreeMap<String, String>) -> Result<(), String> {
             return Err(format!("external policy override forbidden: {key}"));
         }
     }
+    for key in values.keys() {
+        if key.starts_with("CARGO_ALIAS_")
+            || key == "CARGO_BUILD_RUSTFLAGS"
+            || key == "CARGO_BUILD_RUSTC_WRAPPER"
+            || key == "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER"
+            || (key.starts_with("CARGO_TARGET_") && key.ends_with("_RUSTFLAGS"))
+        {
+            return Err(format!("external policy override forbidden: {key}"));
+        }
+    }
     if let Some(home) = values.get("CARGO_HOME") {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .ok_or("missing workspace")?;
-        if !Path::new(home).starts_with(root.join("tmp")) {
+        if Path::new(home)
+            .components()
+            .any(|c| c == std::path::Component::ParentDir)
+            || !Path::new(home).starts_with(root.join("tmp"))
+        {
             return Err("CARGO_HOME must be confined under workspace tmp".into());
         }
         for filename in ["config", "config.toml"] {
