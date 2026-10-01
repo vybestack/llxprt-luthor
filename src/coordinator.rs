@@ -1046,6 +1046,7 @@ pub struct RetryDependencies<'a, P, Q, L> {
     pub config_revision: &'a str,
     pub actor: &'a str,
     pub reason: &'a str,
+    pub revalidate_terminal_exit: bool,
     pub projects: &'a mut P,
     pub prs: &'a mut Q,
     pub launcher: &'a mut L,
@@ -1065,6 +1066,7 @@ pub fn retry_one<P: ProjectReader, Q: PullRequestReader, L: SupervisorLauncher>(
         config_revision,
         actor,
         reason,
+        revalidate_terminal_exit,
         projects,
         prs,
         launcher,
@@ -1084,7 +1086,14 @@ pub fn retry_one<P: ProjectReader, Q: PullRequestReader, L: SupervisorLauncher>(
     }
     supervisor::validate_stop_socket_path(store.root(), attempt_id)?;
     store.ensure_dispatch_capacity()?;
-    match supervisor::recheck_retry_exit(store, task_id, previous_attempt_id)? {
+    let mut terminal_exit = None;
+    match supervisor::recheck_retry_exit(
+        store,
+        task_id,
+        previous_attempt_id,
+        revalidate_terminal_exit,
+        &mut terminal_exit,
+    )? {
         supervisor::Reconciliation::Completed {
             exit_code: Some(_),
             signal: None,
@@ -1106,7 +1115,7 @@ pub fn retry_one<P: ProjectReader, Q: PullRequestReader, L: SupervisorLauncher>(
     if serde_json::from_str::<serde_json::Value>(&claim).ok() != Some(expected) {
         return Err(DispatchError::ChangedClaim);
     }
-    let (_, issue) = claim::fresh(projects, &selection.candidate)?;
+    let (item, issue) = claim::fresh(projects, &selection.candidate)?;
     if issue.assignees != [config.assignment_login.as_str()] {
         return Err(DispatchError::ChangedClaim);
     }
@@ -1137,15 +1146,15 @@ pub fn retry_one<P: ProjectReader, Q: PullRequestReader, L: SupervisorLauncher>(
         repository: selection.candidate.mapping.code_repository.clone(),
         status,
     };
-    store.record_evidence(
-        task_id,
-        Some(previous_attempt_id),
-        "retry_pr_lookup",
-        &serde_json::to_string(&proof).map_err(StateError::from)?,
-    )?;
     if result? != LookupResult::Absent {
         return Err(DispatchError::ExistingPr);
     }
+    let source = crate::state::RetrySourceEvidence {
+        item,
+        issue,
+        claim,
+        observed_at_unix_secs: proof.observed_at_unix_secs,
+    };
     let plan = supervisor::prepare_retry(
         store,
         &previous,
@@ -1156,6 +1165,8 @@ pub fn retry_one<P: ProjectReader, Q: PullRequestReader, L: SupervisorLauncher>(
             actor,
             reason,
             pr: proof,
+            source,
+            terminal_exit,
         },
     )?;
     launcher.launch(store, &plan)?;

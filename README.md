@@ -31,7 +31,7 @@ Usage: luthor discover --config <path>
        luthor daemon --config PATH --config-revision REV [--repository owner/repo --issues N,N,...] [--once] [--execute]
        luthor dispatch --config <path> --repository owner/repo --issue N --config-revision REV [--execute]
        luthor resume TASK --config <path> --execute
-       luthor retry TASK --attempt ID --config PATH --config-revision REV --actor LOGIN --reason TEXT --execute
+       luthor retry TASK --attempt ID --config PATH --config-revision REV --actor LOGIN --reason TEXT [--revalidate-terminal-exit] --execute
        luthor recover TASK --attempt ID --config PATH --actor LOGIN --reason TEXT --execute
        luthor status --config <path>
        luthor show TASK --config <path>
@@ -157,7 +157,7 @@ from the previous attempt's revision. Keep both current templates valid, includi
 `--max-tool-calls 512` instead of `1024`; `-1` also means unlimited. The original
 selection and previous attempts remain unchanged, including an old unsupported
 argument. The private `retry_authorized` evidence records the actor, reason,
-previous plan/config, new plan/config, fresh PR absence, and reservation ID in the
+previous plan/config, new plan/config, fresh source/claim and PR absence, and reservation ID in the
 same transaction as the new launch intent and reservation.
 
 `--execute` is required. Missing or uncertain receipts/processes, pending stops,
@@ -174,3 +174,14 @@ Another natural exit may be explicitly retried with a different revision and
 fresh proof, but there is no automatic retry loop. The process-absence check covers
 registered processes and tracked descendants, not deliberately untracked escaped
 children. A reused PID or boot change fails closed.
+
+For a historical Darwin attempt that failed during native CLI startup on
+`--max-tool-calls 1024`, add `--revalidate-terminal-exit` immediately before
+`--execute`. This requires the exact reconciled exit-code-2 receipt, the matching
+single native startup JSON diagnostic, empty stderr, consistent original
+registrations, no tracked descendants, and current absence of both recorded PIDs
+and groups. The audit records this separate terminal proof without changing the
+old boot identity. Ordinary historical exits stay held because escaped runtime
+workers cannot be excluded by a receipt and group probes alone. See
+[terminal startup revalidation](dev-docs/config-and-state.md#darwin-boot-identity-and-terminal-startup-revalidation)
+for the proof and refusal boundaries.

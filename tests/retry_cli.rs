@@ -89,9 +89,19 @@ fn state_rows(state: &Path) -> Vec<Vec<Vec<rusqlite::types::Value>>> {
 
 #[test]
 fn explicit_retry_cli_uses_private_config_and_never_reassigns_or_reselects() {
+    exercise_retry_cli(false);
+}
+
+#[test]
+fn historical_terminal_exit_cli_preserves_original_evidence_and_launches_corrected_worker() {
+    exercise_retry_cli(true);
+}
+
+fn exercise_retry_cli(historical: bool) {
+    let temp_root = std::env::var_os("LUTHOR_RETRY_TEST_TMPDIR").unwrap_or_else(|| "/tmp".into());
     let dir = tempfile::Builder::new()
         .prefix("lr")
-        .tempdir_in("/tmp")
+        .tempdir_in(temp_root)
         .unwrap();
     let root = dir.path();
     let checkout = root.join("checkout");
@@ -123,8 +133,27 @@ fn explicit_retry_cli_uses_private_config_and_never_reassigns_or_reselects() {
     let assigned = root.join("assigned");
     fs::write(&gh, format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$2\" in\n graphql) printf '%s\\n' '{}' ;;\n repos/org/tracker) printf '%s\\n' '{{\"node_id\":\"repo\"}}' ;;\n repos/org/tracker/issues/7?per_page=100) if test -f '{}'; then printf '%s\\n' '{}'; else printf '%s\\n' '{}'; fi ;;\n -X) touch '{}'; printf '%s\\n' '{{}}' ;;\n repos/org/code/pulls?*) printf '%s\\n' '[]' ;;\n user) printf '%s\\n' 'acoliver' ;;\n *) exit 99 ;;\nesac\n", calls.display(), project, assigned.display(), issue(true), issue(false), assigned.display())).unwrap();
     fs::set_permissions(&gh, fs::Permissions::from_mode(0o700)).unwrap();
-    let worker = root.join("worker");
-    fs::write(&worker, "#!/bin/sh\nexit 2\n").unwrap();
+    let worker = root.join("llxprt-code-rs");
+    let program = if historical {
+        r#"#!/bin/sh
+session=''
+budget=''
+while test "$#" -gt 0; do
+  case "$1" in
+    --session) session="$2"; shift ;;
+    --max-tool-calls) budget="$2"; shift ;;
+  esac
+  shift
+done
+if test "$budget" != 512; then
+  printf '{"error":{"code":"max-tool-calls","message":"--max-tool-calls must be -1 or an integer from 1 through 512 (got 1024)"},"session_id":"%s","status":"error"}\n' "$session"
+fi
+exit 2
+"#
+    } else {
+        "#!/bin/sh\nexit 2\n"
+    };
+    fs::write(&worker, program).unwrap();
     fs::set_permissions(&worker, fs::Permissions::from_mode(0o700)).unwrap();
     let command = |prompt| json!({"executable":worker,"args":["--session","{task.id}","--cwd","{worktree}","-p",prompt,"--max-tool-calls","1"]});
     let config_value = json!({"state_root":root.join("state"), "worktree_root":root.join("worktrees"), "capacity":1,
@@ -179,6 +208,29 @@ fn explicit_retry_cli_uses_private_config_and_never_reassigns_or_reselects() {
         store.task_phase(task).unwrap().as_deref(),
         Some("attention")
     );
+    if historical {
+        let db = rusqlite::Connection::open(config.state_root.join("state.sqlite3")).unwrap();
+        let mut plan: luthor::supervisor::LaunchPlan =
+            serde_json::from_str(&store.launch_intent(previous).unwrap().unwrap()).unwrap();
+        *plan.args.last_mut().unwrap() = "1024".into();
+        let payload = serde_json::to_string(&plan).unwrap();
+        db.execute("UPDATE intents SET detail=?1 WHERE attempt_id=?2 AND kind IN ('launch','supervisor_dispatch')", [&payload, previous]).unwrap();
+        fs::write(
+            config
+                .state_root
+                .join(format!("attempts/{previous}.plan.json")),
+            &payload,
+        )
+        .unwrap();
+        let mut selection = store.selection_evidence(task).unwrap().unwrap();
+        *selection.effective_config.initial.args.last_mut().unwrap() = "1024".into();
+        *selection.effective_config.resume.args.last_mut().unwrap() = "1024".into();
+        db.execute(
+            "UPDATE evidence SET payload=?1 WHERE task_id=?2 AND kind='selection'",
+            [serde_json::to_string(&selection).unwrap().as_str(), task],
+        )
+        .unwrap();
+    }
     let original = store.selection_evidence(task).unwrap().unwrap();
     let prior_plan = store.launch_intent(previous).unwrap().unwrap();
     let ready = rusqlite::Connection::open(config.state_root.join("state.sqlite3"))
@@ -308,8 +360,27 @@ fn explicit_retry_cli_uses_private_config_and_never_reassigns_or_reselects() {
             "refusal read source or PRs"
         );
     }
-    replace_fixture_boot(&config.state_root, previous, &initial_receipt.boot_identity);
-    let out = invoke(&["--execute"]);
+    let expected_boot = if historical {
+        "{ sec = 1790533213, usec = 116017 } Sun Sep 27 15:20:13 2026"
+    } else {
+        &initial_receipt.boot_identity
+    };
+    replace_fixture_boot(&config.state_root, previous, expected_boot);
+    let old_rows = state_rows(&config.state_root);
+    let old_files: Vec<_> = fs::read_dir(config.state_root.join("attempts"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.is_file())
+        .map(|p| {
+            let bytes = fs::read(&p).unwrap();
+            (p, bytes)
+        })
+        .collect();
+    let out = if historical {
+        invoke(&["--revalidate-terminal-exit", "--execute"])
+    } else {
+        invoke(&["--execute"])
+    };
     assert!(
         out.status.success(),
         "{}",
@@ -332,7 +403,40 @@ fn explicit_retry_cli_uses_private_config_and_never_reassigns_or_reselects() {
             .windows(2)
             .any(|p| p == ["--max-tool-calls", "512"])
     );
-    assert_eq!(original.effective_config.resume.args.last().unwrap(), "1");
+    assert_eq!(
+        original.effective_config.resume.args.last().unwrap(),
+        if historical { "1024" } else { "1" }
+    );
+    let audit: Value = serde_json::from_str(
+        &store
+            .evidence_payloads(task, attempt, "retry_authorized")
+            .unwrap()[0],
+    )
+    .unwrap();
+    if historical {
+        assert_eq!(
+            audit["terminal_exit"]["basis"],
+            "native_max_tool_calls_preflight"
+        );
+        assert_eq!(
+            audit["terminal_exit"]["receipt"]["boot_identity"],
+            expected_boot
+        );
+    } else {
+        assert!(audit["terminal_exit"].is_null());
+    }
+    for (file, bytes) in old_files {
+        assert_eq!(fs::read(file).unwrap(), bytes);
+    }
+    let after = state_rows(&config.state_root);
+    for table in 1..=4 {
+        for row in &old_rows[table] {
+            assert!(
+                after[table].contains(row),
+                "old durable row replaced in table {table}"
+            );
+        }
+    }
     let deadline = Instant::now() + Duration::from_secs(10);
     while !config
         .state_root
@@ -349,12 +453,21 @@ fn explicit_retry_cli_uses_private_config_and_never_reassigns_or_reselects() {
             signal: None
         }
     ));
-    assert_eq!(
-        fs::read_to_string(calls)
-            .unwrap()
+    let calls = fs::read_to_string(calls).unwrap();
+    assert!(
+        calls
             .lines()
-            .filter(|l| l.contains(" -X "))
-            .count(),
-        1
+            .filter(|line| line.contains("repos/org/code/pulls?"))
+            .count()
+            >= 3
     );
+    if let Some(evidence_dir) = std::env::var_os("LUTHOR_RETRY_TEST_EVIDENCE_DIR") {
+        let path = std::path::PathBuf::from(evidence_dir).join(if historical {
+            "historical-release-cli.json"
+        } else {
+            "uuid-release-cli.json"
+        });
+        fs::write(path, serde_json::to_string_pretty(&json!({"result":retried,"audit":audit,"old_files_preserved":true,"old_rows_preserved":true,"calls":calls.lines().collect::<Vec<_>>() })).unwrap()).unwrap();
+    }
+    assert_eq!(calls.lines().filter(|l| l.contains(" -X ")).count(), 1);
 }

@@ -29,6 +29,9 @@ use std::{
 };
 use thiserror::Error;
 
+mod terminal_exit;
+pub use terminal_exit::TerminalExitProof;
+
 #[derive(Debug, Error)]
 pub enum SupervisorError {
     #[error(transparent)]
@@ -719,6 +722,8 @@ pub(crate) struct RetryPlanAuthorization<'a> {
     pub actor: &'a str,
     pub reason: &'a str,
     pub pr: ExitPrEvidence,
+    pub source: crate::state::RetrySourceEvidence,
+    pub terminal_exit: Option<TerminalExitProof>,
 }
 
 /// Renders a separately authorized natural-exit continuation without starting a worker.
@@ -734,6 +739,8 @@ pub(crate) fn prepare_retry(
         actor,
         reason,
         pr,
+        source,
+        terminal_exit,
     } = authorization;
     let task_id = previous.task_id.as_str();
     let first = store.initial_launch(task_id)?;
@@ -815,6 +822,8 @@ pub(crate) fn prepare_retry(
         plan: plan.clone(),
         reservation: attempt_id.to_owned(),
         pr,
+        source,
+        terminal_exit,
     })?;
     Ok(plan)
 }
@@ -1900,8 +1909,27 @@ fn registered_process_absence_with(
     supervisor: &ProcessIdentity,
     tracked: &[ProcessIdentity],
     current_boot: impl FnOnce() -> Result<String, SupervisorError>,
-    mut pid_absent: impl FnMut(u32) -> bool,
-    mut group_absent: impl FnMut(i32) -> bool,
+    pid_absent: impl FnMut(u32) -> bool,
+    group_absent: impl FnMut(i32) -> bool,
+) -> Result<(), &'static str> {
+    validate_registered_identities(child, supervisor, tracked)?;
+    // Historical boottime contains no boot-session UUID to compare. Neither
+    // equal seconds nor present-day ESRCH probes can supply that missing link.
+    if child.boot_identity.starts_with("{ sec") {
+        return Err("historical Darwin boot identity cannot prove boot continuity");
+    }
+    let current = current_boot().map_err(|_| "current boot identity is unavailable")?;
+    if current != child.boot_identity {
+        return Err("registered boot identity differs from current boot");
+    }
+    probe_registered_absence(child, supervisor, tracked, pid_absent, group_absent)
+}
+
+#[cfg(unix)]
+fn validate_registered_identities(
+    child: &ChildIdentity,
+    supervisor: &ProcessIdentity,
+    tracked: &[ProcessIdentity],
 ) -> Result<(), &'static str> {
     let bounded = |boot: &str, start: &str| {
         !boot.trim().is_empty()
@@ -1927,15 +1955,17 @@ fn registered_process_absence_with(
     {
         return Err("registered process identity is invalid or contradictory");
     }
-    // Historical boottime contains no boot-session UUID to compare. Neither
-    // equal seconds nor present-day ESRCH probes can supply that missing link.
-    if child.boot_identity.starts_with("{ sec") {
-        return Err("historical Darwin boot identity cannot prove boot continuity");
-    }
-    let current = current_boot().map_err(|_| "current boot identity is unavailable")?;
-    if current != child.boot_identity {
-        return Err("registered boot identity differs from current boot");
-    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn probe_registered_absence(
+    child: &ChildIdentity,
+    supervisor: &ProcessIdentity,
+    tracked: &[ProcessIdentity],
+    mut pid_absent: impl FnMut(u32) -> bool,
+    mut group_absent: impl FnMut(i32) -> bool,
+) -> Result<(), &'static str> {
     if !pid_absent(child.pid)
         || !pid_absent(supervisor.pid)
         || !tracked.iter().all(|process| pid_absent(process.pid))
@@ -1995,7 +2025,7 @@ pub fn reconcile_attempt(
     task_id: &str,
     attempt_id: &str,
 ) -> Result<Reconciliation, SupervisorError> {
-    reconcile_attempt_inner(store, task_id, attempt_id, false)
+    reconcile_attempt_inner(store, task_id, attempt_id, None, false)
 }
 
 #[cfg(unix)]
@@ -2003,8 +2033,16 @@ pub(crate) fn recheck_retry_exit(
     store: &mut StateStore,
     task_id: &str,
     attempt_id: &str,
+    revalidate_terminal_exit: bool,
+    proof: &mut Option<TerminalExitProof>,
 ) -> Result<Reconciliation, SupervisorError> {
-    reconcile_attempt_inner(store, task_id, attempt_id, true)
+    reconcile_attempt_inner(
+        store,
+        task_id,
+        attempt_id,
+        Some(proof),
+        revalidate_terminal_exit,
+    )
 }
 
 #[cfg(unix)]
@@ -2012,8 +2050,10 @@ fn reconcile_attempt_inner(
     store: &mut StateStore,
     task_id: &str,
     attempt_id: &str,
-    recheck_processes: bool,
+    terminal_exit: Option<&mut Option<TerminalExitProof>>,
+    revalidate_terminal_exit: bool,
 ) -> Result<Reconciliation, SupervisorError> {
+    let recheck_processes = terminal_exit.is_some();
     if !valid_attempt(attempt_id) {
         return Err(SupervisorError::Conflict);
     }
@@ -2205,6 +2245,21 @@ fn reconcile_attempt_inner(
         return Ok(completed);
     }
     if recheck_processes
+        && revalidate_terminal_exit
+        && child_file.boot_identity.starts_with("{ sec")
+    {
+        if !store.reconciled_exit(task_id, attempt_id, &evidence, &outcome)? {
+            return Ok(held("terminal exit is not durably reconciled"));
+        }
+        match terminal_exit::prove(store, &plan, &receipt, &child_file, &supervisor, &tracked) {
+            Ok(proof) => {
+                *terminal_exit.expect("retry inspection owns proof output") = Some(proof);
+                return Ok(completed);
+            }
+            Err(reason) => return Ok(held(reason)),
+        }
+    }
+    if recheck_processes
         && let Err(reason) = registered_process_absence(&child_file, &supervisor, &tracked)
     {
         return Ok(held(reason));
@@ -2276,6 +2331,8 @@ pub(crate) fn recheck_retry_exit(
     _store: &mut StateStore,
     _task_id: &str,
     _attempt_id: &str,
+    _revalidate_terminal_exit: bool,
+    _proof: &mut Option<TerminalExitProof>,
 ) -> Result<Reconciliation, SupervisorError> {
     Err(SupervisorError::ExecutionUnavailable)
 }

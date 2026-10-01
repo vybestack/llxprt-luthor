@@ -241,6 +241,15 @@ pub struct SelectionEvidence {
     pub effective_config: EffectiveConfigSnapshot,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetrySourceEvidence {
+    pub item: crate::github::project::ProjectItem,
+    pub issue: crate::github::project::Issue,
+    pub claim: String,
+    pub observed_at_unix_secs: u64,
+}
+
 /// Private, append-only authorization for a single natural-exit continuation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -253,6 +262,70 @@ pub struct RetryAuthorization {
     pub plan: crate::supervisor::LaunchPlan,
     pub reservation: String,
     pub pr: ExitPrEvidence,
+    pub source: RetrySourceEvidence,
+    pub terminal_exit: Option<crate::supervisor::TerminalExitProof>,
+}
+
+fn retry_evidence_matches(
+    connection: &Connection,
+    audit: &RetryAuthorization,
+    selection: &SelectionEvidence,
+) -> Result<bool, StateError> {
+    let c = &selection.candidate;
+    let source = &audit.source;
+    let claim: Option<String> = connection
+        .query_row(
+            "SELECT detail FROM intents WHERE task_id=?1 AND kind='claim_assignment'",
+            [&audit.plan.task_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let expected = serde_json::json!({"principal":audit.config.assignment_login,"repository":c.repository,"number":c.issue_number});
+    if source.observed_at_unix_secs == 0
+        || source.claim != claim.unwrap_or_default()
+        || serde_json::from_str::<serde_json::Value>(&source.claim).ok() != Some(expected)
+        || source.item.item_id != c.item_id
+        || source.item.issue_node_id != c.issue_node_id
+        || source.item.repository != c.repository
+        || source.item.tracker_repo_id != c.tracker_repo_id
+        || source.item.issue_number != c.issue_number
+        || source.issue.node_id != c.issue_node_id
+        || source.issue.repository != c.repository
+        || source.issue.tracker_repo_id != c.tracker_repo_id
+        || source.issue.number != c.issue_number
+        || source.issue.url != c.issue_url
+        || source.issue.state != "open"
+        || source.issue.assignees != [audit.config.assignment_login.as_str()]
+    {
+        return Ok(false);
+    }
+    if let Some(proof) = &audit.terminal_exit {
+        let previous = &audit.previous_plan;
+        let receipt: String = connection.query_row("SELECT payload FROM evidence WHERE task_id=?1 AND attempt_id=?2 AND kind='attempt_exit'", params![previous.task_id, previous.attempt_id], |row| row.get(0))?;
+        if serde_json::from_str::<crate::supervisor::ExitReceipt>(&receipt)? != proof.receipt
+            || proof.receipt.attempt_id != previous.attempt_id
+            || proof.observed_at_unix_secs == 0
+            || !proof.matches_startup_rejection(previous)
+        {
+            return Ok(false);
+        }
+        for (kind, payload) in [
+            ("child_registered", &proof.child_registration),
+            ("supervisor_ready", &proof.supervisor_registration),
+            ("gate_sent", &proof.gate_sent),
+        ] {
+            let matches: bool = connection.query_row("SELECT COUNT(*)=1 AND MIN(payload)=?4 FROM evidence WHERE task_id=?1 AND attempt_id=?2 AND kind=?3", params![previous.task_id, previous.attempt_id, kind, payload], |row| row.get(0))?;
+            if !matches {
+                return Ok(false);
+            }
+        }
+        let release: Option<String> = connection.query_row("SELECT detail FROM intents WHERE task_id=?1 AND attempt_id=?2 AND kind='gate_release'", params![previous.task_id, previous.attempt_id], |row| row.get(0)).optional()?;
+        let tracked: usize = connection.query_row("SELECT COUNT(*) FROM evidence WHERE task_id=?1 AND attempt_id=?2 AND kind='tracked_descendant'", params![previous.task_id, previous.attempt_id], |row| row.get(0))?;
+        if release.as_ref() != Some(&proof.gate_release) || tracked != 0 {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 pub(crate) fn same_task_config(
@@ -315,6 +388,7 @@ pub(crate) fn attempt_selection(
             )?;
             let prior: crate::supervisor::LaunchPlan = serde_json::from_str(&prior)?;
             if audit.plan != *plan
+                || !retry_evidence_matches(connection, &audit, &selection)?
                 || audit.previous_plan != prior
                 || audit.previous_plan.task_id != plan.task_id
                 || audit.actor != selection.candidate.mapping.allowed_pr_author
@@ -1255,6 +1329,7 @@ impl StateStore {
                 let (prior, _) = retry_context(&tx, task_id, &audit.previous_plan.attempt_id)?;
                 let previous = attempt_selection(&tx, &prior)?;
                 if audit.previous_plan != prior
+                    || !retry_evidence_matches(&tx, audit, &previous)?
                     || audit.previous_config != previous.effective_config
                     || !same_task_config(&previous.effective_config, &audit.config)
                     || audit.actor != previous.candidate.mapping.allowed_pr_author
@@ -1311,6 +1386,7 @@ impl StateStore {
                 "INSERT INTO evidence(task_id,attempt_id,kind,payload) VALUES(?1,?2,'retry_authorized',?3)",
                 params![task_id, attempt_id, serde_json::to_string(audit)?],
             )?;
+            tx.execute("INSERT INTO evidence(task_id,attempt_id,kind,payload) VALUES(?1,?2,'retry_pr_lookup',?3)", params![task_id, attempt_id, serde_json::to_string(&audit.pr)?])?;
         }
         tx.execute("UPDATE tasks SET state='held' WHERE id=?1", [task_id])?;
         tx.commit()?;

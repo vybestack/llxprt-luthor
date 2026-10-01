@@ -50,15 +50,16 @@ The marker name/value and optional milestone are exact selectors. Omitting miles
 
 ## Audited natural-exit continuation
 
-`retry TASK --attempt ID --config PATH --config-revision REV --actor LOGIN --reason TEXT --execute`
+`retry TASK --attempt ID --config PATH --config-revision REV --actor LOGIN --reason TEXT [--revalidate-terminal-exit] --execute`
 is separate from `resume`. It renders the current validated `resume` template
 for exactly one new attempt after rechecking a naturally completed, released
 latest attempt in `attention`. The original selection snapshot and task revision
 stay unchanged. `retry_authorized` is private per-attempt evidence binding the
 exact new launch plan to the old plan/config, new command templates, actor/reason,
-fresh absent PR lookup, and reservation. Gate and reconciliation readers accept a
+fresh source/claim observation, absent PR lookup, and reservation. Gate and reconciliation readers accept a
 new revision only through that exact authorization and unchanged task identity.
-`retry_pr_lookup` observations are append-only and visible as redacted summaries
+Successful `retry_pr_lookup` observations are appended to the new attempt in the
+same transaction, never to the old attempt, and visible as redacted summaries
 in `show`/`status`; launch arguments and configuration remain private.
 
 Only command templates can change. Sources, mappings, principals, roots and
@@ -83,7 +84,7 @@ changed-revision retry cannot subsequently use normal `resume` to adopt that
 configuration. No startup, scheduler or reconciliation path launches a retry.
 
 
-### Darwin boot identity and historical refusal
+### Darwin boot identity and terminal startup revalidation
 
 New Darwin process registrations use the validated, lowercase
 `darwin-bootsessionuuid:<UUID>` identity from `kern.bootsessionuuid`. Empty,
@@ -91,7 +92,7 @@ malformed, nil, non-UTF-8 or unavailable UUID output fails closed. There is no
 `kern.boottime` fallback. Process-start identity still comes from
 `PROC_PIDTBSDINFO`; its PID and start timestamp checks are unchanged.
 
-Retry requires the recorded child, supervisor and tracked descendants to agree
+Ordinary retry requires the recorded child, supervisor and tracked descendants to agree
 on the current boot identity. Independent PID and group probes must all return
 ESRCH. A live or reused PID, present group, permission error, unavailable identity
 or contradictory record refuses continuation before a new reservation or launch.
@@ -108,16 +109,52 @@ registered IDs, but cannot recover the boot-session identity of an exited
 historical process. An operator statement or an audit recording those same
 observations supplies no independent continuity evidence.
 
-There is no historical revalidation, identity rewrite, seconds-only comparison,
-force flag or migration. A historical retry refuses with:
+Ordinary historical retry still refuses with:
 
 ```text
 luthor: retry refused or held: historical Darwin boot identity cannot prove boot continuity
 ```
 
-The original issue #2 attempt therefore remains blocked under the existing
-continuity requirement. Issue #5 fixes new identity recording and diagnostics;
-it does not authorize that historical continuation. Its released reservation,
-receipt, selection, plan and worktree must remain intact. The existing `recover`
-command handles missing exit telemetry and cannot authorize this completed
-historical attempt.
+`--revalidate-terminal-exit` selects an additional, narrow terminal proof for an
+already completed and released native CLI startup rejection. It does not claim
+boot continuity. All ordinary receipt, registration, claim, worktree, source,
+author, capacity and exhaustive PR checks remain required. The extra proof requires:
+
+1. An exact, already reconciled supervisor receipt from `try_wait`/`waitpid`, with
+   natural exit code 2, no signal or stop, and matching private drained logs.
+2. A direct configured `llxprt-code-rs` executable, one saved
+   `--max-tool-calls 1024` argument, and the entire stdout equal to the native
+   CLI's single JSON startup error for that limit and task session. Stderr must
+   be empty. Extra output, a different session, another error or another executable
+   cannot supply this proof.
+3. Internally consistent original child/supervisor/gate registrations, no recorded
+   descendants, and current ESRCH for both registered PIDs and both dedicated
+   process groups. Reused PIDs, surviving group members, zombies and permission
+   errors refuse. No signal is sent during revalidation.
+4. A readable current boot identity recorded only as a new observation. No old
+   identity is replaced or compared by seconds, date or microseconds.
+
+The native CLI validates this limit before constructing its session, backend,
+profiling runtime or tools. Consequently this specific rejection never launched
+tool subprocesses that could escape the registered groups. Log EOF alone would
+not prove that fact: a runtime descendant can close its pipes and escape. Generic
+historical natural exits, missing telemetry and any tracked-descendant evidence
+therefore remain held. This proof relies on the configured, trusted native CLI's
+startup contract. The executable name and diagnostic do not constitute executable
+attestation; arbitrary or untrusted programs that imitate that contract are not
+supported. For issue #2, the configured native binary and its early validation
+path were inspected and reproduced independently with a synthetic session.
+
+The new `retry_authorized` record retains the old receipt, exact registration/gate
+payloads, full startup diagnostic, observation time, current boot observation,
+and the `native_max_tool_calls_preflight` basis. It also binds the actor/reason,
+old/new plans and configs, new revision/reservation, fresh source item/issue and
+claim, verified worktree snapshot, and fresh exhaustive PR absence. The transaction
+rechecks the old receipt and payloads, source identity, task phase and capacity.
+The new supervisor accepts the new revision only through that audit. Historical
+attempt rows, their evidence/intent payloads and files remain unchanged.
+
+This path supports issue #2's original startup rejection without creating a
+successor task, moving its source claim, replacing its worktree/branch history,
+editing SQLite or launching a duplicate worker. The operator must invoke the
+verified binary explicitly; no daemon or reconciliation path authorizes it.

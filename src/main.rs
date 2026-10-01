@@ -58,7 +58,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         Some("recover") => recover(args.collect()),
         Some("--help" | "-h") => {
             println!(
-                "Usage: luthor discover --config <path>\n       luthor daemon --config PATH --config-revision REV [--repository owner/repo --issues N,N,...] [--once] [--execute]\n       luthor dispatch --config <path> --repository owner/repo --issue N --config-revision REV [--execute]\n       luthor resume TASK --config <path> --execute\n       luthor retry TASK --attempt ID --config PATH --config-revision REV --actor LOGIN --reason TEXT --execute\n       luthor recover TASK --attempt ID --config PATH --actor LOGIN --reason TEXT --execute\n       luthor status --config <path>\n       luthor show TASK --config <path>\n       luthor logs TASK [--attempt ATTEMPT] --config <path>"
+                "Usage: luthor discover --config <path>\n       luthor daemon --config PATH --config-revision REV [--repository owner/repo --issues N,N,...] [--once] [--execute]\n       luthor dispatch --config <path> --repository owner/repo --issue N --config-revision REV [--execute]\n       luthor resume TASK --config <path> --execute\n       luthor retry TASK --attempt ID --config PATH --config-revision REV --actor LOGIN --reason TEXT [--revalidate-terminal-exit] --execute\n       luthor recover TASK --attempt ID --config PATH --actor LOGIN --reason TEXT --execute\n       luthor status --config <path>\n       luthor show TASK --config <path>\n       luthor logs TASK [--attempt ATTEMPT] --config <path>"
             );
             Ok(())
         }
@@ -436,18 +436,19 @@ fn resume(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn retry(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
-    if args.len() != 12
+    let revalidate_terminal_exit = args.len() == 13 && args[11] == "--revalidate-terminal-exit";
+    if !(args.len() == 12 || revalidate_terminal_exit)
         || args[1] != "--attempt"
         || args[3] != "--config"
         || args[5] != "--config-revision"
         || args[7] != "--actor"
         || args[9] != "--reason"
-        || args[11] != "--execute"
+        || args.last().map(String::as_str) != Some("--execute")
         || [0, 2, 4, 6, 8, 10]
             .iter()
             .any(|i| args[*i].trim().is_empty() || args[*i].starts_with('-'))
     {
-        return Err("expected TASK --attempt ID --config PATH --config-revision REV --actor LOGIN --reason TEXT --execute".into());
+        return Err("expected TASK --attempt ID --config PATH --config-revision REV --actor LOGIN --reason TEXT [--revalidate-terminal-exit] --execute".into());
     }
     let config = Config::from_json(
         &fs::read_to_string(&args[4]).map_err(|_| "retry configuration unavailable")?,
@@ -480,6 +481,7 @@ fn retry(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
             config_revision: &args[6],
             actor: &args[8],
             reason: &args[10],
+            revalidate_terminal_exit,
             projects: &mut projects,
             prs: &mut prs,
             launcher: &mut launcher,
