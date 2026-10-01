@@ -29,6 +29,7 @@ fn linux_process_observation_rejects_missing_identity_fields() {
     );
 }
 
+#[cfg(target_os = "macos")]
 fn bounded_sanitized_output(path: &std::path::Path) -> String {
     use std::fs;
 
