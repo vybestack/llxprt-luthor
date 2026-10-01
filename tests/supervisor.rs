@@ -61,7 +61,13 @@ fn configured(root: &Path) -> (Config, Candidate) {
         ],
     };
     let config = Config {
-        state_root: root.join("state"),
+        state_root: if root.is_absolute() {
+            root.strip_prefix(std::env::current_dir().unwrap())
+                .unwrap()
+                .join("state")
+        } else {
+            root.join("state")
+        },
         worktree_root: root.join("worktrees"),
         capacity: 1,
         assignment_login: "operator".into(),
@@ -243,7 +249,14 @@ fn unverified_worktree_or_missing_session_cannot_reserve_or_launch() {
         "-p".into(),
         "prompt".into(),
     ];
-    let mut store = StateStore::open(dir.path().join("other-state"), 1).unwrap();
+    let mut store = StateStore::open(
+        dir.path()
+            .strip_prefix(std::env::current_dir().unwrap())
+            .unwrap()
+            .join("other-state"),
+        1,
+    )
+    .unwrap();
     claimed(&mut store, &config, &candidate, dir.path());
     assert!(matches!(
         prepare_initial(&mut store, "task", "attempt-1"),
@@ -1665,7 +1678,11 @@ impl IdCreator for OtherIds {
 fn natural_exit_seven_attends_and_scheduler_dispatches_only_other_issue() {
     let (_dir, config, mut store) = dispatched_fixture(7);
     let mut prs = ExitPr::default();
-    let (_, mut other) = configured(config.state_root.parent().unwrap());
+    let (_, mut other) = configured(
+        &std::env::current_dir()
+            .unwrap()
+            .join(config.state_root.parent().unwrap()),
+    );
     other.item_id = "other-item".into();
     other.issue_node_id = "other-issue".into();
     other.issue_number = 8;
@@ -1805,7 +1822,10 @@ fn natural_stop_race_fixture() -> (
     let dir = tempfile::tempdir().unwrap();
     let (config, mut store, plan, marker) = prepared_fake_worker(&dir);
     let cleanup = StopRaceCleanup(config.state_root.clone());
-    let release = config.state_root.join("release-natural-exit");
+    let release = std::env::current_dir()
+        .unwrap()
+        .join(&config.state_root)
+        .join("release-natural-exit");
     fs::write(
         &plan.executable,
         format!(
@@ -1910,98 +1930,7 @@ fn assert_natural_stop_accounted(
     ));
     drop(store);
 
-    let config_path = config.state_root.join("config.json");
-    fs::write(&config_path, serde_json::to_vec(config).unwrap()).unwrap();
-    let resume = Command::new(env!("CARGO_BIN_EXE_luthor"))
-        .args(["resume", "task", "--config"])
-        .arg(&config_path)
-        .arg("--execute")
-        .output()
-        .unwrap();
-    assert!(!resume.status.success());
-    assert!(String::from_utf8_lossy(&resume.stderr).contains("resume held: task is not resumable"));
-
-    let mut store = StateStore::open(&config.state_root, config.capacity).unwrap();
-    let view = |args: &[&str]| -> serde_json::Value {
-        let output = luthor::cli::execute(
-            &config.state_root,
-            &args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>(),
-        )
-        .unwrap();
-        serde_json::from_str(&output).unwrap()
-    };
-    let status = view(&["status"]);
-    let shown = view(&["show", "task"]);
-    assert_eq!(status["tasks"].as_array().unwrap().len(), 1);
-    let task = &status["tasks"][0];
-    assert_eq!(task["phase"], "attention");
-    assert_eq!(shown["phase"], task["phase"]);
-    assert_eq!(task["latest_attempt_id"], "attempt-real");
-    assert_eq!(shown["latest_attempt_id"], task["latest_attempt_id"]);
-    assert_eq!(task["latest_attempt_lifecycle"], "completed");
-    assert_eq!(
-        shown["attempts"][0]["lifecycle"],
-        task["latest_attempt_lifecycle"]
-    );
-    assert_eq!(
-        task["latest_attempt_outcome"],
-        "exit_code=Some(7);signal=None"
-    );
-    assert_eq!(
-        shown["latest_attempt_outcome"],
-        task["latest_attempt_outcome"]
-    );
-    assert_eq!(task["reserved_slot"], false);
-    assert_eq!(shown["reserved_slot"], task["reserved_slot"]);
-    assert_eq!(status["capacity"]["reserved"], 0);
-    assert_eq!(shown["attempts"].as_array().unwrap().len(), 1);
-    assert_eq!(shown["attempts"][0]["reservation"], "released");
-    assert_eq!(shown["session"], plan.session_id);
-    assert_eq!(
-        shown["worktree"],
-        serde_json::to_value(&plan.expected_worktree).unwrap()
-    );
-    let claims: Vec<_> = shown["evidence"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|event| event["kind"] == "claim_verified")
-        .collect();
-    assert_eq!(claims.len(), 1);
-    assert_eq!(claims[0]["detail"], config.assignment_login);
-    let launch: luthor::supervisor::LaunchPlan =
-        serde_json::from_str(&store.launch_intent("attempt-real").unwrap().unwrap()).unwrap();
-    assert_eq!(&launch, plan);
-    assert!(!store.has_attempt("task", "attempt-next").unwrap());
-    let kinds = store.evidence_kinds("task").unwrap();
-    assert_eq!(
-        kinds.iter().filter(|kind| *kind == "attempt_exit").count(),
-        1
-    );
-    assert!(!kinds.contains(&"independent_stop_signal".into()));
-    assert!(!kinds.contains(&"independent_stop_decision".into()));
-    assert_eq!(fs::read(receipt_path(config)).unwrap(), receipt);
-    let mut projects = OtherProject(
-        store.selection_evidence("task").unwrap().unwrap().candidate,
-        1,
-    );
-    assert!(matches!(
-        luthor::coordinator::reconcile_with_pr(
-            &mut store,
-            "task",
-            "attempt-real",
-            &mut projects,
-            &mut prs
-        )
-        .unwrap(),
-        Reconciliation::Completed { .. }
-    ));
-    assert_eq!(prs.reads, 1);
-    assert_eq!(store.reservation_count().unwrap(), 0);
-    assert_eq!(
-        store.task_phase("task").unwrap().as_deref(),
-        Some("attention")
-    );
+    assert_natural_stop_views_and_restart(config, plan, receipt, &mut prs);
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -3525,24 +3454,7 @@ fn registered_shim_stays_gated_and_survives_supervisor_crash_after_release() {
         Some(libc::ESRCH)
     );
     assert!(!attempts.join("attempt-real.receipt.json").exists());
-    let kinds = store.evidence_kinds("task").unwrap();
-    assert!(kinds.contains(&"independent_stop_decision".into()));
-    assert!(kinds.contains(&"independent_stop_signal".into()));
-    assert!(kinds.contains(&"independent_group_absent".into()));
-    assert!(matches!(
-        reconcile_attempt(&mut store, "task", "attempt-real").unwrap(),
-        Reconciliation::Held { reason } if reason == "live worker identity or reservation unverified"
-    ));
-    assert_eq!(store.reservation_count().unwrap(), 1);
-    drop(store);
-    let store = StateStore::open(&config.state_root, 1).unwrap();
-    assert_eq!(store.reservation_count().unwrap(), 1);
-    assert!(
-        store
-            .evidence_kinds("task")
-            .unwrap()
-            .contains(&"independent_group_absent".into())
-    );
+    assert_crashed_supervisor_reservation(&config, store);
 }
 
 #[cfg(unix)]
@@ -4260,4 +4172,132 @@ fn initial_rejects_conflicting_session_and_cwd_arguments_before_reservation() {
         assert_eq!(store.reservation_count().unwrap(), 0, "{alteration:?}");
         assert!(store.launch_intent(&attempt).unwrap().is_none());
     }
+}
+
+#[cfg(unix)]
+fn assert_natural_stop_views_and_restart(
+    config: &Config,
+    plan: &luthor::supervisor::LaunchPlan,
+    receipt: &[u8],
+    prs: &mut ExitPr,
+) {
+    let config_path = config.state_root.join("config.json");
+    fs::write(&config_path, serde_json::to_vec(config).unwrap()).unwrap();
+    let resume = Command::new(env!("CARGO_BIN_EXE_luthor"))
+        .args(["resume", "task", "--config"])
+        .arg(&config_path)
+        .arg("--execute")
+        .output()
+        .unwrap();
+    assert!(!resume.status.success());
+    assert!(String::from_utf8_lossy(&resume.stderr).contains("resume held: task is not resumable"));
+
+    let mut store = StateStore::open(&config.state_root, config.capacity).unwrap();
+    assert_natural_stop_cached_views(config, plan);
+    let launch: luthor::supervisor::LaunchPlan =
+        serde_json::from_str(&store.launch_intent("attempt-real").unwrap().unwrap()).unwrap();
+    assert_eq!(&launch, plan);
+    assert!(!store.has_attempt("task", "attempt-next").unwrap());
+    let kinds = store.evidence_kinds("task").unwrap();
+    assert_eq!(
+        kinds.iter().filter(|kind| *kind == "attempt_exit").count(),
+        1
+    );
+    assert!(!kinds.contains(&"independent_stop_signal".into()));
+    assert!(!kinds.contains(&"independent_stop_decision".into()));
+    assert_eq!(fs::read(receipt_path(config)).unwrap(), receipt);
+    let mut projects = OtherProject(
+        store.selection_evidence("task").unwrap().unwrap().candidate,
+        1,
+    );
+    assert!(matches!(
+        luthor::coordinator::reconcile_with_pr(
+            &mut store,
+            "task",
+            "attempt-real",
+            &mut projects,
+            prs
+        )
+        .unwrap(),
+        Reconciliation::Completed { .. }
+    ));
+    assert_eq!(prs.reads, 1);
+    assert_eq!(store.reservation_count().unwrap(), 0);
+    assert_eq!(
+        store.task_phase("task").unwrap().as_deref(),
+        Some("attention")
+    );
+}
+
+#[cfg(unix)]
+fn assert_crashed_supervisor_reservation(config: &Config, mut store: StateStore) {
+    let kinds = store.evidence_kinds("task").unwrap();
+    assert!(kinds.contains(&"independent_stop_decision".into()));
+    assert!(kinds.contains(&"independent_stop_signal".into()));
+    assert!(kinds.contains(&"independent_group_absent".into()));
+    assert!(matches!(
+        reconcile_attempt(&mut store, "task", "attempt-real").unwrap(),
+        Reconciliation::Held { reason } if reason == "live worker identity or reservation unverified"
+    ));
+    assert_eq!(store.reservation_count().unwrap(), 1);
+    drop(store);
+    let store = StateStore::open(&config.state_root, 1).unwrap();
+    assert_eq!(store.reservation_count().unwrap(), 1);
+    assert!(
+        store
+            .evidence_kinds("task")
+            .unwrap()
+            .contains(&"independent_group_absent".into())
+    );
+}
+
+#[cfg(unix)]
+fn assert_natural_stop_cached_views(config: &Config, plan: &luthor::supervisor::LaunchPlan) {
+    let view = |args: &[&str]| -> serde_json::Value {
+        let output = luthor::cli::execute(
+            &config.state_root,
+            &args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>(),
+        )
+        .unwrap();
+        serde_json::from_str(&output).unwrap()
+    };
+    let status = view(&["status"]);
+    let shown = view(&["show", "task"]);
+    assert_eq!(status["tasks"].as_array().unwrap().len(), 1);
+    let task = &status["tasks"][0];
+    assert_eq!(task["phase"], "attention");
+    assert_eq!(shown["phase"], task["phase"]);
+    assert_eq!(task["latest_attempt_id"], "attempt-real");
+    assert_eq!(shown["latest_attempt_id"], task["latest_attempt_id"]);
+    assert_eq!(task["latest_attempt_lifecycle"], "completed");
+    assert_eq!(
+        shown["attempts"][0]["lifecycle"],
+        task["latest_attempt_lifecycle"]
+    );
+    assert_eq!(
+        task["latest_attempt_outcome"],
+        "exit_code=Some(7);signal=None"
+    );
+    assert_eq!(
+        shown["latest_attempt_outcome"],
+        task["latest_attempt_outcome"]
+    );
+    assert_eq!(task["reserved_slot"], false);
+    assert_eq!(shown["reserved_slot"], task["reserved_slot"]);
+    assert_eq!(status["capacity"]["reserved"], 0);
+    assert_eq!(shown["attempts"].as_array().unwrap().len(), 1);
+    assert_eq!(shown["attempts"][0]["reservation"], "released");
+    assert_eq!(shown["session"], plan.session_id);
+    assert_eq!(
+        shown["worktree"],
+        serde_json::to_value(&plan.expected_worktree).unwrap()
+    );
+    let claims: Vec<_> = shown["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|event| event["kind"] == "claim_verified")
+        .collect();
+    assert_eq!(claims.len(), 1);
+    assert_eq!(claims[0]["detail"], config.assignment_login);
 }

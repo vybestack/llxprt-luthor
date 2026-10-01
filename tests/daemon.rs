@@ -6,7 +6,7 @@ use std::{fs, os::unix::fs::PermissionsExt, path::Path, process::Command};
 fn tempdir() -> tempfile::TempDir {
     tempfile::Builder::new()
         .prefix("luthor-daemon-")
-        .tempdir_in("/tmp")
+        .tempdir()
         .unwrap()
 }
 
@@ -51,7 +51,7 @@ fn fixture_with_principals(
     fs::write(
         &config,
         json!({
-            "state_root":dir.join("state"),"worktree_root":dir.join("worktrees"),"capacity":1,
+            "state_root":dir.strip_prefix(std::env::current_dir().unwrap()).unwrap().join("state"),"worktree_root":dir.join("worktrees"),"capacity":1,
             "assignment_login":assignee,
             "sources":[{"project_id":"PROJECT","repositories":["org/tracker"],
                 "ready_marker":{"kind":"label","name":"ready"},"milestone":null}],

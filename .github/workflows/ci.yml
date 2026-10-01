@@ -1,0 +1,42 @@
+name: Rust quality gates
+on:
+  push:
+    branches: [work/luthor-issue-to-pr-daemon, 'luthor/**']
+  pull_request:
+    branches: [work/luthor-issue-to-pr-daemon]
+permissions:
+  contents: read
+jobs:
+  gates:
+    name: gates (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install documented Rust toolchain
+        run: rustup toolchain install 1.98.0 --profile minimal --component clippy --component rustfmt
+      - name: Confine Cargo and fixtures
+        shell: bash
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/tmp/cargo-home" "$GITHUB_WORKSPACE/tmp/target" "$GITHUB_WORKSPACE/tmp/fixtures"
+          echo "CARGO_HOME=$GITHUB_WORKSPACE/tmp/cargo-home" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_DIR=$GITHUB_WORKSPACE/tmp/target" >> "$GITHUB_ENV"
+          echo "TMPDIR=$GITHUB_WORKSPACE/tmp/fixtures" >> "$GITHUB_ENV"
+          rustup override set 1.98.0
+      - name: Fetch locked dependencies deliberately
+        run: cargo fetch --locked
+      - name: Shared local and CI entrypoint
+        run: cargo xtask ci
+  required:
+    name: Luthor quality gates
+    if: ${{ always() }}
+    needs: [gates]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every platform and stage to succeed
+        env:
+          GATES_RESULT: ${{ needs.gates.result }}
+        run: test "$GATES_RESULT" = success

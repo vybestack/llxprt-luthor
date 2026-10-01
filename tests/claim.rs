@@ -1051,3 +1051,47 @@ fn fully_recorded_source_without_attempt_still_blocks_new_selection() {
             .any(|(_, kind)| kind == "prelaunch")
     );
 }
+
+#[test]
+fn assignment_observes_durable_claim_intent_before_external_write() {
+    struct DurableAssignment {
+        db: std::path::PathBuf,
+        assignees: Rc<RefCell<Vec<String>>>,
+        observed: bool,
+    }
+    impl luthor::claim::AssignmentWriter for DurableAssignment {
+        fn assign(&mut self, _: &str, _: u64, principal: &str) -> Result<(), AssignmentError> {
+            let db = rusqlite::Connection::open(&self.db).unwrap();
+            let count: usize = db
+                .query_row(
+                    "SELECT COUNT(*) FROM intents WHERE task_id='task' AND kind='claim_assignment'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 1, "assignment must not precede durable claim intent");
+            self.observed = true;
+            self.assignees.borrow_mut().push(principal.into());
+            Ok(())
+        }
+    }
+    let (dir, candidate, mut projects, _, mut store) = claim_fixture();
+    let mut writer = DurableAssignment {
+        db: store.root().join("state.sqlite3"),
+        assignees: Rc::clone(&projects.assignees),
+        observed: false,
+    };
+    claim(
+        &mut store,
+        "task",
+        &candidate,
+        "bot",
+        &mut projects,
+        &mut EmptyPullRequests,
+        &mut writer,
+    )
+    .unwrap();
+    assert!(writer.observed);
+    assert_claim_state(&dir, "claimed", true, true);
+    assert_eq!(*projects.assignees.borrow(), ["bot"]);
+}

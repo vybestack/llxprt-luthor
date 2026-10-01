@@ -106,7 +106,37 @@ pub fn inspect_recovery_quiescence(
         return Ok(RecoveryInspection::Held("attempt exit receipt exists"));
     }
 
+    let (attempts, plan) = match recovery_plan_evidence(store, task_id, attempt_id)? {
+        Ok(context) => context,
+        Err(reason) => return Ok(RecoveryInspection::Held(reason)),
+    };
     let held = |reason| Ok(RecoveryInspection::Held(reason));
+    let child_file = match recovery_child_evidence(store, task_id, attempt_id, &attempts)? {
+        Ok(child) => child,
+        Err(reason) => return held(reason),
+    };
+    if store
+        .evidence_payload(task_id, Some(attempt_id), "log_failure")?
+        .is_some()
+    {
+        return held("log drain failed");
+    }
+    if attempts
+        .join(format!("{attempt_id}.supervisor-error.json"))
+        .exists()
+    {
+        return held("supervisor error receipt exists");
+    }
+    recovery_process_quiescence(store, task_id, attempt_id, &attempts, &child_file, &plan)
+}
+
+#[cfg(unix)]
+fn recovery_plan_evidence(
+    store: &StateStore,
+    task_id: &str,
+    attempt_id: &str,
+) -> Result<Result<(PathBuf, LaunchPlan), &'static str>, SupervisorError> {
+    let held = |reason| Ok(Err(reason));
     let attempts = store.root().join("attempts");
     use std::os::unix::fs::PermissionsExt;
     let Ok(dir) = fs::symlink_metadata(&attempts) else {
@@ -115,32 +145,10 @@ pub fn inspect_recovery_quiescence(
     if !dir.file_type().is_dir() || dir.permissions().mode() & 0o777 != 0o700 {
         return held("unsafe attempts directory");
     }
-    let Some(plan) = private_bytes(&attempts.join(format!("{attempt_id}.plan.json")))
-        .and_then(|bytes| serde_json::from_slice::<LaunchPlan>(&bytes).ok())
-    else {
-        return held("missing or invalid plan");
+    let plan = match recovery_dispatch_plan(store, attempt_id, task_id, &attempts)? {
+        Ok(plan) => plan,
+        Err(reason) => return Ok(Err(reason)),
     };
-    if plan.task_id != task_id
-        || plan.attempt_id != attempt_id
-        || plan.session_id != task_id
-        || plan.config_revision.is_empty()
-    {
-        return held("plan identity mismatch");
-    }
-    let Some(launch) = store.intent_payload(task_id, attempt_id, "launch")? else {
-        return held("missing launch intent");
-    };
-    if serde_json::from_str::<LaunchPlan>(&launch).ok().as_ref() != Some(&plan) {
-        return held("launch intent mismatch");
-    }
-    let Some(dispatch) = store.intent_payload(task_id, attempt_id, "supervisor_dispatch")? else {
-        return held("missing dispatch intent");
-    };
-    if serde_json::from_str::<LaunchPlan>(&dispatch).ok().as_ref() != Some(&plan) {
-        return held("dispatch plan mismatch");
-    }
-
-    let held = |reason| Ok(RecoveryInspection::Held(reason));
     let Some(worktree) = store.evidence_payload(task_id, None, "worktree_created")? else {
         return held("missing worktree evidence");
     };
@@ -178,117 +186,7 @@ pub fn inspect_recovery_quiescence(
         return held("claim identity mismatch");
     }
 
-    let Some(child_file) = private_bytes(&attempts.join(format!("{attempt_id}.child.json")))
-        .and_then(|bytes| serde_json::from_slice::<ChildIdentity>(&bytes).ok())
-    else {
-        return held("missing or invalid child identity");
-    };
-    let Some(child_evidence) =
-        store.evidence_payload(task_id, Some(attempt_id), "child_registered")?
-    else {
-        return held("missing child registration");
-    };
-    if serde_json::from_str::<ChildIdentity>(&child_evidence)
-        .ok()
-        .as_ref()
-        != Some(&child_file)
-        || child_file.pid == 0
-        || i32::try_from(child_file.pid).is_err()
-        || child_file.group_id != child_file.pid
-        || child_file.boot_identity.trim().is_empty()
-        || child_file.start_identity.trim().is_empty()
-    {
-        return held("child registration mismatch");
-    }
-    if store
-        .evidence_payload(task_id, Some(attempt_id), "log_failure")?
-        .is_some()
-    {
-        return held("log drain failed");
-    }
-    if attempts
-        .join(format!("{attempt_id}.supervisor-error.json"))
-        .exists()
-    {
-        return held("supervisor error receipt exists");
-    }
-    let Some(release) = store.intent_payload(task_id, attempt_id, "gate_release")? else {
-        return held("missing gate release decision");
-    };
-    let Some(ready) = store.evidence_payload(task_id, Some(attempt_id), "supervisor_ready")? else {
-        return held("missing or invalid supervisor identity");
-    };
-    let Some(supervisor) = recorded_process(&ready) else {
-        return held("missing or invalid supervisor identity");
-    };
-    if recorded_process(&release).as_ref() != Some(&supervisor) {
-        return held("supervisor identity contradiction");
-    }
-    let Some(sent) = store.evidence_payload(task_id, Some(attempt_id), "gate_sent")? else {
-        return held("missing gate sent evidence");
-    };
-    if recorded_process(&sent).as_ref() != Some(&supervisor) {
-        return held("supervisor identity contradiction");
-    }
-    if supervisor.pid == child_file.pid {
-        return held("supervisor and child identity contradiction");
-    }
-
-    let tracked = store
-        .evidence_payloads(task_id, attempt_id, "tracked_descendant")?
-        .into_iter()
-        .map(|payload| recorded_process(&payload))
-        .collect::<Option<Vec<_>>>();
-    let Some(tracked) = tracked else {
-        return held("invalid tracked descendant identity");
-    };
-    if !registered_processes_absent(&child_file, &supervisor, &tracked) {
-        return held("registered processes may still be live");
-    }
-
-    let Some(current_plan) = private_bytes(&attempts.join(format!("{attempt_id}.plan.json")))
-        .and_then(|bytes| serde_json::from_slice::<LaunchPlan>(&bytes).ok())
-    else {
-        return held("plan changed during recovery inspection");
-    };
-    let Some(current_child) = private_bytes(&attempts.join(format!("{attempt_id}.child.json")))
-        .and_then(|bytes| serde_json::from_slice::<ChildIdentity>(&bytes).ok())
-    else {
-        return held("child identity changed during recovery inspection");
-    };
-    if current_plan != plan
-        || current_child != child_file
-        || store
-            .evidence_payload(task_id, Some(attempt_id), "gate_sent")?
-            .as_deref()
-            != Some(&sent)
-        || store
-            .evidence_payload(task_id, Some(attempt_id), "supervisor_ready")?
-            .as_deref()
-            != Some(&ready)
-        || !matches!(
-            fs::symlink_metadata(&receipt_path),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound
-        )
-        || store.latest_attempt(task_id)?.as_deref() != Some(attempt_id)
-        || !store.active_attempt_reservation(task_id, attempt_id)?
-    {
-        return held("recovery evidence changed during inspection");
-    }
-    let current_tracked = store
-        .evidence_payloads(task_id, attempt_id, "tracked_descendant")?
-        .into_iter()
-        .map(|payload| recorded_process(&payload))
-        .collect::<Option<Vec<_>>>();
-    let Some(current_tracked) = current_tracked else {
-        return held("tracked descendant evidence changed during inspection");
-    };
-    if current_tracked != tracked
-        || !registered_processes_absent(&current_child, &supervisor, &current_tracked)
-    {
-        return held("registered process absence proof changed during inspection");
-    }
-    Ok(RecoveryInspection::Quiescent)
+    Ok(Ok((attempts, plan)))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1521,7 +1419,8 @@ where
     let mut command = Command::new(binary);
     command
         .arg("__worker_gate")
-        .arg(&plan_path)
+        // The worker gate changes cwd to the task worktree; preserve the plan's identity.
+        .arg(fs::canonicalize(&plan_path)?)
         .current_dir(&plan.worktree)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1835,124 +1734,18 @@ pub fn reconcile_attempt(
     let held = |reason: &str| Reconciliation::Held {
         reason: reason.into(),
     };
-    let attempts = store.root().join("attempts");
-    use std::os::unix::fs::PermissionsExt;
-    let Ok(dir) = fs::symlink_metadata(&attempts) else {
-        return Ok(held("missing attempts directory"));
+    let (attempts, _plan) = match reconciliation_plan_evidence(store, task_id, attempt_id)? {
+        Ok(context) => context,
+        Err(reason) => return Ok(held(reason)),
     };
-    if !dir.file_type().is_dir() || dir.permissions().mode() & 0o777 != 0o700 {
-        return Ok(held("unsafe attempts directory"));
-    }
-    let plan: LaunchPlan = match private_bytes(&attempts.join(format!("{attempt_id}.plan.json")))
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-    {
-        Some(plan) => plan,
-        None => return Ok(held("missing or invalid plan")),
-    };
-    if plan.task_id != task_id
-        || plan.attempt_id != attempt_id
-        || plan.session_id != task_id
-        || plan.config_revision.is_empty()
-    {
-        return Ok(held("plan identity mismatch"));
-    }
-    let Some(persisted) = store.intent_payload(task_id, attempt_id, "launch")? else {
-        return Ok(held("missing launch intent"));
-    };
-    if serde_json::from_str::<LaunchPlan>(&persisted).ok().as_ref() != Some(&plan) {
-        return Ok(held("launch intent mismatch"));
-    }
-    let Some(dispatch) = store.intent_payload(task_id, attempt_id, "supervisor_dispatch")? else {
-        return Ok(held("missing dispatch intent"));
-    };
-    if serde_json::from_str::<LaunchPlan>(&dispatch).ok().as_ref() != Some(&plan) {
-        return Ok(held("dispatch plan mismatch"));
-    }
-    let Some(worktree) = store.evidence_payload(task_id, None, "worktree_created")? else {
-        return Ok(held("missing worktree evidence"));
-    };
-    let Some(worktree) = serde_json::from_str::<WorktreeIdentity>(&worktree).ok() else {
-        return Ok(held("invalid worktree evidence"));
-    };
-    let record = store.worktree_record(task_id)?;
-    if worktree.path != plan.worktree
-        || record.as_ref().is_none_or(|r| {
-            r.identity.as_ref() != Some(&worktree)
-                || r.intent.path != worktree.path
-                || r.intent.branch != worktree.branch
-                || r.intent.base != worktree.base
-                || r.intent.repository != worktree.repository
-        })
-    {
-        return Ok(held("worktree identity mismatch"));
-    }
-    let Some(selection) = store.selection_evidence(task_id)? else {
-        return Ok(held("missing selection"));
-    };
-    if selection.config_revision != plan.config_revision
-        || selection.candidate.mapping.code_repository != worktree.repository
-    {
-        return Ok(held("selection mismatch"));
-    }
-    let Some(claim) = store.evidence_payload(task_id, None, "claim_verified")? else {
-        return Ok(held("missing claim evidence"));
-    };
-    if claim.trim().is_empty() || claim != selection.effective_config.assignment_login {
-        return Ok(held("claim identity mismatch"));
-    }
-    let Some(child_file) = private_bytes(&attempts.join(format!("{attempt_id}.child.json")))
-        .and_then(|bytes| serde_json::from_slice::<ChildIdentity>(&bytes).ok())
-    else {
-        return Ok(held("missing or invalid child identity"));
-    };
-    let Some(child_evidence) =
-        store.evidence_payload(task_id, Some(attempt_id), "child_registered")?
-    else {
-        return Ok(held("missing child registration"));
-    };
-    if serde_json::from_str::<ChildIdentity>(&child_evidence)
-        .ok()
-        .as_ref()
-        != Some(&child_file)
-        || child_file.pid == 0
-        || child_file.group_id != child_file.pid
-        || child_file.boot_identity.is_empty()
-        || child_file.start_identity.is_empty()
-    {
-        return Ok(held("child registration mismatch"));
-    }
-    if store
-        .evidence_payload(task_id, Some(attempt_id), "log_failure")?
-        .is_some()
-    {
-        return Ok(held("log drain failed"));
-    }
-    let Some(release) = store.intent_payload(task_id, attempt_id, "gate_release")? else {
-        return Ok(held("missing gate release decision"));
-    };
-    let Some(ready) = store.evidence_payload(task_id, Some(attempt_id), "supervisor_ready")? else {
-        return Ok(held("missing or invalid supervisor identity"));
-    };
-    let Some(supervisor) = recorded_process(&ready) else {
-        return Ok(held("missing or invalid supervisor identity"));
-    };
-    if recorded_process(&release).as_ref() != Some(&supervisor) {
-        return Ok(held("supervisor identity contradiction"));
-    }
-    let sent = store.evidence_payload(task_id, Some(attempt_id), "gate_sent")?;
-    if sent.is_some() && sent.as_deref().and_then(recorded_process).as_ref() != Some(&supervisor) {
-        return Ok(held("supervisor identity contradiction"));
-    }
-    if supervisor.pid == child_file.pid {
-        return Ok(held("supervisor and child identity contradiction"));
-    }
-    let tracked = store
-        .evidence_payloads(task_id, attempt_id, "tracked_descendant")?
-        .into_iter()
-        .map(|payload| recorded_process(&payload))
-        .collect::<Option<Vec<_>>>();
-    let Some(tracked) = tracked else {
-        return Ok(held("invalid tracked descendant identity"));
+    let ReconciliationProcesses {
+        child: child_file,
+        supervisor,
+        tracked,
+        sent,
+    } = match reconciliation_process_evidence(store, task_id, attempt_id, &attempts)? {
+        Ok(processes) => processes,
+        Err(reason) => return Ok(held(reason)),
     };
     let receipt_path = attempts.join(format!("{attempt_id}.receipt.json"));
     if !receipt_path.exists() {
@@ -2092,6 +1885,59 @@ pub fn run_gated_child<R: Read>(
     _store_root: &Path,
 ) -> Result<ExitStatus, SupervisorError> {
     Err(SupervisorError::ExecutionUnavailable)
+}
+
+#[cfg(unix)]
+fn reconciliation_plan_evidence(
+    store: &StateStore,
+    task_id: &str,
+    attempt_id: &str,
+) -> Result<Result<(PathBuf, LaunchPlan), &'static str>, SupervisorError> {
+    let attempts = store.root().join("attempts");
+    use std::os::unix::fs::PermissionsExt;
+    let Ok(dir) = fs::symlink_metadata(&attempts) else {
+        return Ok(Err("missing attempts directory"));
+    };
+    if !dir.file_type().is_dir() || dir.permissions().mode() & 0o777 != 0o700 {
+        return Ok(Err("unsafe attempts directory"));
+    }
+    let plan = match reconciliation_dispatch_plan(store, attempt_id, task_id, &attempts)? {
+        Ok(plan) => plan,
+        Err(reason) => return Ok(Err(reason)),
+    };
+    let Some(worktree) = store.evidence_payload(task_id, None, "worktree_created")? else {
+        return Ok(Err("missing worktree evidence"));
+    };
+    let Some(worktree) = serde_json::from_str::<WorktreeIdentity>(&worktree).ok() else {
+        return Ok(Err("invalid worktree evidence"));
+    };
+    let record = store.worktree_record(task_id)?;
+    if worktree.path != plan.worktree
+        || record.as_ref().is_none_or(|r| {
+            r.identity.as_ref() != Some(&worktree)
+                || r.intent.path != worktree.path
+                || r.intent.branch != worktree.branch
+                || r.intent.base != worktree.base
+                || r.intent.repository != worktree.repository
+        })
+    {
+        return Ok(Err("worktree identity mismatch"));
+    }
+    let Some(selection) = store.selection_evidence(task_id)? else {
+        return Ok(Err("missing selection"));
+    };
+    if selection.config_revision != plan.config_revision
+        || selection.candidate.mapping.code_repository != worktree.repository
+    {
+        return Ok(Err("selection mismatch"));
+    }
+    let Some(claim) = store.evidence_payload(task_id, None, "claim_verified")? else {
+        return Ok(Err("missing claim evidence"));
+    };
+    if claim.trim().is_empty() || claim != selection.effective_config.assignment_login {
+        return Ok(Err("claim identity mismatch"));
+    }
+    Ok(Ok((attempts, plan)))
 }
 
 fn private_attempts(root: &Path) -> Result<PathBuf, SupervisorError> {
@@ -2364,4 +2210,320 @@ pub fn execute_with_binary(
 #[cfg(not(unix))]
 pub fn execute(_store: &mut StateStore, _plan: &LaunchPlan) -> Result<(), SupervisorError> {
     Err(SupervisorError::ExecutionUnavailable)
+}
+
+#[cfg(unix)]
+fn recovery_child_evidence(
+    store: &StateStore,
+    task_id: &str,
+    attempt_id: &str,
+    attempts: &Path,
+) -> Result<Result<ChildIdentity, &'static str>, SupervisorError> {
+    let Some(child_file) = private_bytes(&attempts.join(format!("{attempt_id}.child.json")))
+        .and_then(|bytes| serde_json::from_slice::<ChildIdentity>(&bytes).ok())
+    else {
+        return Ok(Err("missing or invalid child identity"));
+    };
+    let Some(child_evidence) =
+        store.evidence_payload(task_id, Some(attempt_id), "child_registered")?
+    else {
+        return Ok(Err("missing child registration"));
+    };
+    if serde_json::from_str::<ChildIdentity>(&child_evidence)
+        .ok()
+        .as_ref()
+        != Some(&child_file)
+        || child_file.pid == 0
+        || i32::try_from(child_file.pid).is_err()
+        || child_file.group_id != child_file.pid
+        || child_file.boot_identity.trim().is_empty()
+        || child_file.start_identity.trim().is_empty()
+    {
+        return Ok(Err("child registration mismatch"));
+    }
+    Ok(Ok(child_file))
+}
+
+#[cfg(unix)]
+fn reconciliation_process_evidence(
+    store: &StateStore,
+    task_id: &str,
+    attempt_id: &str,
+    attempts: &Path,
+) -> Result<Result<ReconciliationProcesses, &'static str>, SupervisorError> {
+    let Some(child_file) = private_bytes(&attempts.join(format!("{attempt_id}.child.json")))
+        .and_then(|bytes| serde_json::from_slice::<ChildIdentity>(&bytes).ok())
+    else {
+        return Ok(Err("missing or invalid child identity"));
+    };
+    let Some(child_evidence) =
+        store.evidence_payload(task_id, Some(attempt_id), "child_registered")?
+    else {
+        return Ok(Err("missing child registration"));
+    };
+    if serde_json::from_str::<ChildIdentity>(&child_evidence)
+        .ok()
+        .as_ref()
+        != Some(&child_file)
+        || child_file.pid == 0
+        || child_file.group_id != child_file.pid
+        || child_file.boot_identity.is_empty()
+        || child_file.start_identity.is_empty()
+    {
+        return Ok(Err("child registration mismatch"));
+    }
+    if store
+        .evidence_payload(task_id, Some(attempt_id), "log_failure")?
+        .is_some()
+    {
+        return Ok(Err("log drain failed"));
+    }
+    let Some(release) = store.intent_payload(task_id, attempt_id, "gate_release")? else {
+        return Ok(Err("missing gate release decision"));
+    };
+    let Some(ready) = store.evidence_payload(task_id, Some(attempt_id), "supervisor_ready")? else {
+        return Ok(Err("missing or invalid supervisor identity"));
+    };
+    let Some(supervisor) = recorded_process(&ready) else {
+        return Ok(Err("missing or invalid supervisor identity"));
+    };
+    if recorded_process(&release).as_ref() != Some(&supervisor) {
+        return Ok(Err("supervisor identity contradiction"));
+    }
+    let sent = store.evidence_payload(task_id, Some(attempt_id), "gate_sent")?;
+    if sent.is_some() && sent.as_deref().and_then(recorded_process).as_ref() != Some(&supervisor) {
+        return Ok(Err("supervisor identity contradiction"));
+    }
+    if supervisor.pid == child_file.pid {
+        return Ok(Err("supervisor and child identity contradiction"));
+    }
+    let tracked = store
+        .evidence_payloads(task_id, attempt_id, "tracked_descendant")?
+        .into_iter()
+        .map(|payload| recorded_process(&payload))
+        .collect::<Option<Vec<_>>>();
+    let Some(tracked) = tracked else {
+        return Ok(Err("invalid tracked descendant identity"));
+    };
+    Ok(Ok(ReconciliationProcesses {
+        child: child_file,
+        supervisor,
+        tracked,
+        sent,
+    }))
+}
+
+#[cfg(unix)]
+fn recovery_process_quiescence(
+    store: &StateStore,
+    task_id: &str,
+    attempt_id: &str,
+    attempts: &Path,
+    child_file: &ChildIdentity,
+    plan: &LaunchPlan,
+) -> Result<RecoveryInspection, SupervisorError> {
+    let receipt_path = attempts.join(format!("{attempt_id}.receipt.json"));
+    let held = |reason| Ok(RecoveryInspection::Held(reason));
+    let Some(release) = store.intent_payload(task_id, attempt_id, "gate_release")? else {
+        return held("missing gate release decision");
+    };
+    let Some(ready) = store.evidence_payload(task_id, Some(attempt_id), "supervisor_ready")? else {
+        return held("missing or invalid supervisor identity");
+    };
+    let Some(supervisor) = recorded_process(&ready) else {
+        return held("missing or invalid supervisor identity");
+    };
+    if recorded_process(&release).as_ref() != Some(&supervisor) {
+        return held("supervisor identity contradiction");
+    }
+    let Some(sent) = store.evidence_payload(task_id, Some(attempt_id), "gate_sent")? else {
+        return held("missing gate sent evidence");
+    };
+    if recorded_process(&sent).as_ref() != Some(&supervisor) {
+        return held("supervisor identity contradiction");
+    }
+    if supervisor.pid == child_file.pid {
+        return held("supervisor and child identity contradiction");
+    }
+
+    let tracked = store
+        .evidence_payloads(task_id, attempt_id, "tracked_descendant")?
+        .into_iter()
+        .map(|payload| recorded_process(&payload))
+        .collect::<Option<Vec<_>>>();
+    let Some(tracked) = tracked else {
+        return held("invalid tracked descendant identity");
+    };
+    if !registered_processes_absent(child_file, &supervisor, &tracked) {
+        return held("registered processes may still be live");
+    }
+
+    recovery_evidence_unchanged(
+        store,
+        task_id,
+        attempt_id,
+        attempts,
+        RecoverySnapshot {
+            plan,
+            child: child_file,
+            sent: &sent,
+            ready: &ready,
+            receipt_path: &receipt_path,
+            tracked: &tracked,
+            supervisor: &supervisor,
+        },
+    )
+}
+
+#[cfg(unix)]
+struct ReconciliationProcesses {
+    child: ChildIdentity,
+    supervisor: ProcessIdentity,
+    tracked: Vec<ProcessIdentity>,
+    sent: Option<String>,
+}
+
+#[cfg(unix)]
+fn recovery_dispatch_plan(
+    store: &StateStore,
+    attempt_id: &str,
+    task_id: &str,
+    attempts: &Path,
+) -> Result<Result<LaunchPlan, &'static str>, SupervisorError> {
+    let held = |reason| Ok(Err(reason));
+    let Some(plan) = private_bytes(&attempts.join(format!("{attempt_id}.plan.json")))
+        .and_then(|bytes| serde_json::from_slice::<LaunchPlan>(&bytes).ok())
+    else {
+        return held("missing or invalid plan");
+    };
+    if plan.task_id != task_id
+        || plan.attempt_id != attempt_id
+        || plan.session_id != task_id
+        || plan.config_revision.is_empty()
+    {
+        return held("plan identity mismatch");
+    }
+    let Some(launch) = store.intent_payload(task_id, attempt_id, "launch")? else {
+        return held("missing launch intent");
+    };
+    if serde_json::from_str::<LaunchPlan>(&launch).ok().as_ref() != Some(&plan) {
+        return held("launch intent mismatch");
+    }
+    let Some(dispatch) = store.intent_payload(task_id, attempt_id, "supervisor_dispatch")? else {
+        return held("missing dispatch intent");
+    };
+    if serde_json::from_str::<LaunchPlan>(&dispatch).ok().as_ref() != Some(&plan) {
+        return held("dispatch plan mismatch");
+    }
+
+    Ok(Ok(plan))
+}
+
+#[cfg(unix)]
+fn reconciliation_dispatch_plan(
+    store: &StateStore,
+    attempt_id: &str,
+    task_id: &str,
+    attempts: &Path,
+) -> Result<Result<LaunchPlan, &'static str>, SupervisorError> {
+    let plan: LaunchPlan = match private_bytes(&attempts.join(format!("{attempt_id}.plan.json")))
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+    {
+        Some(plan) => plan,
+        None => return Ok(Err("missing or invalid plan")),
+    };
+    if plan.task_id != task_id
+        || plan.attempt_id != attempt_id
+        || plan.session_id != task_id
+        || plan.config_revision.is_empty()
+    {
+        return Ok(Err("plan identity mismatch"));
+    }
+    let Some(persisted) = store.intent_payload(task_id, attempt_id, "launch")? else {
+        return Ok(Err("missing launch intent"));
+    };
+    if serde_json::from_str::<LaunchPlan>(&persisted).ok().as_ref() != Some(&plan) {
+        return Ok(Err("launch intent mismatch"));
+    }
+    let Some(dispatch) = store.intent_payload(task_id, attempt_id, "supervisor_dispatch")? else {
+        return Ok(Err("missing dispatch intent"));
+    };
+    if serde_json::from_str::<LaunchPlan>(&dispatch).ok().as_ref() != Some(&plan) {
+        return Ok(Err("dispatch plan mismatch"));
+    }
+    Ok(Ok(plan))
+}
+
+#[cfg(unix)]
+fn recovery_evidence_unchanged(
+    store: &StateStore,
+    task_id: &str,
+    attempt_id: &str,
+    attempts: &Path,
+    snapshot: RecoverySnapshot<'_>,
+) -> Result<RecoveryInspection, SupervisorError> {
+    let RecoverySnapshot {
+        plan,
+        child: child_file,
+        sent,
+        ready,
+        receipt_path,
+        tracked,
+        supervisor,
+    } = snapshot;
+    let held = |reason| Ok(RecoveryInspection::Held(reason));
+    let Some(current_plan) = private_bytes(&attempts.join(format!("{attempt_id}.plan.json")))
+        .and_then(|bytes| serde_json::from_slice::<LaunchPlan>(&bytes).ok())
+    else {
+        return held("plan changed during recovery inspection");
+    };
+    let Some(current_child) = private_bytes(&attempts.join(format!("{attempt_id}.child.json")))
+        .and_then(|bytes| serde_json::from_slice::<ChildIdentity>(&bytes).ok())
+    else {
+        return held("child identity changed during recovery inspection");
+    };
+    if &current_plan != plan
+        || &current_child != child_file
+        || store
+            .evidence_payload(task_id, Some(attempt_id), "gate_sent")?
+            .as_deref()
+            != Some(sent)
+        || store
+            .evidence_payload(task_id, Some(attempt_id), "supervisor_ready")?
+            .as_deref()
+            != Some(ready)
+        || !matches!(
+            fs::symlink_metadata(receipt_path),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound
+        )
+        || store.latest_attempt(task_id)?.as_deref() != Some(attempt_id)
+        || !store.active_attempt_reservation(task_id, attempt_id)?
+    {
+        return held("recovery evidence changed during inspection");
+    }
+    let current_tracked = store
+        .evidence_payloads(task_id, attempt_id, "tracked_descendant")?
+        .into_iter()
+        .map(|payload| recorded_process(&payload))
+        .collect::<Option<Vec<_>>>();
+    let Some(current_tracked) = current_tracked else {
+        return held("tracked descendant evidence changed during inspection");
+    };
+    if current_tracked != tracked
+        || !registered_processes_absent(&current_child, supervisor, &current_tracked)
+    {
+        return held("registered process absence proof changed during inspection");
+    }
+    Ok(RecoveryInspection::Quiescent)
+}
+
+#[cfg(unix)]
+struct RecoverySnapshot<'a> {
+    plan: &'a LaunchPlan,
+    child: &'a ChildIdentity,
+    sent: &'a str,
+    ready: &'a str,
+    receipt_path: &'a Path,
+    tracked: &'a [ProcessIdentity],
+    supervisor: &'a ProcessIdentity,
 }
