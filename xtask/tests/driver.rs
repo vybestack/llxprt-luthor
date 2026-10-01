@@ -186,3 +186,18 @@ fn workflow_requires_both_platforms_same_command_and_fail_on_skips() {
         assert!(!yaml.contains(alternate));
     }
 }
+
+#[test]
+fn nested_child_harness_output_is_not_a_single_confirmed_contract_result() {
+    let contract = xtask::contracts::Contract {
+        scenario: "isolated process contract".into(),
+        target: "supervisor".into(),
+        test: "registered".into(),
+    };
+    let result = Outcome {
+        code: 0,
+        stdout: "test registered ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;\ntest registered ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;".into(),
+        stderr: String::new(),
+    };
+    assert!(xtask::contracts::verify(&contract, &result).is_err());
+}

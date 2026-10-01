@@ -3285,15 +3285,15 @@ fn same_binary_ready_without_release_does_not_launch_worker() {
 fn registered_shim_stays_gated_and_survives_supervisor_crash_after_release() {
     #[cfg(target_os = "linux")]
     if std::env::var_os("LUTHOR_STOP_TEST_SUBREAPER").is_none() {
-        let status = Command::new(std::env::current_exe().unwrap())
+        let output = Command::new(std::env::current_exe().unwrap())
             .arg("--exact")
             .arg("registered_shim_stays_gated_and_survives_supervisor_crash_after_release")
             .env("LUTHOR_STOP_TEST_SUBREAPER", "1")
-            .status()
+            .output()
             .unwrap();
         assert!(
-            status.success(),
-            "isolated subreaper test process failed: {status}"
+            output.status.success(),
+            "isolated subreaper test process failed: {output:?}"
         );
         return;
     }
