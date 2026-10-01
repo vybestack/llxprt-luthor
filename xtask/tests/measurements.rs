@@ -20,6 +20,7 @@ fn alternatives_take_the_maximum_and_cross_file_types_replace_local_totals() {
             report("tests/domain.rs", 40, 3),
         ],
         feedback: BTreeSet::from([("a".into(), "b".into())]),
+        cyclic: BTreeSet::from([("a".into(), "b".into()), ("b".into(), "a".into())]),
         suppressions: vec![],
         types: BTreeMap::from([("src::domain::Record".into(), (50, 4))]),
     };
@@ -37,6 +38,8 @@ fn alternatives_take_the_maximum_and_cross_file_types_replace_local_totals() {
         && m.key.ends_with(":type_methods")
         && m.value == 3));
     assert_eq!(values["coupling::a->b:feedback"], 1);
+    assert_eq!(values["coupling::b->a:cyclic_edge"], 1);
+    assert!(!values.contains_key("coupling::a->b:cyclic_edge"));
     assert_eq!(
         actual
             .iter()

@@ -1389,6 +1389,18 @@ mod failed_log_stop_tests {
 }
 
 #[cfg(unix)]
+fn drain_worker_log(
+    reader: impl Read,
+    mut writer: impl Write,
+    sync: &File,
+) -> std::io::Result<u64> {
+    let bytes = std::io::copy(&mut std::io::BufReader::new(reader), &mut writer)?;
+    writer.flush()?;
+    sync.sync_all()?;
+    Ok(bytes)
+}
+
+#[cfg(unix)]
 fn run_gated_child_control<R, O, E>(
     plan: &LaunchPlan,
     mut gate: R,
@@ -1493,7 +1505,6 @@ where
             return Err(error);
         }
     };
-    let pid = child.id();
     let boot_identity = registered.boot_identity.clone();
     let child_start_identity = registered.start_identity.clone();
     let stdout = child.stdout.take().expect("piped stdout");
@@ -1502,21 +1513,11 @@ where
     let (sender, receiver) = mpsc::channel();
     let out_sender = sender.clone();
     let out_thread = thread::spawn(move || {
-        let result =
-            std::io::copy(&mut std::io::BufReader::new(stdout), &mut out_file).and_then(|bytes| {
-                out_file.flush()?;
-                out_sync.sync_all()?;
-                Ok(bytes)
-            });
+        let result = drain_worker_log(stdout, &mut out_file, &out_sync);
         let _ = out_sender.send(("stdout", result));
     });
     let err_thread = thread::spawn(move || {
-        let result =
-            std::io::copy(&mut std::io::BufReader::new(stderr), &mut err_file).and_then(|bytes| {
-                err_file.flush()?;
-                err_sync.sync_all()?;
-                Ok(bytes)
-            });
+        let result = drain_worker_log(stderr, &mut err_file, &err_sync);
         let _ = sender.send(("stderr", result));
     });
     let mut stop_signals = Vec::new();
@@ -1588,7 +1589,7 @@ where
     };
     let receipt = ExitReceipt {
         attempt_id: plan.attempt_id.clone(),
-        child_pid: pid,
+        child_pid: registered.pid,
         boot_identity,
         child_start_identity,
         exit_code: status.code(),

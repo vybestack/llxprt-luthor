@@ -5,6 +5,16 @@
     "test": "requires_membership_direct_open_unassigned_exact_label_and_milestone"
   },
   {
+    "scenario": "wrong milestone on open issue rejected",
+    "target": "eligibility",
+    "test": "valid_open_issue_with_wrong_milestone_is_not_eligible"
+  },
+  {
+    "scenario": "assigned issue rejected",
+    "target": "eligibility",
+    "test": "valid_open_issue_assigned_to_another_user_is_not_eligible"
+  },
+  {
     "scenario": "conflicting sources rejected",
     "target": "eligibility",
     "test": "incompatible_overlapping_source_rules_are_rejected"

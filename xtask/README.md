@@ -76,10 +76,25 @@ count towards LOC, not invented expanded functions. Include_str/include_bytes
 are data, not code. xtask quote!/syn Token! are parser tooling only. New custom
 macros require an explicit policy/fixture review, never an automatic fallback.
 
-The module graph resolves crate/self/super imports and qualified paths, and
-records deterministic DFS feedback edges. Three existing production feedback
-edges are narrowly keyed in `debt.json`. New cycles/edges fail. Each structural
-outlier and edge is owned by [remediation issue #6](https://github.com/vybestack/llxprt-luthor/issues/6).
+The module graph resolves crate/self/super imports and qualified paths. An edge
+is cyclic exactly when its target can reach its source in the complete graph.
+Every cyclic edge is measured once at value 1 with new-code limit 0. The
+deterministic feedback subset uses `:feedback`; the original three feedback
+keys and ceilings remain unchanged. Cyclic edges outside that subset use
+`coupling::<from>-><to>:cyclic_edge`. The feedback subset is computed by
+accepting sorted edges unless they close a cycle in the accepted graph.
+Complete reachability uses all edges, including feedback, so adding a path
+behind an owned feedback edge cannot hide growth.
+A newly cyclic edge needs its own reviewed ledger entry. Removing an edge or
+breaking its return path makes its entry stale; same-size replacement produces
+both stale and unowned keys. Acyclic growth does not create cycle debt.
+
+The cyclic portion of `measurement.json` now includes the three already
+existing non-feedback cyclic edges: `src/pr_evidence->src/state`,
+`src/state->src/supervisor`, and `src/supervisor->src/worktree`. The initial
+structural snapshot is retained. Each added debt entry has measured ceiling 1;
+no original feedback key or numeric ceiling changed. Each structural outlier
+and edge is owned by [remediation issue #6](https://github.com/vybestack/llxprt-luthor/issues/6).
 `owners.json` is reviewed GitHub evidence (open, assigned acoliver); ownership
 is validated in Rust offline, not through a Python script or a hidden network
 fallback. Refresh evidence explicitly when ownership changes. Stale entries,

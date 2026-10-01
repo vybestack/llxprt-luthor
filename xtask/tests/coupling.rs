@@ -62,3 +62,15 @@ fn imported_module_aliases_cannot_hide_dependency_edges() {
     let edges = edges("a", "use b as B; fn f() { B::run(); }", &modules).unwrap();
     assert_eq!(edges, BTreeSet::from([("a".into(), "b".into())]));
 }
+
+#[test]
+fn nested_generic_paths_are_scanned_in_both_directions() {
+    let modules = BTreeSet::from(["a".into(), "b".into()]);
+    let a = edges("a", "fn f(_: Option<crate::b::B>) {}", &modules).unwrap();
+    let b = edges("b", "fn f(_: Option<Box<crate::a::A>>) {}", &modules).unwrap();
+    assert!(a.contains(&("a".into(), "b".into())));
+    assert!(b.contains(&("b".into(), "a".into())));
+    let mut combined = a;
+    combined.extend(b);
+    assert_eq!(feedback_edges(&combined).len(), 1);
+}

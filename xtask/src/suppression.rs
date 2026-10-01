@@ -8,18 +8,35 @@ use syn::{
 
 pub fn check(path: &str, source: &str) -> Result<Vec<String>, String> {
     let syntax = syn::parse_file(source).map_err(|e| format!("{path}: parse error: {e}"))?;
+    crate::macro_policy::validate_bindings(path, &syntax)?;
     let mut visitor = Suppressions {
         path,
         findings: Vec::new(),
+        errors: Vec::new(),
     };
     visitor.visit_file(&syntax);
     visitor.findings.sort();
-    Ok(visitor.findings)
+    if visitor.errors.is_empty() {
+        Ok(visitor.findings)
+    } else {
+        Err(visitor.errors.join("\n"))
+    }
+}
+
+pub(crate) fn attribute_findings(path: &str, attribute: &syn::Attribute) -> Vec<String> {
+    let mut visitor = Suppressions {
+        path,
+        findings: Vec::new(),
+        errors: Vec::new(),
+    };
+    visitor.visit_attribute(attribute);
+    visitor.findings
 }
 
 struct Suppressions<'a> {
     path: &'a str,
     findings: Vec<String>,
+    errors: Vec<String>,
 }
 
 impl Suppressions<'_> {
@@ -50,6 +67,11 @@ impl Suppressions<'_> {
 }
 
 impl<'ast> Visit<'ast> for Suppressions<'_> {
+    fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+        if let Err(error) = crate::macro_policy::visit_inputs(self, mac, self.path) {
+            self.errors.push(error);
+        }
+    }
     fn visit_attribute(&mut self, attribute: &'ast syn::Attribute) {
         self.meta(&attribute.meta);
         visit::visit_attribute(self, attribute);

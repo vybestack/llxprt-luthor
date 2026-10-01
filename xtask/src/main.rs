@@ -18,7 +18,8 @@ fn execute() -> Result<i32, String> {
     xtask::environment::clippy_policy(
         &fs::read_to_string(root.join("clippy.toml")).map_err(|e| e.to_string())?,
     )?;
-    let scan = scan::scan(&root, &["src", "tests", "xtask/src", "xtask/tests"])?;
+    let roots = xtask::inventory::scan_roots(&root)?;
+    let scan = scan::scan(&root, &roots)?;
     let measurements = xtask::measurements::collect(&scan, Limits::default());
     if mode == "measure" {
         println!(

@@ -1,11 +1,26 @@
 [
   {
+    "key": "coupling::src/pr_evidence->src/state:cyclic_edge",
+    "value": 1,
+    "limit": 0
+  },
+  {
     "key": "coupling::src/state->src/pr_evidence:feedback",
     "value": 1,
     "limit": 0
   },
   {
+    "key": "coupling::src/state->src/supervisor:cyclic_edge",
+    "value": 1,
+    "limit": 0
+  },
+  {
     "key": "coupling::src/supervisor->src/state:feedback",
+    "value": 1,
+    "limit": 0
+  },
+  {
+    "key": "coupling::src/supervisor->src/worktree:cyclic_edge",
     "value": 1,
     "limit": 0
   },

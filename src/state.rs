@@ -154,6 +154,17 @@ pub struct ExitPrEvidence {
     pub status: PausePrStatus,
 }
 
+#[derive(Serialize)]
+pub(crate) struct OperatorRecoveryAudit<'a> {
+    pub(crate) actor: &'a str,
+    pub(crate) reason: &'a str,
+    pub(crate) observed_at_unix_secs: u64,
+    pub(crate) os_ids: Vec<serde_json::Value>,
+    pub(crate) supervisor: serde_json::Value,
+    pub(crate) child: serde_json::Value,
+    pub(crate) tracked_os_identities: Vec<serde_json::Value>,
+}
+
 impl From<&Config> for EffectiveConfigSnapshot {
     fn from(config: &Config) -> Self {
         Self {
@@ -305,6 +316,79 @@ fn validate_verified_open_pr(
         return Err(StateError::LaunchBlocked);
     }
     Ok(())
+}
+
+fn validate_telemetry_lost_audit(
+    audit: &str,
+    lookup: &ExitPrEvidence,
+    expected_status: PausePrStatus,
+) -> Result<(), StateError> {
+    let audit_value: serde_json::Value = serde_json::from_str(audit)?;
+    if lookup.status != expected_status
+        || lookup.observed_at_unix_secs == 0
+        || ["actor", "reason"].iter().any(|key| {
+            audit_value
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .is_none_or(|value| value.trim().is_empty())
+        })
+        || audit_value
+            .get("observed_at_unix_secs")
+            .and_then(serde_json::Value::as_u64)
+            .is_none_or(|value| value == 0)
+        || audit_value
+            .get("os_ids")
+            .and_then(serde_json::Value::as_array)
+            .is_none_or(|values| values.is_empty())
+        || audit_value.get("exit_code").is_some()
+        || audit_value.get("signal").is_some()
+    {
+        return Err(StateError::LaunchBlocked);
+    }
+    Ok(())
+}
+
+fn transition_telemetry_lost_attempt(
+    tx: &Transaction<'_>,
+    task_id: &str,
+    attempt_id: &str,
+    task_phase: &str,
+) -> Result<(), StateError> {
+    tx.execute(
+        "UPDATE attempts SET lifecycle='telemetry_lost',outcome=NULL WHERE task_id=?1 AND id=?2 AND lifecycle='launch_intended' AND outcome IS NULL",
+        params![task_id, attempt_id],
+    )?;
+    if tx.changes() != 1 {
+        return Err(StateError::LaunchBlocked);
+    }
+    tx.execute(
+        "UPDATE reservations SET status='released' WHERE task_id=?1 AND attempt_id=?2 AND status='reserved'",
+        params![task_id, attempt_id],
+    )?;
+    if tx.changes() != 1 {
+        return Err(StateError::LaunchBlocked);
+    }
+    tx.execute(
+        "UPDATE tasks SET state=?2 WHERE id=?1 AND state='held'",
+        params![task_id, task_phase],
+    )?;
+    if tx.changes() != 1 {
+        return Err(StateError::LaunchBlocked);
+    }
+    Ok(())
+}
+
+fn matches_completed_exit(
+    task_id: &str,
+    evidence: &str,
+    outcome: &str,
+    persisted_outcome: Option<&str>,
+    reservation: &str,
+    exits: &[(String, String)],
+) -> bool {
+    persisted_outcome == Some(outcome)
+        && reservation == "released"
+        && exits == [(task_id.to_owned(), evidence.to_owned())]
 }
 
 impl StateStore {
@@ -1203,30 +1287,7 @@ impl StateStore {
         audit: &str,
         lookup: &ExitPrEvidence,
     ) -> Result<(), StateError> {
-        let audit_value: serde_json::Value = serde_json::from_str(audit)?;
-        if lookup.status != PausePrStatus::Absent
-            || lookup.observed_at_unix_secs == 0
-            || audit_value
-                .get("actor")
-                .and_then(serde_json::Value::as_str)
-                .is_none_or(|value| value.trim().is_empty())
-            || audit_value
-                .get("reason")
-                .and_then(serde_json::Value::as_str)
-                .is_none_or(|value| value.trim().is_empty())
-            || audit_value
-                .get("observed_at_unix_secs")
-                .and_then(serde_json::Value::as_u64)
-                .is_none_or(|value| value == 0)
-            || audit_value
-                .get("os_ids")
-                .and_then(serde_json::Value::as_array)
-                .is_none_or(|values| values.is_empty())
-            || audit_value.get("exit_code").is_some()
-            || audit_value.get("signal").is_some()
-        {
-            return Err(StateError::LaunchBlocked);
-        }
+        validate_telemetry_lost_audit(audit, lookup, PausePrStatus::Absent)?;
         let tx = self.connection.transaction()?;
         let latest: Option<String> = tx
             .query_row(
@@ -1284,27 +1345,7 @@ impl StateStore {
             "INSERT INTO evidence(task_id,attempt_id,kind,payload) VALUES(?1,?2,'exit_pr_lookup',?3)",
             params![task_id, attempt_id, serde_json::to_string(lookup)?],
         )?;
-        tx.execute(
-            "UPDATE attempts SET lifecycle='telemetry_lost',outcome=NULL WHERE task_id=?1 AND id=?2 AND lifecycle='launch_intended' AND outcome IS NULL",
-            params![task_id, attempt_id],
-        )?;
-        if tx.changes() != 1 {
-            return Err(StateError::LaunchBlocked);
-        }
-        tx.execute(
-            "UPDATE reservations SET status='released' WHERE task_id=?1 AND attempt_id=?2 AND status='reserved'",
-            params![task_id, attempt_id],
-        )?;
-        if tx.changes() != 1 {
-            return Err(StateError::LaunchBlocked);
-        }
-        tx.execute(
-            "UPDATE tasks SET state='held' WHERE id=?1 AND state='held'",
-            [task_id],
-        )?;
-        if tx.changes() != 1 {
-            return Err(StateError::LaunchBlocked);
-        }
+        transition_telemetry_lost_attempt(&tx, task_id, attempt_id, "held")?;
         tx.commit()?;
         Ok(())
     }
@@ -1317,31 +1358,8 @@ impl StateStore {
         lookup: &ExitPrEvidence,
         proof: &VerifiedOpenPr,
     ) -> Result<(), StateError> {
-        let audit_value: serde_json::Value = serde_json::from_str(audit)?;
-        if lookup.status != PausePrStatus::Open
-            || lookup.observed_at_unix_secs == 0
-            || audit_value
-                .get("actor")
-                .and_then(serde_json::Value::as_str)
-                .is_none_or(|value| value.trim().is_empty())
-            || audit_value
-                .get("reason")
-                .and_then(serde_json::Value::as_str)
-                .is_none_or(|value| value.trim().is_empty())
-            || audit_value
-                .get("observed_at_unix_secs")
-                .and_then(serde_json::Value::as_u64)
-                .is_none_or(|value| value == 0)
-            || audit_value
-                .get("os_ids")
-                .and_then(serde_json::Value::as_array)
-                .is_none_or(|values| values.is_empty())
-            || audit_value.get("exit_code").is_some()
-            || audit_value.get("signal").is_some()
-            || proof.id == 0
-            || proof.attempt_id != attempt_id
-            || proof.observed_at == 0
-        {
+        validate_telemetry_lost_audit(audit, lookup, PausePrStatus::Open)?;
+        if proof.id == 0 || proof.attempt_id != attempt_id || proof.observed_at == 0 {
             return Err(StateError::LaunchBlocked);
         }
         let tx = self
@@ -1401,27 +1419,7 @@ impl StateStore {
             "INSERT INTO evidence(task_id,attempt_id,kind,payload) VALUES(?1,?2,'verified_open_pr',?3)",
             params![task_id, attempt_id, serde_json::to_string(proof)?],
         )?;
-        tx.execute(
-            "UPDATE attempts SET lifecycle='telemetry_lost',outcome=NULL WHERE task_id=?1 AND id=?2 AND lifecycle='launch_intended' AND outcome IS NULL",
-            params![task_id, attempt_id],
-        )?;
-        if tx.changes() != 1 {
-            return Err(StateError::LaunchBlocked);
-        }
-        tx.execute(
-            "UPDATE reservations SET status='released' WHERE task_id=?1 AND attempt_id=?2 AND status='reserved'",
-            params![task_id, attempt_id],
-        )?;
-        if tx.changes() != 1 {
-            return Err(StateError::LaunchBlocked);
-        }
-        tx.execute(
-            "UPDATE tasks SET state='pr_complete' WHERE id=?1 AND state='held'",
-            [task_id],
-        )?;
-        if tx.changes() != 1 {
-            return Err(StateError::LaunchBlocked);
-        }
+        transition_telemetry_lost_attempt(&tx, task_id, attempt_id, "pr_complete")?;
         tx.commit()?;
         Ok(())
     }
@@ -1446,14 +1444,18 @@ impl StateStore {
         if let Some((ref lifecycle, ref persisted, ref reservation)) = current
             && lifecycle == "completed"
         {
-            let exits: Vec<(String, String)> = tx.prepare(
-                "SELECT task_id,payload FROM evidence WHERE attempt_id=?1 AND kind='attempt_exit'"
-            )?.query_map([attempt_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+            let exits: Vec<(String, String)> = tx
+                .prepare("SELECT task_id,payload FROM evidence WHERE attempt_id=?1 AND kind='attempt_exit'")?
+                .query_map([attempt_id], |row| Ok((row.get(0)?, row.get(1)?)))?
                 .collect::<Result<_, _>>()?;
-            if persisted.as_deref() == Some(outcome)
-                && reservation == "released"
-                && exits == [(task_id.to_owned(), evidence.to_owned())]
-            {
+            if matches_completed_exit(
+                task_id,
+                evidence,
+                outcome,
+                persisted.as_deref(),
+                reservation,
+                &exits,
+            ) {
                 tx.commit()?;
                 return Ok(());
             }
@@ -1784,3 +1786,6 @@ impl StateStore {
             .transpose()
     }
 }
+
+#[cfg(test)]
+mod recovery_tests;

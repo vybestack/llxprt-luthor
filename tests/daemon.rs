@@ -105,6 +105,17 @@ fn preview_missing_target_fails_without_state_or_writes() {
 fn preview_selected_target_prints_summary_without_state_or_writes() {
     let dir = tempdir();
     let (config, path) = fixture(dir.path(), "acoliver");
+    let sentinel = dir.path().join("worker-invoked");
+    let worker = dir.path().join("worker");
+    fs::write(
+        &worker,
+        format!("#!/bin/sh\ntouch '{}'\n", sentinel.display()),
+    )
+    .unwrap();
+    fs::set_permissions(&worker, fs::Permissions::from_mode(0o755)).unwrap();
+    let mut configured: Value = serde_json::from_slice(&fs::read(&config).unwrap()).unwrap();
+    configured["initial"]["executable"] = json!(worker);
+    fs::write(&config, configured.to_string()).unwrap();
     let result = run(&config, &path, &["--issues", "7"]);
     assert!(
         result.status.success(),
@@ -115,6 +126,8 @@ fn preview_selected_target_prints_summary_without_state_or_writes() {
     assert_eq!(summary["candidates"][0]["issue_number"], 7);
     assert_eq!(summary["mode"], "preview");
     assert!(!dir.path().join("state").exists());
+    assert!(!dir.path().join("worktrees").exists());
+    assert!(!sentinel.exists());
     let calls = fs::read_to_string(dir.path().join("calls")).unwrap();
     assert!(!calls.contains("user"));
     assert!(!calls.contains("PATCH") && !calls.contains("POST"));

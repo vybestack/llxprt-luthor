@@ -1,3 +1,4 @@
+use crate::state::OperatorRecoveryAudit;
 use crate::{
     claim::{self, AssignmentWriter, ClaimError},
     config::Config,
@@ -220,15 +221,23 @@ pub(crate) fn verify_completion_claim<P: ProjectReader>(
     Ok(())
 }
 
-#[derive(Serialize)]
-struct OperatorRecoveryAudit<'a> {
-    actor: &'a str,
-    reason: &'a str,
-    observed_at_unix_secs: u64,
-    os_ids: Vec<serde_json::Value>,
-    supervisor: serde_json::Value,
-    child: serde_json::Value,
-    tracked_os_identities: Vec<serde_json::Value>,
+impl VerifiedOpenPr {
+    fn from_recovery_lookup<Q: PullRequestReader>(
+        store: &StateStore,
+        task_id: &str,
+        attempt_id: &str,
+        prs: &mut Q,
+        pr: crate::github::pull_request::PullRequestEvidence,
+        observed_at_unix_secs: u64,
+    ) -> Result<VerifiedOpenPr, &'static str> {
+        let login = prs
+            .authenticated_identity()
+            .map_err(|_| "PR identity unavailable")?;
+        let expected = expected_for_task(store, task_id, prs, &login)
+            .map_err(|_| "PR evidence unavailable")?;
+        VerifiedOpenPr::from_matching(pr, &expected, &login, attempt_id, observed_at_unix_secs)
+            .map_err(|_| "PR verification failed")
+    }
 }
 
 pub fn operator_recover_missing_receipt<P: ProjectReader, Q: PullRequestReader>(
@@ -270,26 +279,17 @@ pub fn operator_recover_missing_receipt<P: ProjectReader, Q: PullRequestReader>(
             if observed_at_unix_secs == 0 {
                 return Ok(held("invalid recovery timestamp"));
             }
-            let verified = (|| {
-                let login = prs
-                    .authenticated_identity()
-                    .map_err(|_| "PR identity unavailable")?;
-                let expected = expected_for_task(store, task_id, prs, &login)
-                    .map_err(|_| "PR evidence unavailable")?;
-                VerifiedOpenPr::from_matching(
-                    *pr,
-                    &expected,
-                    &login,
-                    attempt_id,
-                    observed_at_unix_secs,
-                )
-                .map_err(|_| "PR verification failed")
-            })();
-            let verified = match verified {
-                Ok(proof) => proof,
+            match VerifiedOpenPr::from_recovery_lookup(
+                store,
+                task_id,
+                attempt_id,
+                prs,
+                *pr,
+                observed_at_unix_secs,
+            ) {
+                Ok(proof) => (PausePrStatus::Open, Some(proof)),
                 Err(reason) => return Ok(held(reason)),
-            };
-            (PausePrStatus::Open, Some(verified))
+            }
         }
         Ok(LookupResult::Ambiguous(_)) => return Ok(held("pull request lookup is ambiguous")),
         Err(_) => return Ok(held("pull request lookup failed")),
@@ -297,8 +297,7 @@ pub fn operator_recover_missing_receipt<P: ProjectReader, Q: PullRequestReader>(
     let Some(payload) = store.evidence_payload(task_id, None, "worktree_created")? else {
         return Ok(held("worktree evidence is missing"));
     };
-    let snapshot: crate::state::WorktreeIdentity = serde_json::from_str(&payload)?;
-    if worktree::verify_snapshot(&snapshot).is_err() {
+    if worktree::verify_snapshot(&serde_json::from_str(&payload)?).is_err() {
         return Ok(held("worktree snapshot changed"));
     }
     if let Err(error) = verify_completion_claim(projects, &selection) {

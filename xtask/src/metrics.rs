@@ -46,6 +46,7 @@ pub struct Report {
     pub file_lines: usize,
     pub functions: Vec<Function>,
     pub types: BTreeMap<String, (usize, usize)>,
+    pub macro_types: BTreeSet<String>,
     pub modules: BTreeMap<String, usize>,
 }
 
@@ -76,6 +77,7 @@ fn mark(span: Span, lines: &mut BTreeSet<usize>) {
 
 pub fn analyze(path: &str, source: &str) -> Result<Report, String> {
     let syntax = syn::parse_file(source).map_err(|e| format!("{path}: parse error: {e}"))?;
+    crate::macro_policy::validate_bindings(path, &syntax)?;
     let mut collector = Collector {
         report: Report {
             path: path.into(),
@@ -85,6 +87,7 @@ pub fn analyze(path: &str, source: &str) -> Result<Report, String> {
         module: "root".into(),
         owner: None,
         errors: Vec::new(),
+        macro_depth: 0,
     };
     collector.visit_file(&syntax);
     if collector.errors.is_empty() {
@@ -99,14 +102,19 @@ struct Collector {
     module: String,
     owner: Option<String>,
     errors: Vec<String>,
+    macro_depth: usize,
 }
 
 impl Collector {
     fn function(&mut self, sig: &syn::Signature, block: &syn::Block, tokens: TokenStream) {
         let _ = tokens;
-        let lines = effective_lines(quote::quote!(#sig #block));
-        let mut complexity = Complexity::default();
+        let lines = effective_lines(::quote::quote!(#sig #block));
+        let mut complexity = Complexity {
+            path: self.report.path.clone(),
+            ..Complexity::default()
+        };
         complexity.visit_block(block);
+        self.errors.extend(complexity.errors);
         let symbol = format!(
             "{}::{}",
             self.owner.as_ref().unwrap_or(&self.module),
@@ -146,13 +154,21 @@ impl<'ast> Visit<'ast> for Collector {
     }
     fn visit_item_trait(&mut self, item: &'ast syn::ItemTrait) {
         let old = self.owner.take();
-        self.owner = Some(format!("{}::{}", self.module, item.ident));
+        let owner = format!("{}::{}", self.module, item.ident);
+        if self.macro_depth > 0 {
+            self.report.macro_types.insert(owner.clone());
+        }
+        self.owner = Some(owner);
         visit::visit_item_trait(self, item);
         self.owner = old;
     }
     fn visit_item_impl(&mut self, item: &'ast syn::ItemImpl) {
         let old = self.owner.take();
-        self.owner = Some(format!("{}::{}", self.module, type_identity(&item.self_ty)));
+        let owner = format!("{}::{}", self.module, type_identity(&item.self_ty));
+        if self.macro_depth > 0 {
+            self.report.macro_types.insert(owner.clone());
+        }
+        self.owner = Some(owner);
         visit::visit_item_impl(self, item);
         self.owner = old;
     }
@@ -163,6 +179,12 @@ impl<'ast> Visit<'ast> for Collector {
         self.module = old;
     }
     fn visit_attribute(&mut self, attribute: &'ast syn::Attribute) {
+        if self.macro_depth > 0 {
+            self.errors.extend(crate::suppression::attribute_findings(
+                &self.report.path,
+                attribute,
+            ));
+        }
         if attribute.path().is_ident("path")
             || (attribute.path().is_ident("cfg_attr")
                 && attribute.to_token_stream().to_string().contains("path"))
@@ -183,66 +205,19 @@ impl<'ast> Visit<'ast> for Collector {
         ));
     }
     fn visit_macro(&mut self, mac: &'ast syn::Macro) {
-        let allowed = [
-            "format",
-            "format_args",
-            "println",
-            "eprintln",
-            "print",
-            "eprint",
-            "write",
-            "writeln",
-            "vec",
-            "assert",
-            "assert_eq",
-            "assert_ne",
-            "debug_assert",
-            "debug_assert_eq",
-            "debug_assert_ne",
-            "matches",
-            "panic",
-            "unreachable",
-            "todo",
-            "env",
-            "option_env",
-            "include_str",
-            "include_bytes",
-            "json",
-            "params",
-            "thread_local",
-        ];
-        let name = mac
-            .path
-            .segments
-            .last()
-            .map(|p| p.ident.to_string())
-            .unwrap_or_default();
-        if !allowed.contains(&name.as_str())
-            && !(self.report.path.starts_with("xtask/")
-                && ["quote", "Token"].contains(&name.as_str()))
-        {
-            self.errors.push(format!(
-                "{}: unsupported macro {name}; expansion required",
-                self.report.path
-            ));
+        let path = self.report.path.clone();
+        self.macro_depth += 1;
+        if let Err(error) = crate::macro_policy::visit_inputs(self, mac, &path) {
+            self.errors.push(error);
         }
-        if crate::macro_policy::hidden_source(mac.tokens.clone())
-            && !(self.report.path.starts_with("xtask/")
-                && ["quote", "Token"].contains(&name.as_str()))
-        {
-            self.errors.push(format!(
-                "{}:{} {}: macro input contains hidden source or suppression",
-                self.report.path,
-                mac.path.segments[0].ident.span().start().line,
-                name
-            ));
-        }
-        visit::visit_macro(self, mac);
+        self.macro_depth -= 1;
     }
 }
 
 #[derive(Default)]
 struct Complexity {
+    path: String,
+    errors: Vec<String>,
     branches: usize,
     cognitive: usize,
     depth: usize,
@@ -256,6 +231,12 @@ impl Complexity {
 }
 
 impl<'ast> Visit<'ast> for Complexity {
+    fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+        let path = self.path.clone();
+        if let Err(error) = crate::macro_policy::visit_inputs(self, mac, &path) {
+            self.errors.push(error);
+        }
+    }
     fn visit_expr_if(&mut self, expression: &'ast syn::ExprIf) {
         self.branch();
         if expression.else_branch.is_some() {

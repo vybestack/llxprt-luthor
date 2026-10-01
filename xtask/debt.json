@@ -1,11 +1,26 @@
 [
   {
+    "key": "coupling::src/pr_evidence->src/state:cyclic_edge",
+    "ceiling": 1,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
     "key": "coupling::src/state->src/pr_evidence:feedback",
     "ceiling": 1,
     "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
   },
   {
+    "key": "coupling::src/state->src/supervisor:cyclic_edge",
+    "ceiling": 1,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
     "key": "coupling::src/supervisor->src/state:feedback",
+    "ceiling": 1,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "coupling::src/supervisor->src/worktree:cyclic_edge",
     "ceiling": 1,
     "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
   },
@@ -36,7 +51,7 @@
   },
   {
     "key": "src/cli.rs::root::live_process:cyclomatic",
-    "ceiling": 31,
+    "ceiling": 30,
     "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
   },
   {
@@ -45,23 +60,18 @@
     "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
   },
   {
-    "key": "src/cli.rs::root::show:cyclomatic",
-    "ceiling": 32,
-    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
-  },
-  {
     "key": "src/cli.rs::root::show:function_lines",
-    "ceiling": 156,
+    "ceiling": 107,
     "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
   },
   {
     "key": "src/cli.rs::root::status:function_lines",
-    "ceiling": 143,
+    "ceiling": 100,
     "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
   },
   {
     "key": "src/cli.rs::root:module_lines",
-    "ceiling": 977,
+    "ceiling": 973,
     "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
   },
   {
@@ -96,7 +106,7 @@
   },
   {
     "key": "src/coordinator.rs::file:file_lines",
-    "ceiling": 1240,
+    "ceiling": 1239,
     "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
   },
   {
@@ -116,7 +126,7 @@
   },
   {
     "key": "src/coordinator.rs::root::operator_recover_missing_receipt:function_lines",
-    "ceiling": 125,
+    "ceiling": 115,
     "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
   },
   {
@@ -141,7 +151,7 @@
   },
   {
     "key": "src/coordinator.rs::root:module_lines",
-    "ceiling": 824,
+    "ceiling": 814,
     "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
   },
   {
@@ -195,33 +205,8 @@
     "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
   },
   {
-    "key": "src/main.rs::root::mutate:cyclomatic",
-    "ceiling": 28,
-    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
-  },
-  {
     "key": "src/state.rs::file:file_lines",
     "ceiling": 1722,
-    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
-  },
-  {
-    "key": "src/state.rs::root::StateStore::commit_telemetry_lost_pr_completion:cyclomatic",
-    "ceiling": 34,
-    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
-  },
-  {
-    "key": "src/state.rs::root::StateStore::commit_telemetry_lost_pr_completion:function_lines",
-    "ceiling": 116,
-    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
-  },
-  {
-    "key": "src/state.rs::root::StateStore::commit_telemetry_lost_recovery:cyclomatic",
-    "ceiling": 31,
-    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
-  },
-  {
-    "key": "src/state.rs::root::StateStore::commit_telemetry_lost_recovery:function_lines",
-    "ceiling": 112,
     "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
   },
   {
@@ -235,18 +220,13 @@
     "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
   },
   {
-    "key": "src/state.rs::root::StateStore::reconcile_verified_exit:cyclomatic",
-    "ceiling": 26,
-    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
-  },
-  {
     "key": "src/state.rs::root::validate_verified_open_pr:cyclomatic",
     "ceiling": 27,
     "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
   },
   {
     "key": "src/state.rs::state::StateStore:type_lines",
-    "ceiling": 1406,
+    "ceiling": 1324,
     "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
   },
   {
@@ -301,12 +281,12 @@
   },
   {
     "key": "src/supervisor.rs::root::run_gated_child_control:cyclomatic",
-    "ceiling": 59,
+    "ceiling": 56,
     "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
   },
   {
     "key": "src/supervisor.rs::root::run_gated_child_control:function_lines",
-    "ceiling": 212,
+    "ceiling": 201,
     "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
   },
   {
@@ -321,7 +301,7 @@
   },
   {
     "key": "src/supervisor.rs::root:module_lines",
-    "ceiling": 1904,
+    "ceiling": 1903,
     "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
   },
   {

@@ -7,6 +7,7 @@ pub fn collect(scan: &Scan, limits: Limits) -> Vec<Measurement> {
         .iter()
         .flat_map(|r| r.measurements(limits))
         .collect();
+    // Production type totals, including block-local types, use resolved declaration identities.
     measurements.retain(|m| {
         !(m.key.starts_with("src/") || m.key.starts_with("xtask/src/"))
             || (!m.key.ends_with(":type_lines") && !m.key.ends_with(":type_methods"))
@@ -28,6 +29,16 @@ pub fn collect(scan: &Scan, limits: Limits) -> Vec<Measurement> {
         value: 1,
         limit: 0,
     }));
+    // Preserve feedback keys while charging every other cyclic edge exactly once.
+    measurements.extend(
+        scan.cyclic
+            .difference(&scan.feedback)
+            .map(|(a, b)| Measurement {
+                key: format!("coupling::{a}->{b}:cyclic_edge"),
+                value: 1,
+                limit: 0,
+            }),
+    );
     let mut maxima: std::collections::BTreeMap<String, Measurement> =
         std::collections::BTreeMap::new();
     for m in measurements {
