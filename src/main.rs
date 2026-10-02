@@ -120,7 +120,16 @@ fn discover(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     }
     Ok(())
 }
-fn mutate(command: &str, mut values: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
+struct ControlArguments {
+    task_id: String,
+    attempt_id: Option<String>,
+    config_path: String,
+}
+
+fn control_arguments(
+    command: &str,
+    mut values: Vec<String>,
+) -> Result<ControlArguments, Box<dyn std::error::Error>> {
     let task_id = values.first().cloned().ok_or("task id is required")?;
     values.remove(0);
     let mut attempt_id = None;
@@ -132,7 +141,20 @@ fn mutate(command: &str, mut values: Vec<String>) -> Result<(), Box<dyn std::err
     if values.len() != 2 || values[0] != "--config" || values[1].starts_with('-') {
         return Err("expected TASK [--attempt ID] --config PATH".into());
     }
-    let config = Config::from_json(&fs::read_to_string(&values[1])?)?;
+    Ok(ControlArguments {
+        task_id,
+        attempt_id,
+        config_path: values.remove(1),
+    })
+}
+
+fn mutate(command: &str, values: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
+    let ControlArguments {
+        task_id,
+        attempt_id,
+        config_path,
+    } = control_arguments(command, values)?;
+    let config = Config::from_json(&fs::read_to_string(config_path)?)?;
     let mut store = StateStore::open(&config.state_root, config.capacity)?;
     if store.task_phase(&task_id)?.is_none() {
         return Err("task not found".into());
@@ -457,8 +479,7 @@ fn retry(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         |_| "retry configuration invalid (check worker flags and --max-tool-calls: -1 or 1..512)",
     )?;
     let mut store = StateStore::open(&config.state_root, config.capacity)?;
-    store
-        .retry_context(&args[0], &args[2])
+    luthor::state::retry_context_for_task(&store, &args[0], &args[2])
         .map_err(|_| "retry requires the latest verified natural exit in attention")?;
     let selection = store
         .selection_evidence(&args[0])?

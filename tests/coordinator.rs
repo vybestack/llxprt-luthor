@@ -81,7 +81,11 @@ impl Fixture {
             ],
         };
         let config = Config {
-            state_root: dir.path().join("state"),
+            state_root: dir
+                .path()
+                .strip_prefix(std::env::current_dir().unwrap())
+                .unwrap()
+                .join("state"),
             worktree_root: dir.path().join("private"),
             capacity,
             assignment_login: "bot".into(),

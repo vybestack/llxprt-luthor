@@ -1,0 +1,157 @@
+[
+  {
+    "scenario": "eligibility exact membership milestone marker and unassigned",
+    "target": "eligibility",
+    "test": "requires_membership_direct_open_unassigned_exact_label_and_milestone"
+  },
+  {
+    "scenario": "wrong milestone on open issue rejected",
+    "target": "eligibility",
+    "test": "valid_open_issue_with_wrong_milestone_is_not_eligible"
+  },
+  {
+    "scenario": "assigned issue rejected",
+    "target": "eligibility",
+    "test": "valid_open_issue_assigned_to_another_user_is_not_eligible"
+  },
+  {
+    "scenario": "conflicting sources rejected",
+    "target": "eligibility",
+    "test": "incompatible_overlapping_source_rules_are_rejected"
+  },
+  {
+    "scenario": "wrong project rejected",
+    "target": "eligibility",
+    "test": "issue_from_another_project_is_not_eligible"
+  },
+  {
+    "scenario": "preview without writes assignment worktree launch",
+    "target": "daemon",
+    "test": "preview_selected_target_prints_summary_without_state_or_writes"
+  },
+  {
+    "scenario": "durable intent before assignment",
+    "target": "claim",
+    "test": "assignment_observes_durable_claim_intent_before_external_write"
+  },
+  {
+    "scenario": "changed source evidence forbids assignment",
+    "target": "claim",
+    "test": "changed_optional_issue_milestone_refuses_claim_before_assignment"
+  },
+  {
+    "scenario": "ambiguous assignment holds without retry",
+    "target": "claim",
+    "test": "held_on_ambiguous_assignment_never_reissues_write"
+  },
+  {
+    "scenario": "PR uncertainty blocks launch",
+    "target": "coordinator",
+    "test": "new_pr_or_failed_lookup_blocks_before_reservation"
+  },
+  {
+    "scenario": "uncertain launch retains capacity without retry",
+    "target": "coordinator",
+    "test": "failed_launch_retains_reservation_and_second_schedule_cannot_launch"
+  },
+  {
+    "scenario": "capacity and issue identity reject duplicate attempts",
+    "target": "coordinator",
+    "test": "distinct_tasks_keep_selection_and_repository_issue_uniqueness"
+  },
+  {
+    "scenario": "uncertain dispatch never silently retries",
+    "target": "coordinator",
+    "test": "failed_resume_dispatch_retains_reservation_and_never_retries"
+  },
+  {
+    "scenario": "worktree identity mismatch never adopted",
+    "target": "worktree",
+    "test": "duplicate_task_and_foreign_path_or_branch_are_not_adopted"
+  },
+  {
+    "scenario": "unfinished worktree intent never reused",
+    "target": "worktree",
+    "test": "interruption_after_root_creation_leaves_durable_intent_and_never_adopts_a_path"
+  },
+  {
+    "scenario": "registration without release cannot execute",
+    "target": "supervisor",
+    "test": "same_binary_ready_without_release_does_not_launch_worker"
+  },
+  {
+    "scenario": "child gated before registration and release",
+    "target": "supervisor",
+    "test": "registered_shim_stays_gated_and_survives_supervisor_crash_after_release"
+  },
+  {
+    "scenario": "uncertain ownership retains reservations",
+    "target": "supervisor",
+    "test": "uncertain_child_group_never_reads_pr_or_frees_capacity"
+  },
+  {
+    "scenario": "interrupted stop retains reservation",
+    "target": "supervisor",
+    "test": "stop_term_has_durable_intent_and_keeps_slot_until_reconcile"
+  },
+  {
+    "scenario": "pr_complete only from verified PR and source claim",
+    "target": "supervisor",
+    "test": "natural_exit_matching_pr_is_proved_and_persisted"
+  },
+  {
+    "scenario": "changed source claim forbids pr_complete",
+    "target": "supervisor",
+    "test": "natural_exit_stale_assignee_is_held_despite_matching_open_pr"
+  },
+  {
+    "scenario": "exact tracker author head base repository and task branch",
+    "target": "pr_evidence",
+    "test": "rejects_wrong_link_author_head_repository_target_repository_base_and_closed_pr"
+  },
+  {
+    "scenario": "draft and red checks advisory acceptance",
+    "target": "pr_evidence",
+    "test": "creates_typed_proof_for_open_draft_with_red_checks"
+  },
+  {
+    "scenario": "PR ambiguity never confirmed absence",
+    "target": "claim",
+    "test": "malformed_details_and_page_failures_never_become_absent"
+  },
+  {
+    "scenario": "platform supported confined Unix socket",
+    "target": "confined_socket",
+    "test": "confined_relative_socket_connects_without_accepting_overlong_absolute_paths"
+  },
+  {
+    "scenario": "audited changed-revision retry reconciles without rewriting prior history or extra worktree",
+    "target": "supervisor",
+    "test": "retry_natural_exit_audits_current_argv_preserves_history_and_reconciles_new_revision"
+  },
+  {
+    "scenario": "retry refusals preserve history and forbid reservations and launches",
+    "target": "supervisor",
+    "test": "retry_refusals_never_reserve_or_launch_or_rewrite_selection"
+  },
+  {
+    "scenario": "historical startup revalidation preserves immutable evidence and launches once",
+    "target": "supervisor",
+    "test": "historical_startup_exit_revalidation_launches_once_preserving_all_old_rows_and_files"
+  },
+  {
+    "scenario": "explicit retry CLI uses corrected config without assignment or reselection",
+    "target": "retry_cli",
+    "test": "explicit_retry_cli_uses_private_config_and_never_reassigns_or_reselects"
+  },
+  {
+    "scenario": "historical retry CLI retains exact old boot and terminal evidence",
+    "target": "retry_cli",
+    "test": "historical_terminal_exit_cli_preserves_original_evidence_and_launches_corrected_worker"
+  },
+  {
+    "scenario": "every natural-exit retry requires its exact audit before worker launch and capacity release even after original revision reuse",
+    "target": "supervisor",
+    "test": "supervisor_support::retry_cases::identity::two_retries_require_exact_audit_even_when_revision_returns_to_selection"
+  }
+]

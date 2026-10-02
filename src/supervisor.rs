@@ -1,14 +1,14 @@
 //! Launch planning and the Unix gated child runner.
 use crate::{
-    config::{Config, ConfigError, RenderedCommand, TaskValues},
+    config::{Config, RenderedCommand, TaskValues},
     state::{
-        ExitPrEvidence, RetryAuthorization, SelectionEvidence, StateError, StateStore,
-        WorktreeIdentity, WorktreeIntent, WorktreeRecord,
+        ExitPrEvidence, RetryAuthorization, SelectionEvidence, StateStore, WorktreeIdentity,
+        WorktreeIntent, WorktreeRecord,
     },
-    worktree::{self, WorktreeError},
+    worktree::{self},
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::{
     env,
     fs::{self, File, OpenOptions},
@@ -27,282 +27,26 @@ use std::{
     },
     process::Child,
 };
-use thiserror::Error;
 
+mod error;
+mod evidence;
+mod processes;
+mod reconciliation;
+mod recovery;
 mod terminal_exit;
-pub use terminal_exit::TerminalExitProof;
-
-#[derive(Debug, Error)]
-pub enum SupervisorError {
-    #[error(transparent)]
-    State(#[from] StateError),
-    #[error(transparent)]
-    Worktree(#[from] WorktreeError),
-    #[error(transparent)]
-    Sql(#[from] rusqlite::Error),
-    #[error(transparent)]
-    Config(#[from] ConfigError),
-    #[error(transparent)]
-    Io(#[from] std::io::Error),
-    #[error(transparent)]
-    Json(#[from] serde_json::Error),
-    #[error("launch plan does not match verified task or worktree")]
-    Conflict,
-    #[error(
-        "supervisor READY handshake timed out; reservation held for identity-safe reconciliation"
-    )]
-    ReadyTimeout,
-    #[error("supervisor execution is unavailable; reservation held for reconciliation")]
-    ExecutionUnavailable,
-    #[error("process gate closed without release")]
-    GateClosed,
-    #[error("stop cannot prove ownership; reservation held")]
-    StopUnavailable,
-    #[error("cannot establish process identity")]
-    IdentityUnavailable,
-    #[cfg(unix)]
-    #[error("stop socket path exceeds Unix socket path capacity")]
-    StopSocketPathTooLong,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RecoveryInspection {
-    Held(&'static str),
-    Quiescent,
-}
-
-/// Read-only preliminary check. Quiescence is withheld until all durable identity proofs are available.
-pub fn inspect_recovery_quiescence(
-    store: &StateStore,
-    task_id: &str,
-    attempt_id: &str,
-) -> Result<RecoveryInspection, SupervisorError> {
-    if !valid_attempt(attempt_id) {
-        return Err(SupervisorError::Conflict);
-    }
-    if store.latest_attempt(task_id)?.as_deref() != Some(attempt_id) {
-        return Ok(RecoveryInspection::Held(
-            "attempt is not the latest attempt",
-        ));
-    }
-    let receipt_path = store
-        .root()
-        .join("attempts")
-        .join(format!("{attempt_id}.receipt.json"));
-    match fs::symlink_metadata(&receipt_path) {
-        Ok(_) => return Ok(RecoveryInspection::Held("attempt receipt path exists")),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(_) => {
-            return Ok(RecoveryInspection::Held(
-                "attempt receipt path is unreadable",
-            ));
-        }
-    }
-    if !store.active_attempt_reservation(task_id, attempt_id)? {
-        return Ok(RecoveryInspection::Held(
-            "attempt is not the active reserved attempt",
-        ));
-    }
-    if store
-        .evidence_payload(task_id, Some(attempt_id), "attempt_exit")?
-        .is_some()
-    {
-        return Ok(RecoveryInspection::Held("attempt exit receipt exists"));
-    }
-
-    let held = |reason| Ok(RecoveryInspection::Held(reason));
-    let attempts = store.root().join("attempts");
-    use std::os::unix::fs::PermissionsExt;
-    let Ok(dir) = fs::symlink_metadata(&attempts) else {
-        return held("missing attempts directory");
-    };
-    if !dir.file_type().is_dir() || dir.permissions().mode() & 0o777 != 0o700 {
-        return held("unsafe attempts directory");
-    }
-    let Some(plan) = private_bytes(&attempts.join(format!("{attempt_id}.plan.json")))
-        .and_then(|bytes| serde_json::from_slice::<LaunchPlan>(&bytes).ok())
-    else {
-        return held("missing or invalid plan");
-    };
-    if plan.task_id != task_id
-        || plan.attempt_id != attempt_id
-        || plan.session_id != task_id
-        || plan.config_revision.is_empty()
-    {
-        return held("plan identity mismatch");
-    }
-    let Some(launch) = store.intent_payload(task_id, attempt_id, "launch")? else {
-        return held("missing launch intent");
-    };
-    if serde_json::from_str::<LaunchPlan>(&launch).ok().as_ref() != Some(&plan) {
-        return held("launch intent mismatch");
-    }
-    let Some(dispatch) = store.intent_payload(task_id, attempt_id, "supervisor_dispatch")? else {
-        return held("missing dispatch intent");
-    };
-    if serde_json::from_str::<LaunchPlan>(&dispatch).ok().as_ref() != Some(&plan) {
-        return held("dispatch plan mismatch");
-    }
-
-    let held = |reason| Ok(RecoveryInspection::Held(reason));
-    let Some(worktree) = store.evidence_payload(task_id, None, "worktree_created")? else {
-        return held("missing worktree evidence");
-    };
-    let Some(worktree) = serde_json::from_str::<WorktreeIdentity>(&worktree).ok() else {
-        return held("invalid worktree evidence");
-    };
-    let record = store.worktree_record(task_id)?;
-    if worktree.path != plan.worktree
-        || record.as_ref().is_none_or(|r| {
-            r.identity.as_ref() != Some(&worktree)
-                || r.intent.path != worktree.path
-                || r.intent.branch != worktree.branch
-                || r.intent.base != worktree.base
-                || r.intent.repository != worktree.repository
-        })
-        || !worktree::matches_snapshot(&worktree, &plan.expected_worktree).unwrap_or(false)
-    {
-        return held("worktree identity mismatch");
-    }
-    if worktree::verify_snapshot(&plan.expected_worktree).is_err() {
-        return held("worktree snapshot mismatch");
-    }
-    let Some(selection) = store.selection_evidence(task_id)? else {
-        return held("missing selection");
-    };
-    if store.selection_for_attempt(&plan).is_err()
-        || selection.candidate.mapping.code_repository != worktree.repository
-    {
-        return held("selection mismatch");
-    }
-    let Some(claim) = store.evidence_payload(task_id, None, "claim_verified")? else {
-        return held("missing claim evidence");
-    };
-    if claim.trim().is_empty() || claim != selection.effective_config.assignment_login {
-        return held("claim identity mismatch");
-    }
-
-    let Some(child_file) = private_bytes(&attempts.join(format!("{attempt_id}.child.json")))
-        .and_then(|bytes| serde_json::from_slice::<ChildIdentity>(&bytes).ok())
-    else {
-        return held("missing or invalid child identity");
-    };
-    let Some(child_evidence) =
-        store.evidence_payload(task_id, Some(attempt_id), "child_registered")?
-    else {
-        return held("missing child registration");
-    };
-    if serde_json::from_str::<ChildIdentity>(&child_evidence)
-        .ok()
-        .as_ref()
-        != Some(&child_file)
-        || child_file.pid == 0
-        || i32::try_from(child_file.pid).is_err()
-        || child_file.group_id != child_file.pid
-        || child_file.boot_identity.trim().is_empty()
-        || child_file.start_identity.trim().is_empty()
-    {
-        return held("child registration mismatch");
-    }
-    if store
-        .evidence_payload(task_id, Some(attempt_id), "log_failure")?
-        .is_some()
-    {
-        return held("log drain failed");
-    }
-    if attempts
-        .join(format!("{attempt_id}.supervisor-error.json"))
-        .exists()
-    {
-        return held("supervisor error receipt exists");
-    }
-    let Some(release) = store.intent_payload(task_id, attempt_id, "gate_release")? else {
-        return held("missing gate release decision");
-    };
-    let Some(ready) = store.evidence_payload(task_id, Some(attempt_id), "supervisor_ready")? else {
-        return held("missing or invalid supervisor identity");
-    };
-    let Some(supervisor) = recorded_process(&ready) else {
-        return held("missing or invalid supervisor identity");
-    };
-    if recorded_process(&release).as_ref() != Some(&supervisor) {
-        return held("supervisor identity contradiction");
-    }
-    let Some(sent) = store.evidence_payload(task_id, Some(attempt_id), "gate_sent")? else {
-        return held("missing gate sent evidence");
-    };
-    if recorded_process(&sent).as_ref() != Some(&supervisor) {
-        return held("supervisor identity contradiction");
-    }
-    if supervisor.pid == child_file.pid {
-        return held("supervisor and child identity contradiction");
-    }
-
-    let tracked = store
-        .evidence_payloads(task_id, attempt_id, "tracked_descendant")?
-        .into_iter()
-        .map(|payload| recorded_process(&payload))
-        .collect::<Option<Vec<_>>>();
-    let Some(tracked) = tracked else {
-        return held("invalid tracked descendant identity");
-    };
-    if !registered_processes_absent(&child_file, &supervisor, &tracked) {
-        return held("registered processes may still be live");
-    }
-
-    let Some(current_plan) = private_bytes(&attempts.join(format!("{attempt_id}.plan.json")))
-        .and_then(|bytes| serde_json::from_slice::<LaunchPlan>(&bytes).ok())
-    else {
-        return held("plan changed during recovery inspection");
-    };
-    let Some(current_child) = private_bytes(&attempts.join(format!("{attempt_id}.child.json")))
-        .and_then(|bytes| serde_json::from_slice::<ChildIdentity>(&bytes).ok())
-    else {
-        return held("child identity changed during recovery inspection");
-    };
-    if current_plan != plan
-        || current_child != child_file
-        || store
-            .evidence_payload(task_id, Some(attempt_id), "gate_sent")?
-            .as_deref()
-            != Some(&sent)
-        || store
-            .evidence_payload(task_id, Some(attempt_id), "supervisor_ready")?
-            .as_deref()
-            != Some(&ready)
-        || !matches!(
-            fs::symlink_metadata(&receipt_path),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound
-        )
-        || store.latest_attempt(task_id)?.as_deref() != Some(attempt_id)
-        || !store.active_attempt_reservation(task_id, attempt_id)?
-    {
-        return held("recovery evidence changed during inspection");
-    }
-    let current_tracked = store
-        .evidence_payloads(task_id, attempt_id, "tracked_descendant")?
-        .into_iter()
-        .map(|payload| recorded_process(&payload))
-        .collect::<Option<Vec<_>>>();
-    let Some(current_tracked) = current_tracked else {
-        return held("tracked descendant evidence changed during inspection");
-    };
-    if current_tracked != tracked
-        || !registered_processes_absent(&current_child, &supervisor, &current_tracked)
-    {
-        return held("registered process absence proof changed during inspection");
-    }
-    Ok(RecoveryInspection::Quiescent)
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionEnvironment {
-    pub home: PathBuf,
-    pub xdg_config_home: Option<PathBuf>,
-    pub xdg_data_home: Option<PathBuf>,
-    pub xdg_state_home: Option<PathBuf>,
-    pub llxprt_config_home: Option<PathBuf>,
-}
+#[cfg(unix)]
+pub(crate) use crate::model::{ChildIdentity, ProcessIdentity, recorded_process};
+pub use crate::model::{
+    ExitReceipt, LaunchPlan, Reconciliation, RecoveryInspection, SessionEnvironment,
+    TerminalExitProof,
+};
+pub use error::SupervisorError;
+#[cfg(unix)]
+pub(crate) use processes::verified_live_process;
+use processes::*;
+pub(crate) use reconciliation::recheck_retry_exit;
+pub use reconciliation::reconcile_attempt;
+pub use recovery::inspect_recovery_quiescence;
 
 impl SessionEnvironment {
     pub fn capture() -> Result<Self, SupervisorError> {
@@ -432,47 +176,6 @@ mod session_environment_tests {
             Err(SupervisorError::Conflict)
         ));
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LaunchPlan {
-    pub task_id: String,
-    pub attempt_id: String,
-    pub session_id: String,
-    pub worktree: PathBuf,
-    pub expected_worktree: WorktreeIdentity,
-    pub executable: PathBuf,
-    pub args: Vec<String>,
-    pub config_revision: String,
-    pub session_environment: SessionEnvironment,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Reconciliation {
-    Running,
-    Completed {
-        exit_code: Option<i32>,
-        signal: Option<i32>,
-    },
-    Held {
-        reason: String,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ExitReceipt {
-    pub attempt_id: String,
-    pub child_pid: u32,
-    pub boot_identity: String,
-    pub child_start_identity: String,
-    pub exit_code: Option<i32>,
-    pub signal: Option<i32>,
-    pub stdout_path: PathBuf,
-    pub stdout_bytes: u64,
-    pub stderr_path: PathBuf,
-    pub stderr_bytes: u64,
-    #[serde(default)]
-    pub stop_signals: Vec<i32>,
 }
 
 fn requires_pair(args: &[String], flag: &str, value: &str) -> bool {
@@ -743,13 +446,13 @@ pub(crate) fn prepare_retry(
         terminal_exit,
     } = authorization;
     let task_id = previous.task_id.as_str();
-    let first = store.initial_launch(task_id)?;
+    let first = crate::state::initial_launch(store, task_id)?;
     let first: LaunchPlan = serde_json::from_str(&first)?;
     let latest = previous;
     if !first.session_environment.matches_current()? {
         return Err(SupervisorError::Conflict);
     }
-    let mut selection = store.selection_for_attempt(previous)?;
+    let mut selection = crate::state::selection_for_attempt(store, previous)?;
     let previous_config = selection.effective_config.clone();
     selection.effective_config = config.into();
     let identity = worktree::verify_existing_worktree(store, task_id)?;
@@ -764,44 +467,9 @@ pub(crate) fn prepare_retry(
     {
         return Err(SupervisorError::Conflict);
     }
+    let RenderedCommand { executable, args } =
+        retry_command(&selection, task_id, attempt_id, &identity, &first, latest)?;
     let worktree = identity.path.clone();
-    let cwd = worktree.to_str().ok_or(SupervisorError::Conflict)?;
-    let values = TaskValues {
-        task_issue_number: selection.candidate.issue_number.to_string(),
-        task_repository: selection.candidate.repository.clone(),
-        task_issue_url: selection.candidate.issue_url.clone(),
-        task_id: task_id.to_owned(),
-        attempt_id: attempt_id.to_owned(),
-        worktree: cwd.to_owned(),
-    };
-    let RenderedCommand {
-        executable,
-        mut args,
-    } = selection.effective_config.resume.render(&values)?;
-    let raw_continuation = prompt(&args).ok_or(SupervisorError::Conflict)?;
-    if selection.effective_config.resume.args == selection.effective_config.initial.args
-        || !requires_pair(&args, "--session", task_id)
-        || !requires_pair(&args, "--cwd", cwd)
-        || raw_continuation.trim().is_empty()
-    {
-        return Err(SupervisorError::Conflict);
-    }
-    enforce_prompt(
-        &mut args,
-        PromptRequirements {
-            tracker_repository: &selection.candidate.repository,
-            issue_url: &selection.candidate.issue_url,
-            code_repository: &selection.candidate.mapping.code_repository,
-            base: &identity.base,
-            head_repository: &selection.candidate.mapping.allowed_pr_head_repository,
-            branch: &identity.branch,
-            remote: &identity.remote,
-            author: &selection.candidate.mapping.allowed_pr_author,
-            assignee: &selection.effective_config.assignment_login,
-        },
-    )?;
-    enforce_worktree_inspection(&mut args, "naturally exited worker")?;
-    ensure_distinct_resume_prompt(&first, latest, &args)?;
     let plan = LaunchPlan {
         task_id: task_id.to_owned(),
         attempt_id: attempt_id.to_owned(),
@@ -813,18 +481,21 @@ pub(crate) fn prepare_retry(
         config_revision: revision.to_owned(),
         session_environment: first.session_environment.clone(),
     };
-    store.hold_retry_intent(&RetryAuthorization {
-        actor: actor.to_owned(),
-        reason: reason.to_owned(),
-        previous_plan: previous.clone(),
-        previous_config,
-        config: config.into(),
-        plan: plan.clone(),
-        reservation: attempt_id.to_owned(),
-        pr,
-        source,
-        terminal_exit,
-    })?;
+    crate::state::hold_retry_intent(
+        store,
+        &RetryAuthorization {
+            actor: actor.to_owned(),
+            reason: reason.to_owned(),
+            previous_plan: previous.clone(),
+            previous_config,
+            config: config.into(),
+            plan: plan.clone(),
+            reservation: attempt_id.to_owned(),
+            pr,
+            source,
+            terminal_exit,
+        },
+    )?;
     Ok(plan)
 }
 
@@ -837,66 +508,6 @@ fn private_file(path: &Path) -> Result<File, SupervisorError> {
         options.mode(0o600);
     }
     Ok(options.open(path)?)
-}
-
-#[cfg(any(test, target_os = "macos"))]
-fn darwin_boot_identity(bytes: &[u8]) -> Result<String, SupervisorError> {
-    let uuid = std::str::from_utf8(bytes)
-        .map_err(|_| SupervisorError::IdentityUnavailable)?
-        .trim();
-    if uuid.len() != 36
-        || !uuid.bytes().enumerate().all(|(i, byte)| {
-            if matches!(i, 8 | 13 | 18 | 23) {
-                byte == b'-'
-            } else {
-                byte.is_ascii_hexdigit()
-            }
-        })
-        || uuid.bytes().all(|byte| byte == b'0' || byte == b'-')
-    {
-        return Err(SupervisorError::IdentityUnavailable);
-    }
-    Ok(format!(
-        "darwin-bootsessionuuid:{}",
-        uuid.to_ascii_lowercase()
-    ))
-}
-
-#[cfg(target_os = "macos")]
-fn identity(pid: u32) -> Result<(String, String), SupervisorError> {
-    let output = Command::new("/usr/sbin/sysctl")
-        .args(["-n", "kern.bootsessionuuid"])
-        .output()?;
-    if !output.status.success() {
-        return Err(SupervisorError::IdentityUnavailable);
-    }
-    let boot = darwin_boot_identity(&output.stdout)?;
-    let pid = i32::try_from(pid).map_err(|_| SupervisorError::IdentityUnavailable)?;
-    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
-    let size = std::mem::size_of_val(&info) as i32;
-    if unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, (&raw mut info).cast(), size) }
-        != size
-        || info.pbi_pid != pid as u32
-        || info.pbi_start_tvsec == 0
-    {
-        return Err(SupervisorError::IdentityUnavailable);
-    }
-    Ok((
-        boot,
-        format!("{}:{}", info.pbi_start_tvsec, info.pbi_start_tvusec),
-    ))
-}
-
-#[cfg(target_os = "linux")]
-fn identity(pid: u32) -> Result<(String, String), SupervisorError> {
-    let boot = fs::read_to_string("/proc/sys/kernel/random/boot_id")?;
-    let process = crate::platform::observe_linux_process(pid)?;
-    Ok((boot.trim().to_owned(), process.start_time_ticks))
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
-fn identity(_pid: u32) -> Result<(String, String), SupervisorError> {
-    Err(SupervisorError::IdentityUnavailable)
 }
 
 fn write_receipt(root: &Path, attempt: &str, receipt: &ExitReceipt) -> Result<(), SupervisorError> {
@@ -982,49 +593,6 @@ fn peer_pid(stream: &UnixStream) -> Result<u32, SupervisorError> {
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     Err(SupervisorError::StopUnavailable)
-}
-
-#[cfg(target_os = "macos")]
-fn zombie(pid: u32) -> bool {
-    let Ok(output) = Command::new("/bin/ps")
-        .args(["-o", "stat=", "-p", &pid.to_string()])
-        .output()
-    else {
-        return false;
-    };
-    output.status.success() && output.stdout.first() == Some(&b'Z')
-}
-
-#[cfg(target_os = "linux")]
-fn zombie(pid: u32) -> bool {
-    let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) else {
-        return false;
-    };
-    stat.rsplit_once(')')
-        .and_then(|(_, fields)| fields.split_whitespace().next())
-        == Some("Z")
-}
-
-#[cfg(unix)]
-fn group_absent(pid: i32) -> bool {
-    if unsafe { libc::kill(-pid, 0) } == 0 {
-        return false;
-    }
-    std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
-}
-
-#[cfg(unix)]
-fn matching_child(child: &ChildIdentity) -> bool {
-    let Ok(pid) = i32::try_from(child.pid) else {
-        return false;
-    };
-    child.pid != 0
-        && child.group_id == child.pid
-        && !child.boot_identity.trim().is_empty()
-        && !child.start_identity.trim().is_empty()
-        && identity(child.pid).ok().as_ref()
-            == Some(&(child.boot_identity.clone(), child.start_identity.clone()))
-        && unsafe { libc::getpgid(pid) } == pid
 }
 
 /// The coordinator may signal only a registered, currently verified dedicated
@@ -1630,6 +1198,18 @@ mod failed_log_stop_tests {
 }
 
 #[cfg(unix)]
+fn drain_worker_log(
+    reader: impl Read,
+    mut writer: impl Write,
+    sync: &File,
+) -> std::io::Result<u64> {
+    let bytes = std::io::copy(&mut std::io::BufReader::new(reader), &mut writer)?;
+    writer.flush()?;
+    sync.sync_all()?;
+    Ok(bytes)
+}
+
+#[cfg(unix)]
 fn run_gated_child_control<R, O, E>(
     plan: &LaunchPlan,
     mut gate: R,
@@ -1660,7 +1240,8 @@ where
     let mut command = Command::new(binary);
     command
         .arg("__worker_gate")
-        .arg(&plan_path)
+        // The worker gate changes cwd to the task worktree; preserve the plan's identity.
+        .arg(fs::canonicalize(&plan_path)?)
         .current_dir(&plan.worktree)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1733,7 +1314,6 @@ where
             return Err(error);
         }
     };
-    let pid = child.id();
     let boot_identity = registered.boot_identity.clone();
     let child_start_identity = registered.start_identity.clone();
     let stdout = child.stdout.take().expect("piped stdout");
@@ -1742,21 +1322,11 @@ where
     let (sender, receiver) = mpsc::channel();
     let out_sender = sender.clone();
     let out_thread = thread::spawn(move || {
-        let result =
-            std::io::copy(&mut std::io::BufReader::new(stdout), &mut out_file).and_then(|bytes| {
-                out_file.flush()?;
-                out_sync.sync_all()?;
-                Ok(bytes)
-            });
+        let result = drain_worker_log(stdout, &mut out_file, &out_sync);
         let _ = out_sender.send(("stdout", result));
     });
     let err_thread = thread::spawn(move || {
-        let result =
-            std::io::copy(&mut std::io::BufReader::new(stderr), &mut err_file).and_then(|bytes| {
-                err_file.flush()?;
-                err_sync.sync_all()?;
-                Ok(bytes)
-            });
+        let result = drain_worker_log(stderr, &mut err_file, &err_sync);
         let _ = sender.send(("stderr", result));
     });
     let mut stop_signals = Vec::new();
@@ -1828,7 +1398,7 @@ where
     };
     let receipt = ExitReceipt {
         attempt_id: plan.attempt_id.clone(),
-        child_pid: pid,
+        child_pid: registered.pid,
         boot_identity,
         child_start_identity,
         exit_code: status.code(),
@@ -1841,509 +1411,6 @@ where
     };
     write_receipt(store_root, &plan.attempt_id, &receipt)?;
     Ok(status)
-}
-#[cfg(unix)]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub(crate) struct ChildIdentity {
-    pub(crate) pid: u32,
-    pub(crate) boot_identity: String,
-    pub(crate) start_identity: String,
-    pub(crate) group_id: u32,
-}
-
-#[cfg(unix)]
-#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub(crate) struct ProcessIdentity {
-    pub(crate) pid: u32,
-    pub(crate) boot_identity: String,
-    pub(crate) start_identity: String,
-}
-
-#[cfg(unix)]
-pub(crate) fn recorded_process(payload: &str) -> Option<ProcessIdentity> {
-    let value: ProcessIdentity = serde_json::from_str(payload).ok()?;
-    (value.pid > 0
-        && i32::try_from(value.pid).is_ok()
-        && !value.boot_identity.trim().is_empty()
-        && !value.start_identity.trim().is_empty())
-    .then_some(value)
-}
-
-/// Proves the registered direct processes and their process groups are absent.
-/// Recorded known descendants are checked individually. This does not prove
-/// that a deliberately untracked descendant escaped into another group or
-/// session is absent; that remains an out-of-scope cooperative constraint.
-#[cfg(unix)]
-pub(crate) fn registered_processes_absent(
-    child: &ChildIdentity,
-    supervisor: &ProcessIdentity,
-    tracked: &[ProcessIdentity],
-) -> bool {
-    registered_process_absence(child, supervisor, tracked).is_ok()
-}
-
-#[cfg(unix)]
-fn registered_process_absence(
-    child: &ChildIdentity,
-    supervisor: &ProcessIdentity,
-    tracked: &[ProcessIdentity],
-) -> Result<(), &'static str> {
-    registered_process_absence_with(
-        child,
-        supervisor,
-        tracked,
-        || identity(std::process::id()).map(|(boot, _)| boot),
-        |pid| {
-            if unsafe { libc::kill(pid as libc::pid_t, 0) } == 0 {
-                return false;
-            }
-            std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
-        },
-        group_absent,
-    )
-}
-
-#[cfg(unix)]
-fn registered_process_absence_with(
-    child: &ChildIdentity,
-    supervisor: &ProcessIdentity,
-    tracked: &[ProcessIdentity],
-    current_boot: impl FnOnce() -> Result<String, SupervisorError>,
-    pid_absent: impl FnMut(u32) -> bool,
-    group_absent: impl FnMut(i32) -> bool,
-) -> Result<(), &'static str> {
-    validate_registered_identities(child, supervisor, tracked)?;
-    // Historical boottime contains no boot-session UUID to compare. Neither
-    // equal seconds nor present-day ESRCH probes can supply that missing link.
-    if child.boot_identity.starts_with("{ sec") {
-        return Err("historical Darwin boot identity cannot prove boot continuity");
-    }
-    let current = current_boot().map_err(|_| "current boot identity is unavailable")?;
-    if current != child.boot_identity {
-        return Err("registered boot identity differs from current boot");
-    }
-    probe_registered_absence(child, supervisor, tracked, pid_absent, group_absent)
-}
-
-#[cfg(unix)]
-fn validate_registered_identities(
-    child: &ChildIdentity,
-    supervisor: &ProcessIdentity,
-    tracked: &[ProcessIdentity],
-) -> Result<(), &'static str> {
-    let bounded = |boot: &str, start: &str| {
-        !boot.trim().is_empty()
-            && boot.len() <= 256
-            && !start.trim().is_empty()
-            && start.len() <= 64
-    };
-    if child.pid == 0
-        || supervisor.pid == 0
-        || i32::try_from(child.pid).is_err()
-        || i32::try_from(supervisor.pid).is_err()
-        || child.pid == supervisor.pid
-        || child.group_id != child.pid
-        || !bounded(&child.boot_identity, &child.start_identity)
-        || !bounded(&supervisor.boot_identity, &supervisor.start_identity)
-        || supervisor.boot_identity != child.boot_identity
-        || tracked.iter().any(|process| {
-            process.pid == 0
-                || i32::try_from(process.pid).is_err()
-                || !bounded(&process.boot_identity, &process.start_identity)
-                || process.boot_identity != child.boot_identity
-        })
-    {
-        return Err("registered process identity is invalid or contradictory");
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
-fn probe_registered_absence(
-    child: &ChildIdentity,
-    supervisor: &ProcessIdentity,
-    tracked: &[ProcessIdentity],
-    mut pid_absent: impl FnMut(u32) -> bool,
-    mut group_absent: impl FnMut(i32) -> bool,
-) -> Result<(), &'static str> {
-    if !pid_absent(child.pid)
-        || !pid_absent(supervisor.pid)
-        || !tracked.iter().all(|process| pid_absent(process.pid))
-    {
-        return Err("registered process is present or its absence is unproven");
-    }
-    if !group_absent(child.group_id as i32) || !group_absent(supervisor.pid as i32) {
-        return Err("registered process group is present or its absence is unproven");
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
-pub(crate) fn verified_live_process(child: &ChildIdentity, supervisor: &ProcessIdentity) -> bool {
-    let bounded = |boot: &str, start: &str| {
-        !boot.trim().is_empty()
-            && boot.len() <= 256
-            && !start.trim().is_empty()
-            && start.len() <= 64
-    };
-    child.pid != supervisor.pid
-        && bounded(&child.boot_identity, &child.start_identity)
-        && bounded(&supervisor.boot_identity, &supervisor.start_identity)
-        && matching_child(child)
-        && !zombie(child.pid)
-        && identity(supervisor.pid).ok().as_ref()
-            == Some(&(
-                supervisor.boot_identity.clone(),
-                supervisor.start_identity.clone(),
-            ))
-        && !zombie(supervisor.pid)
-        && unsafe { libc::getpgid(supervisor.pid as i32) } == supervisor.pid as i32
-}
-
-#[cfg(unix)]
-fn private_bytes(path: &Path) -> Option<Vec<u8>> {
-    use std::os::unix::fs::PermissionsExt;
-    let metadata = fs::symlink_metadata(path).ok()?;
-    if !metadata.file_type().is_file() || metadata.permissions().mode() & 0o077 != 0 {
-        return None;
-    }
-    fs::read(path).ok()
-}
-
-#[cfg(unix)]
-fn private_log_size(path: &Path) -> Option<u64> {
-    use std::os::unix::fs::PermissionsExt;
-    let metadata = fs::symlink_metadata(path).ok()?;
-    (metadata.file_type().is_file() && metadata.permissions().mode() & 0o077 == 0)
-        .then_some(metadata.len())
-}
-
-/// Only an exact durable exit with a proven absent process group releases capacity.
-#[cfg(unix)]
-pub fn reconcile_attempt(
-    store: &mut StateStore,
-    task_id: &str,
-    attempt_id: &str,
-) -> Result<Reconciliation, SupervisorError> {
-    reconcile_attempt_inner(store, task_id, attempt_id, None, false)
-}
-
-#[cfg(unix)]
-pub(crate) fn recheck_retry_exit(
-    store: &mut StateStore,
-    task_id: &str,
-    attempt_id: &str,
-    revalidate_terminal_exit: bool,
-    proof: &mut Option<TerminalExitProof>,
-) -> Result<Reconciliation, SupervisorError> {
-    reconcile_attempt_inner(
-        store,
-        task_id,
-        attempt_id,
-        Some(proof),
-        revalidate_terminal_exit,
-    )
-}
-
-#[cfg(unix)]
-fn reconcile_attempt_inner(
-    store: &mut StateStore,
-    task_id: &str,
-    attempt_id: &str,
-    terminal_exit: Option<&mut Option<TerminalExitProof>>,
-    revalidate_terminal_exit: bool,
-) -> Result<Reconciliation, SupervisorError> {
-    let recheck_processes = terminal_exit.is_some();
-    if !valid_attempt(attempt_id) {
-        return Err(SupervisorError::Conflict);
-    }
-    let held = |reason: &str| Reconciliation::Held {
-        reason: reason.into(),
-    };
-    let attempts = store.root().join("attempts");
-    use std::os::unix::fs::PermissionsExt;
-    let Ok(dir) = fs::symlink_metadata(&attempts) else {
-        return Ok(held("missing attempts directory"));
-    };
-    if !dir.file_type().is_dir() || dir.permissions().mode() & 0o777 != 0o700 {
-        return Ok(held("unsafe attempts directory"));
-    }
-    let plan: LaunchPlan = match private_bytes(&attempts.join(format!("{attempt_id}.plan.json")))
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-    {
-        Some(plan) => plan,
-        None => return Ok(held("missing or invalid plan")),
-    };
-    if plan.task_id != task_id
-        || plan.attempt_id != attempt_id
-        || plan.session_id != task_id
-        || plan.config_revision.is_empty()
-    {
-        return Ok(held("plan identity mismatch"));
-    }
-    let Some(persisted) = store.intent_payload(task_id, attempt_id, "launch")? else {
-        return Ok(held("missing launch intent"));
-    };
-    if serde_json::from_str::<LaunchPlan>(&persisted).ok().as_ref() != Some(&plan) {
-        return Ok(held("launch intent mismatch"));
-    }
-    let Some(dispatch) = store.intent_payload(task_id, attempt_id, "supervisor_dispatch")? else {
-        return Ok(held("missing dispatch intent"));
-    };
-    if serde_json::from_str::<LaunchPlan>(&dispatch).ok().as_ref() != Some(&plan) {
-        return Ok(held("dispatch plan mismatch"));
-    }
-    let Some(worktree) = store.evidence_payload(task_id, None, "worktree_created")? else {
-        return Ok(held("missing worktree evidence"));
-    };
-    let Some(worktree) = serde_json::from_str::<WorktreeIdentity>(&worktree).ok() else {
-        return Ok(held("invalid worktree evidence"));
-    };
-    let record = store.worktree_record(task_id)?;
-    if worktree.path != plan.worktree
-        || record.as_ref().is_none_or(|r| {
-            r.identity.as_ref() != Some(&worktree)
-                || r.intent.path != worktree.path
-                || r.intent.branch != worktree.branch
-                || r.intent.base != worktree.base
-                || r.intent.repository != worktree.repository
-        })
-    {
-        return Ok(held("worktree identity mismatch"));
-    }
-    let Some(selection) = store.selection_evidence(task_id)? else {
-        return Ok(held("missing selection"));
-    };
-    if store.selection_for_attempt(&plan).is_err()
-        || selection.candidate.mapping.code_repository != worktree.repository
-    {
-        return Ok(held("selection mismatch"));
-    }
-    let Some(claim) = store.evidence_payload(task_id, None, "claim_verified")? else {
-        return Ok(held("missing claim evidence"));
-    };
-    if claim.trim().is_empty() || claim != selection.effective_config.assignment_login {
-        return Ok(held("claim identity mismatch"));
-    }
-    let Some(child_file) = private_bytes(&attempts.join(format!("{attempt_id}.child.json")))
-        .and_then(|bytes| serde_json::from_slice::<ChildIdentity>(&bytes).ok())
-    else {
-        return Ok(held("missing or invalid child identity"));
-    };
-    let Some(child_evidence) =
-        store.evidence_payload(task_id, Some(attempt_id), "child_registered")?
-    else {
-        return Ok(held("missing child registration"));
-    };
-    if serde_json::from_str::<ChildIdentity>(&child_evidence)
-        .ok()
-        .as_ref()
-        != Some(&child_file)
-        || child_file.pid == 0
-        || child_file.group_id != child_file.pid
-        || child_file.boot_identity.is_empty()
-        || child_file.start_identity.is_empty()
-    {
-        return Ok(held("child registration mismatch"));
-    }
-    if store
-        .evidence_payload(task_id, Some(attempt_id), "log_failure")?
-        .is_some()
-    {
-        return Ok(held("log drain failed"));
-    }
-    let Some(release) = store.intent_payload(task_id, attempt_id, "gate_release")? else {
-        return Ok(held("missing gate release decision"));
-    };
-    let Some(ready) = store.evidence_payload(task_id, Some(attempt_id), "supervisor_ready")? else {
-        return Ok(held("missing or invalid supervisor identity"));
-    };
-    let Some(supervisor) = recorded_process(&ready) else {
-        return Ok(held("missing or invalid supervisor identity"));
-    };
-    if recorded_process(&release).as_ref() != Some(&supervisor) {
-        return Ok(held("supervisor identity contradiction"));
-    }
-    let sent = store.evidence_payload(task_id, Some(attempt_id), "gate_sent")?;
-    if sent.is_some() && sent.as_deref().and_then(recorded_process).as_ref() != Some(&supervisor) {
-        return Ok(held("supervisor identity contradiction"));
-    }
-    if supervisor.pid == child_file.pid {
-        return Ok(held("supervisor and child identity contradiction"));
-    }
-    let tracked = store
-        .evidence_payloads(task_id, attempt_id, "tracked_descendant")?
-        .into_iter()
-        .map(|payload| recorded_process(&payload))
-        .collect::<Option<Vec<_>>>();
-    let Some(tracked) = tracked else {
-        return Ok(held("invalid tracked descendant identity"));
-    };
-    let receipt_path = attempts.join(format!("{attempt_id}.receipt.json"));
-    if !receipt_path.exists() {
-        if sent.is_none()
-            || !store.active_attempt_reservation(task_id, attempt_id)?
-            || store.stop_intent(task_id, attempt_id)?.is_some()
-            || attempts
-                .join(format!("{attempt_id}.supervisor-error.json"))
-                .exists()
-        {
-            return Ok(held("live worker identity or reservation unverified"));
-        }
-        if registered_processes_absent(&child_file, &supervisor, &tracked) {
-            return Ok(held(
-                "receipt missing; registered processes absent; operator recovery required",
-            ));
-        }
-        if !verified_live_process(&child_file, &supervisor) {
-            return Ok(held("live worker identity or reservation unverified"));
-        }
-        return Ok(Reconciliation::Running);
-    }
-    if recheck_processes
-        && !matches!(fs::symlink_metadata(attempts.join(format!("{attempt_id}.supervisor-error.json"))),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound)
-    {
-        return Ok(held("supervisor error receipt exists"));
-    }
-    let receipt: ExitReceipt =
-        match private_bytes(&receipt_path).and_then(|bytes| serde_json::from_slice(&bytes).ok()) {
-            Some(receipt) => receipt,
-            None => return Ok(held("missing or invalid receipt")),
-        };
-    let stdout = attempts.join(format!("{attempt_id}.stdout.log"));
-    let stderr = attempts.join(format!("{attempt_id}.stderr.log"));
-    if receipt.attempt_id != attempt_id
-        || receipt.child_pid != child_file.pid
-        || receipt.boot_identity != child_file.boot_identity
-        || receipt.child_start_identity != child_file.start_identity
-        || receipt.child_pid == 0
-        || i32::try_from(receipt.child_pid).is_err()
-        || receipt.boot_identity.trim().is_empty()
-        || receipt.child_start_identity.trim().is_empty()
-        || receipt.exit_code.is_some() == receipt.signal.is_some()
-        || receipt.stdout_path != stdout
-        || receipt.stderr_path != stderr
-    {
-        return Ok(held("receipt identity or shape mismatch"));
-    }
-    if private_log_size(&stdout) != Some(receipt.stdout_bytes)
-        || private_log_size(&stderr) != Some(receipt.stderr_bytes)
-    {
-        return Ok(held("missing, unsafe or incomplete logs"));
-    }
-    let evidence = serde_json::to_string(&receipt)?;
-    let outcome = format!(
-        "exit_code={:?};signal={:?}",
-        receipt.exit_code, receipt.signal
-    );
-    let completed = Reconciliation::Completed {
-        exit_code: receipt.exit_code,
-        signal: receipt.signal,
-    };
-    if store.reconciled_exit(task_id, attempt_id, &evidence, &outcome)? && !recheck_processes {
-        return Ok(completed);
-    }
-    if recheck_processes
-        && revalidate_terminal_exit
-        && child_file.boot_identity.starts_with("{ sec")
-    {
-        if !store.reconciled_exit(task_id, attempt_id, &evidence, &outcome)? {
-            return Ok(held("terminal exit is not durably reconciled"));
-        }
-        match terminal_exit::prove(store, &plan, &receipt, &child_file, &supervisor, &tracked) {
-            Ok(proof) => {
-                *terminal_exit.expect("retry inspection owns proof output") = Some(proof);
-                return Ok(completed);
-            }
-            Err(reason) => return Ok(held(reason)),
-        }
-    }
-    if recheck_processes
-        && let Err(reason) = registered_process_absence(&child_file, &supervisor, &tracked)
-    {
-        return Ok(held(reason));
-    }
-    match identity(supervisor.pid) {
-        Ok((boot, start))
-            if boot != supervisor.boot_identity || start != supervisor.start_identity =>
-        {
-            return Ok(held("supervisor identity mismatch"));
-        }
-        Err(_) => {
-            let supervisor_group =
-                i32::try_from(supervisor.pid).map_err(|_| SupervisorError::IdentityUnavailable)?;
-            if !group_absent(supervisor_group) {
-                // Darwin retains detached supervisors as zombies until their
-                // parent reaps them; a zombie cannot launch or control a worker.
-                #[cfg(target_os = "macos")]
-                if zombie(supervisor.pid) {
-                    // Child group absence is checked separately below.
-                } else {
-                    return Ok(held("supervisor identity unavailable"));
-                }
-                #[cfg(not(target_os = "macos"))]
-                return Ok(held("supervisor identity unavailable"));
-            }
-        }
-        Ok(_) => {}
-    }
-    if let Ok((boot, start)) = identity(receipt.child_pid)
-        && (boot != receipt.boot_identity || start != receipt.child_start_identity)
-    {
-        return Ok(held("child identity mismatch"));
-    }
-    let pgid =
-        i32::try_from(receipt.child_pid).map_err(|_| SupervisorError::IdentityUnavailable)?;
-    // The negative argument probes the whole child group, never a bare PID.
-    if unsafe { libc::kill(-pgid, 0) } == 0 {
-        return Ok(held("child process group is alive"));
-    }
-    if std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH) {
-        return Ok(held("child process group absence is unproven"));
-    }
-    for process in &tracked {
-        if process.boot_identity != receipt.boot_identity {
-            return Ok(held("tracked descendant boot identity mismatch"));
-        }
-        match identity(process.pid) {
-            Ok((boot, start))
-                if boot == process.boot_identity && start == process.start_identity =>
-            {
-                return Ok(held("tracked descendant is alive"));
-            }
-            Ok(_) => return Ok(held("tracked descendant identity mismatch")),
-            Err(_) => {
-                if unsafe { libc::kill(process.pid as libc::pid_t, 0) } == 0
-                    || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
-                {
-                    return Ok(held("tracked descendant absence is unproven"));
-                }
-            }
-        }
-    }
-    store.reconcile_verified_exit(task_id, attempt_id, &evidence, &outcome)?;
-    Ok(completed)
-}
-
-#[cfg(not(unix))]
-pub(crate) fn recheck_retry_exit(
-    _store: &mut StateStore,
-    _task_id: &str,
-    _attempt_id: &str,
-    _revalidate_terminal_exit: bool,
-    _proof: &mut Option<TerminalExitProof>,
-) -> Result<Reconciliation, SupervisorError> {
-    Err(SupervisorError::ExecutionUnavailable)
-}
-
-#[cfg(not(unix))]
-pub fn reconcile_attempt(
-    _store: &mut StateStore,
-    _task_id: &str,
-    _attempt_id: &str,
-) -> Result<Reconciliation, SupervisorError> {
-    Err(SupervisorError::ExecutionUnavailable)
 }
 
 /// Non-Unix execution is intentionally unavailable until process-group semantics exist.
@@ -2376,14 +1443,6 @@ fn private_attempts(root: &Path) -> Result<PathBuf, SupervisorError> {
         }
     }
     Ok(path)
-}
-
-fn valid_attempt(attempt: &str) -> bool {
-    !attempt.is_empty()
-        && attempt.len() <= 128
-        && attempt
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
 fn write_private_json<T: Serialize>(path: &Path, value: &T) -> Result<(), SupervisorError> {
@@ -2628,198 +1687,51 @@ pub fn execute(_store: &mut StateStore, _plan: &LaunchPlan) -> Result<(), Superv
     Err(SupervisorError::ExecutionUnavailable)
 }
 
-#[cfg(test)]
-mod darwin_boot_tests {
-    use super::*;
-
-    #[test]
-    fn bootsession_uuid_is_validated_and_normalized() {
-        assert_eq!(
-            darwin_boot_identity(b"7379D9DB-543D-4D87-819E-086CEDBF1EF1\n").unwrap(),
-            "darwin-bootsessionuuid:7379d9db-543d-4d87-819e-086cedbf1ef1"
-        );
-        for invalid in [
-            &b""[..],
-            b" \n",
-            b"00000000-0000-0000-0000-000000000000",
-            b"7379D9DB543D4D87819E086CEDBF1EF1",
-            b"7379D9DB-543D-4D87-819E-086CEDBF1EFG",
-            b"7379D9DB-543D-4D87-819E-086CEDBF1EF1\nsecond-line",
-            b"7379D9DB-543D-4D87-819E-086CEDBF1EF1\0",
-            b"\xff",
-            b"{ sec = 1790533213, usec = 220969 } Sun Sep 27 15:20:13 2026",
-        ] {
-            assert!(matches!(
-                darwin_boot_identity(invalid),
-                Err(SupervisorError::IdentityUnavailable)
-            ));
-        }
+fn retry_command(
+    selection: &SelectionEvidence,
+    task_id: &str,
+    attempt_id: &str,
+    identity: &WorktreeIdentity,
+    first: &LaunchPlan,
+    latest: &LaunchPlan,
+) -> Result<RenderedCommand, SupervisorError> {
+    let worktree = identity.path.clone();
+    let cwd = worktree.to_str().ok_or(SupervisorError::Conflict)?;
+    let values = TaskValues {
+        task_issue_number: selection.candidate.issue_number.to_string(),
+        task_repository: selection.candidate.repository.clone(),
+        task_issue_url: selection.candidate.issue_url.clone(),
+        task_id: task_id.to_owned(),
+        attempt_id: attempt_id.to_owned(),
+        worktree: cwd.to_owned(),
+    };
+    let RenderedCommand {
+        executable,
+        mut args,
+    } = selection.effective_config.resume.render(&values)?;
+    let raw_continuation = prompt(&args).ok_or(SupervisorError::Conflict)?;
+    if selection.effective_config.resume.args == selection.effective_config.initial.args
+        || !requires_pair(&args, "--session", task_id)
+        || !requires_pair(&args, "--cwd", cwd)
+        || raw_continuation.trim().is_empty()
+    {
+        return Err(SupervisorError::Conflict);
     }
-}
-
-#[cfg(all(test, unix))]
-mod registered_absence_tests {
-    use super::*;
-    use std::cell::RefCell;
-    const BOOT: &str = "darwin-bootsessionuuid:7379d9db-543d-4d87-819e-086cedbf1ef1";
-
-    fn records() -> (ChildIdentity, ProcessIdentity, Vec<ProcessIdentity>) {
-        (
-            ChildIdentity {
-                pid: 101,
-                group_id: 101,
-                boot_identity: BOOT.into(),
-                start_identity: "child".into(),
-            },
-            ProcessIdentity {
-                pid: 102,
-                boot_identity: BOOT.into(),
-                start_identity: "supervisor".into(),
-            },
-            vec![ProcessIdentity {
-                pid: 103,
-                boot_identity: BOOT.into(),
-                start_identity: "descendant".into(),
-            }],
-        )
-    }
-
-    #[test]
-    fn unchanged_uuid_requires_independent_esrch_probes_for_all_registered_pids_and_groups() {
-        let (child, supervisor, tracked) = records();
-        let probes = RefCell::new(Vec::new());
-        assert_eq!(
-            registered_process_absence_with(
-                &child,
-                &supervisor,
-                &tracked,
-                || Ok(BOOT.into()),
-                |pid| {
-                    probes.borrow_mut().push(pid as i32);
-                    true
-                },
-                |group| {
-                    probes.borrow_mut().push(-group);
-                    true
-                }
-            ),
-            Ok(())
-        );
-        assert_eq!(*probes.borrow(), [101, 102, 103, -101, -102]);
-    }
-
-    #[test]
-    fn changed_or_unavailable_boot_refuses_before_pid_or_group_probes() {
-        let (child, supervisor, tracked) = records();
-        for current in [
-            Ok("darwin-bootsessionuuid:00000001-0000-4000-8000-000000000001".into()),
-            Err(SupervisorError::IdentityUnavailable),
-        ] {
-            assert!(
-                registered_process_absence_with(
-                    &child,
-                    &supervisor,
-                    &tracked,
-                    || current,
-                    |_| panic!("boot unproven"),
-                    |_| panic!("boot unproven")
-                )
-                .is_err()
-            );
-        }
-    }
-
-    #[test]
-    fn historical_boottime_never_proves_continuity_even_with_equal_seconds_or_exact_value() {
-        let (mut child, mut supervisor, mut tracked) = records();
-        let old = "{ sec = 1790533213, usec = 116017 } Sun Sep 27 15:20:13 2026";
-        child.boot_identity = old.into();
-        supervisor.boot_identity = old.into();
-        tracked[0].boot_identity = old.into();
-        for current in [
-            old,
-            "{ sec = 1790533213, usec = 220969 } Sun Sep 27 15:20:13 2026",
-            "{ sec = 1790539999, usec = 116017 } Sun Sep 27 17:13:19 2026",
-            BOOT,
-        ] {
-            assert_eq!(
-                registered_process_absence_with(
-                    &child,
-                    &supervisor,
-                    &tracked,
-                    || Ok(current.into()),
-                    |_| panic!("historical boot unproven"),
-                    |_| panic!("historical boot unproven")
-                ),
-                Err("historical Darwin boot identity cannot prove boot continuity")
-            );
-        }
-    }
-
-    #[test]
-    fn live_reused_or_unobservable_pids_and_groups_all_refuse() {
-        let (child, supervisor, tracked) = records();
-        for present in [101, 102, 103, -101, -102] {
-            assert!(
-                registered_process_absence_with(
-                    &child,
-                    &supervisor,
-                    &tracked,
-                    || Ok(BOOT.into()),
-                    |pid| pid as i32 != present,
-                    |group| -group != present
-                )
-                .is_err()
-            );
-        }
-        // Start identity cannot turn a reused PID into absence.
-        let mut reused = child.clone();
-        reused.start_identity = "old-process-start".into();
-        assert!(
-            registered_process_absence_with(
-                &reused,
-                &supervisor,
-                &tracked,
-                || Ok(BOOT.into()),
-                |pid| pid != reused.pid,
-                |_| true
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn contradictory_or_malformed_records_refuse_before_process_probes() {
-        for contradiction in [
-            "child_boot",
-            "supervisor_boot",
-            "tracked_boot",
-            "group",
-            "pid",
-            "start",
-        ] {
-            let (mut child, mut supervisor, mut tracked) = records();
-            match contradiction {
-                "child_boot" => child.boot_identity.clear(),
-                "supervisor_boot" => supervisor.boot_identity = "another".into(),
-                "tracked_boot" => tracked[0].boot_identity = "another".into(),
-                "group" => child.group_id = supervisor.pid,
-                "pid" => child.pid = supervisor.pid,
-                "start" => tracked[0].start_identity.clear(),
-                _ => unreachable!(),
-            }
-            assert!(
-                registered_process_absence_with(
-                    &child,
-                    &supervisor,
-                    &tracked,
-                    || Ok(BOOT.into()),
-                    |_| panic!("contradiction"),
-                    |_| panic!("contradiction")
-                )
-                .is_err(),
-                "{contradiction}"
-            );
-        }
-    }
+    enforce_prompt(
+        &mut args,
+        PromptRequirements {
+            tracker_repository: &selection.candidate.repository,
+            issue_url: &selection.candidate.issue_url,
+            code_repository: &selection.candidate.mapping.code_repository,
+            base: &identity.base,
+            head_repository: &selection.candidate.mapping.allowed_pr_head_repository,
+            branch: &identity.branch,
+            remote: &identity.remote,
+            author: &selection.candidate.mapping.allowed_pr_author,
+            assignee: &selection.effective_config.assignment_login,
+        },
+    )?;
+    enforce_worktree_inspection(&mut args, "naturally exited worker")?;
+    ensure_distinct_resume_prompt(first, latest, &args)?;
+    Ok(RenderedCommand { executable, args })
 }

@@ -810,7 +810,11 @@ fn logs_reject_symlinks_and_receipt_path_mismatch() {
 fn pause_and_reconcile_reject_bad_arguments_and_unknown_tasks() {
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("config.json");
-    let state = dir.path().join("state");
+    let state = dir
+        .path()
+        .strip_prefix(std::env::current_dir().unwrap())
+        .unwrap()
+        .join("state");
     fs::write(&config, format!(r#"{{"state_root":"{}","worktree_root":"{}","capacity":1,"assignment_login":"operator","sources":[{{"project_id":"project","repositories":["org/tracker"],"ready_marker":{{"kind":"label","name":"ready"}},"milestone":null}}],"mappings":[{{"tracker_repository":"org/tracker","code_repository":"org/code","checkout":"/code","base_branch":"main","push_remote":"origin","allowed_pr_head_repository":"org/code","allowed_pr_author":"operator"}}],"initial":{{"executable":"/worker","args":[]}},"resume":{{"executable":"/worker","args":[]}}}}"#, state.display(), dir.path().display())).unwrap();
     let binary = env!("CARGO_BIN_EXE_luthor");
     let bad = Command::new(binary)
@@ -863,10 +867,7 @@ mod resume_cli {
 
     impl Harness {
         fn new() -> Self {
-            let dir = Builder::new()
-                .prefix("luthor-cli-")
-                .tempdir_in("/tmp")
-                .unwrap();
+            let dir = Builder::new().prefix("luthor-cli-").tempdir().unwrap();
             let gh = dir.path().join("gh");
             let log = dir.path().join("invocations.log");
             fs::write(
@@ -878,7 +879,11 @@ mod resume_cli {
             )
             .unwrap();
             fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).unwrap();
-            let state = dir.path().join("state");
+            let state = dir
+                .path()
+                .strip_prefix(std::env::current_dir().unwrap())
+                .unwrap()
+                .join("state");
             let config = dir.path().join("config.json");
             let value = Config {
                 state_root: state.clone(),

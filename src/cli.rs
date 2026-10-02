@@ -1,8 +1,10 @@
+mod observation_labels;
 use crate::github::pull_request::ErrorCategory;
 use crate::state::{PausePrEvidence, PausePrStatus};
 #[cfg(unix)]
 use crate::supervisor::{ChildIdentity, recorded_process, verified_live_process};
 use crate::supervisor::{ExitReceipt, LaunchPlan};
+use observation_labels::{observation_stage, pr_stage_label};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -86,13 +88,7 @@ fn observation_summary(
     payload: &str,
     recorded_secs: Option<i64>,
 ) -> Value {
-    let stage = match kind {
-        "pause_pr_lookup" => "pause_pr_lookup",
-        "exit_pr_lookup" => "exit_pr_lookup",
-        "retry_pr_lookup" => "retry_pr_lookup",
-        "source_observation" => "source_observation",
-        _ => unreachable!(),
-    };
+    let stage = observation_stage(kind);
     let id = attempt.filter(|id| valid_attempt(id));
     let utc = |seconds: i64| -> Option<String> {
         conn.query_row(
@@ -274,13 +270,7 @@ fn displayed_reason(
         if summary["stage"] == "source_observation" {
             return Some("source reconciliation held".into());
         }
-        let stage = if summary["stage"] == "pause_pr_lookup" {
-            "pause"
-        } else if summary["stage"] == "retry_pr_lookup" {
-            "retry"
-        } else {
-            "exit"
-        };
+        let stage = pr_stage_label(summary["stage"].as_str());
         return Some(format!(
             "{stage} PR {}",
             summary["category"].as_str().unwrap_or("malformed")
@@ -317,11 +307,8 @@ fn live_process(conn: &Connection, root: &Path, task: &str, attempt: &str) -> Op
     if fs::metadata(&dir).ok()?.permissions().mode() & 0o777 != 0o700 {
         return None;
     }
-    let plan_path = dir.join(format!("{attempt}.plan.json"));
-    let (mut plan_file, _) = private_file(&plan_path).ok()?;
-    let mut bytes = Vec::new();
-    plan_file.read_to_end(&mut bytes).ok()?;
-    let plan: LaunchPlan = serde_json::from_slice(&bytes).ok()?;
+    let (plan_file, _) = private_file(&dir.join(format!("{attempt}.plan.json"))).ok()?;
+    let plan: LaunchPlan = serde_json::from_reader(plan_file).ok()?;
     if plan.task_id != task || plan.attempt_id != attempt || plan.session_id != task {
         return None;
     }
@@ -346,10 +333,8 @@ fn live_process(conn: &Connection, root: &Path, task: &str, attempt: &str) -> Op
     {
         return None;
     }
-    let (mut file, _) = private_file(&dir.join(format!("{attempt}.child.json"))).ok()?;
-    bytes.clear();
-    file.read_to_end(&mut bytes).ok()?;
-    let child: ChildIdentity = serde_json::from_slice(&bytes).ok()?;
+    let (child_file, _) = private_file(&dir.join(format!("{attempt}.child.json"))).ok()?;
+    let child: ChildIdentity = serde_json::from_reader(child_file).ok()?;
     let evidence = |table: &str, kind: &str| -> Option<String> {
         let sql = match table {
             "evidence" => {
@@ -490,6 +475,29 @@ fn cached_verified_pr(conn: &Connection, task: &str) -> Result<Value, CliError> 
     )
 }
 
+fn status_row(r: &rusqlite::Row<'_>, root: &Path) -> rusqlite::Result<Value> {
+    let active_attempt = r.get::<_, Option<String>>(6)?;
+    let mut task = json!({
+        "task_id":r.get::<_,String>(0)?, "phase":r.get::<_,String>(1)?,
+        "repository":r.get::<_,String>(2)?, "issue_number":r.get::<_,i64>(3)?,
+        "reserved_slot":r.get::<_,bool>(4)?, "reason":r.get::<_,Option<String>>(5)?,
+        "latest_attempt_id":r.get::<_,Option<String>>(7)?,
+        "latest_attempt_outcome":r.get::<_,Option<String>>(8)?,
+        "latest_attempt_outcome_unavailable_reason":if r.get::<_,Option<String>>(8)?.is_none(){Some("attempt has no verified exit outcome")}else{None},
+        "latest_attempt_lifecycle":r.get::<_,Option<String>>(9)?,
+        "pr_state":"unavailable",
+        "pr_unavailable_reason":"status does not perform a fresh exhaustive PR read",
+        "reason_sequence":r.get::<_,Option<i64>>(10)?.unwrap_or(0)
+    });
+    log_observation(
+        &mut task,
+        root,
+        active_attempt.as_deref(),
+        OutputAge::AttemptStart(r.get(11)?),
+    );
+    Ok(task)
+}
+
 fn status(conn: &Connection, root: &Path) -> Result<Value, CliError> {
     let capacity: i64 = conn
         .query_row(
@@ -518,65 +526,22 @@ fn status(conn: &Connection, root: &Path) -> Result<Value, CliError> {
          JOIN reservations r ON r.attempt_id=a.id
          WHERE a.task_id=t.id AND r.status='reserved' ORDER BY a.rowid DESC LIMIT 1)
         FROM tasks t ORDER BY t.created_at,t.id").map_err(|_| CliError::Database)?;
-    let tasks = stmt
-        .query_map([], |r| {
-            let active_attempt = r.get::<_, Option<String>>(6)?;
-            let output = active_attempt.as_deref().and_then(|id| output_time(root, id));
-            let (observed_bytes, observed_unavailable) = active_attempt.as_deref().map(|id| observed_log_bytes(root, id)).unwrap_or((None, Some("no reserved attempt")));
-            let current = now();
-            let start = r.get::<_, Option<i64>>(11)?
-                .and_then(|epoch| u64::try_from(epoch).ok())
-                .filter(|epoch| *epoch <= current);
-            let (output_log_status, age, unavailable_reason) = match (active_attempt, output) {
-                (None, _) => ("unavailable", None, Some("no reserved attempt")),
-                (Some(_), Some(timestamp)) => (
-                    "available", Some(current.saturating_sub(timestamp)), None,
-                ),
-                (Some(_), None) => match start {
-                    Some(epoch) => ("no_output_yet", Some(current - epoch), None),
-                    None => ("unavailable", None, Some("no verified output log data or valid attempt start time")),
-                },
-            };
-            Ok(json!({
-                "task_id":r.get::<_,String>(0)?, "phase":r.get::<_,String>(1)?,
-                "repository":r.get::<_,String>(2)?, "issue_number":r.get::<_,i64>(3)?,
-                "reserved_slot":r.get::<_,bool>(4)?, "reason":r.get::<_,Option<String>>(5)?,
-                "last_output_age_seconds":age,
-                "output_age_unavailable_reason":unavailable_reason,
-                "output_log_status":output_log_status,
-                "observed_stdout_bytes":observed_bytes.map(|bytes| bytes[0]),
-                "observed_stderr_bytes":observed_bytes.map(|bytes| bytes[1]),
-                "observed_bytes_unavailable_reason":observed_unavailable,
-                "byte_counts_are_observational":true,
-                "observed_at_utc":observed_bytes.and_then(|_| utc_now()),
-                "output_silence_warning":age.is_some_and(|seconds| seconds >= SILENCE_WARNING_THRESHOLD_SECONDS),
-                "silence_warning_threshold_seconds":SILENCE_WARNING_THRESHOLD_SECONDS,
-                "latest_attempt_id":r.get::<_,Option<String>>(7)?,
-                "latest_attempt_outcome":r.get::<_,Option<String>>(8)?,
-                "latest_attempt_outcome_unavailable_reason":if r.get::<_,Option<String>>(8)?.is_none(){Some("attempt has no verified exit outcome")}else{None},
-                "latest_attempt_lifecycle":r.get::<_,Option<String>>(9)?,
-                "pr_state":"unavailable",
-                "pr_unavailable_reason":"status does not perform a fresh exhaustive PR read",
-                "reason_sequence":r.get::<_,Option<i64>>(10)?.unwrap_or(0),
-                "last_observed_pr":null
-            }))
-        })
+    let mut tasks = stmt
+        .query_map([], |r| status_row(r, root))
         .map_err(|_| CliError::Database)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| CliError::Database)?;
-    let mut tasks: Vec<Value> = tasks;
     for task in &mut tasks {
         let task_id = task["task_id"]
             .as_str()
             .ok_or(CliError::Database)?
             .to_owned();
+        task["verified_pr"] = Value::Null;
         if task["phase"] == "pr_complete" {
             let verified_pr = cached_verified_pr(conn, &task_id)?;
             task["pr_state"] = json!("open_at_last_verification");
             task["pr_unavailable_reason"] = Value::Null;
             task["verified_pr"] = verified_pr;
-        } else {
-            task["verified_pr"] = Value::Null;
         }
         let reserved_attempt: Option<String> = conn
             .query_row(
@@ -695,6 +660,84 @@ fn receipt_summary(receipt: &ExitReceipt) -> Value {
         "stop_signals":receipt.stop_signals})
 }
 
+fn attempt_history(
+    conn: &Connection,
+    task: &str,
+) -> Result<(Vec<Value>, Option<String>), CliError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT a.id,a.lifecycle,a.outcome,a.created_at,
+        CAST(strftime('%s',a.created_at) AS INTEGER),
+        (SELECT status FROM reservations r WHERE r.attempt_id=a.id)
+        FROM attempts a WHERE a.task_id=?1 ORDER BY a.created_at,a.rowid",
+        )
+        .map_err(|_| CliError::Database)?;
+    let attempts = stmt.query_map([task], |r| Ok(json!({
+        "id":r.get::<_,String>(0)?, "lifecycle":r.get::<_,String>(1)?,
+        "outcome":r.get::<_,Option<String>>(2)?, "created_at":r.get::<_,String>(3)?,
+        "created_at_unix_secs":r.get::<_,Option<i64>>(4)?, "reservation":r.get::<_,Option<String>>(5)?
+    }))).map_err(|_| CliError::Database)?
+        .collect::<Result<Vec<_>,_>>().map_err(|_| CliError::Database)?;
+    let mut session = None;
+    for attempt in &attempts {
+        let id = attempt["id"].as_str().ok_or(CliError::Database)?;
+        let detail: Option<String> = conn.query_row(
+            "SELECT detail FROM intents WHERE task_id=?1 AND attempt_id=?2 AND kind='launch' ORDER BY sequence DESC LIMIT 1",
+            [task,id],|r|r.get(0)
+        ).optional().map_err(|_| CliError::Database)?;
+        if let Some(detail) = detail {
+            let plan: LaunchPlan = serde_json::from_str(&detail).map_err(|_| CliError::Database)?;
+            if plan.task_id != task || plan.attempt_id != id {
+                return Err(CliError::Database);
+            }
+            session = Some(plan.session_id);
+        }
+    }
+    Ok((attempts, session))
+}
+
+enum OutputAge {
+    LogOnly,
+    AttemptStart(Option<i64>),
+}
+
+fn log_observation(output: &mut Value, root: &Path, attempt: Option<&str>, fallback: OutputAge) {
+    let timestamp = attempt.and_then(|id| output_time(root, id));
+    let (bytes, bytes_unavailable) = attempt
+        .map(|id| observed_log_bytes(root, id))
+        .unwrap_or((None, Some("no reserved attempt")));
+    let current = now();
+    let (start_age, unavailable) = match fallback {
+        OutputAge::LogOnly => (None, "no verified output log data"),
+        OutputAge::AttemptStart(start) => (
+            start
+                .and_then(|epoch| u64::try_from(epoch).ok())
+                .filter(|epoch| *epoch <= current)
+                .map(|epoch| current - epoch),
+            "no verified output log data or valid attempt start time",
+        ),
+    };
+    let (status, age, reason) = match (attempt, timestamp, start_age) {
+        (None, _, _) => ("unavailable", None, Some("no reserved attempt")),
+        (Some(_), Some(timestamp), _) => {
+            ("available", Some(current.saturating_sub(timestamp)), None)
+        }
+        (Some(_), None, Some(age)) => ("no_output_yet", Some(age), None),
+        (Some(_), None, None) => ("unavailable", None, Some(unavailable)),
+    };
+    output["last_output_age_seconds"] = json!(age);
+    output["output_age_unavailable_reason"] = json!(reason);
+    output["output_log_status"] = json!(status);
+    output["observed_stdout_bytes"] = json!(bytes.map(|bytes| bytes[0]));
+    output["observed_stderr_bytes"] = json!(bytes.map(|bytes| bytes[1]));
+    output["observed_bytes_unavailable_reason"] = json!(bytes_unavailable);
+    output["byte_counts_are_observational"] = json!(true);
+    output["observed_at_utc"] = json!(bytes.and_then(|_| utc_now()));
+    output["output_silence_warning"] =
+        json!(age.is_some_and(|age| age >= SILENCE_WARNING_THRESHOLD_SECONDS));
+    output["silence_warning_threshold_seconds"] = json!(SILENCE_WARNING_THRESHOLD_SECONDS);
+}
+
 fn show(conn: &Connection, root: &Path, task: &str) -> Result<Value, CliError> {
     let row: Option<(String, String, i64)> = conn
         .query_row(
@@ -717,20 +760,7 @@ fn show(conn: &Connection, root: &Path, task: &str) -> Result<Value, CliError> {
     let worktree: Option<String> = conn.query_row(
         "SELECT payload FROM evidence WHERE task_id=?1 AND kind='worktree_created' ORDER BY sequence DESC LIMIT 1",[task],|r|r.get(0)
     ).optional().map_err(|_| CliError::Database)?;
-    let mut stmt = conn
-        .prepare(
-            "SELECT a.id,a.lifecycle,a.outcome,a.created_at,
-        CAST(strftime('%s',a.created_at) AS INTEGER),
-        (SELECT status FROM reservations r WHERE r.attempt_id=a.id)
-        FROM attempts a WHERE a.task_id=?1 ORDER BY a.created_at,a.rowid",
-        )
-        .map_err(|_| CliError::Database)?;
-    let mut attempts = stmt.query_map([task], |r| Ok(json!({
-        "id":r.get::<_,String>(0)?, "lifecycle":r.get::<_,String>(1)?,
-        "outcome":r.get::<_,Option<String>>(2)?, "created_at":r.get::<_,String>(3)?,
-        "created_at_unix_secs":r.get::<_,Option<i64>>(4)?, "reservation":r.get::<_,Option<String>>(5)?
-    }))).map_err(|_| CliError::Database)?
-        .collect::<Result<Vec<_>,_>>().map_err(|_| CliError::Database)?;
+    let (mut attempts, session) = attempt_history(conn, task)?;
     let reserved: bool = conn
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM reservations WHERE task_id=?1 AND status='reserved')",
@@ -738,39 +768,10 @@ fn show(conn: &Connection, root: &Path, task: &str) -> Result<Value, CliError> {
             |r| r.get(0),
         )
         .map_err(|_| CliError::Database)?;
-    let mut session = None;
-    for attempt in &attempts {
-        let id = attempt["id"].as_str().ok_or(CliError::Database)?;
-        let detail: Option<String> = conn.query_row(
-            "SELECT detail FROM intents WHERE task_id=?1 AND attempt_id=?2 AND kind='launch' ORDER BY sequence DESC LIMIT 1",
-            [task,id],|r|r.get(0)
-        ).optional().map_err(|_| CliError::Database)?;
-        if let Some(detail) = detail {
-            let plan: LaunchPlan = serde_json::from_str(&detail).map_err(|_| CliError::Database)?;
-            if plan.task_id != task || plan.attempt_id != id {
-                return Err(CliError::Database);
-            }
-            session = Some(plan.session_id);
-        }
-    }
     let active_attempt = attempts
         .iter()
         .rev()
         .find(|a| a["reservation"] == "reserved");
-    let (observed_bytes, observed_unavailable) = active_attempt
-        .and_then(|a| a["id"].as_str())
-        .map(|id| observed_log_bytes(root, id))
-        .unwrap_or((None, Some("no reserved attempt")));
-    let (last_output_age_seconds, output_age_unavailable_reason) = match active_attempt {
-        None => (None, Some("no reserved attempt")),
-        Some(attempt) => {
-            let id = attempt["id"].as_str().ok_or(CliError::Database)?;
-            match output_time(root, id) {
-                Some(timestamp) => (Some(now().saturating_sub(timestamp)), None),
-                None => (None, Some("no verified output log data")),
-            }
-        }
-    };
     let reason = evidence
         .iter()
         .rev()
@@ -789,8 +790,6 @@ fn show(conn: &Connection, root: &Path, task: &str) -> Result<Value, CliError> {
     } else {
         None
     };
-    let output_silence_warning =
-        last_output_age_seconds.is_some_and(|age| age >= SILENCE_WARNING_THRESHOLD_SECONDS);
     let ObservationSummaries {
         pr: last_observed_pr,
         source: last_observed_source,
@@ -820,24 +819,13 @@ fn show(conn: &Connection, root: &Path, task: &str) -> Result<Value, CliError> {
     {
         attempt["lifecycle"] = json!(display_phase);
     }
-    Ok(
-        json!({"task":{"id":task,"repository":repository,"issue_number":number,
+    let mut output = json!({"task":{"id":task,"repository":repository,"issue_number":number,
         "issue_url":candidate.as_ref().and_then(|v|v.get("issue_url")),
         "source":candidate.as_ref().and_then(|v|v.get("source")),
         "mapping":candidate.as_ref().and_then(|v|v.get("mapping"))},
         "phase":display_phase,"reason":reason,"reserved_slot":reserved,"attempts":attempts,
         "process":process,"intents":intents,"evidence":evidence,"session":session,
         "worktree":worktree.and_then(|v|serde_json::from_str::<Value>(&v).ok()),
-        "last_output_age_seconds":last_output_age_seconds,
-        "output_age_unavailable_reason":output_age_unavailable_reason,
-        "observed_stdout_bytes":observed_bytes.map(|bytes| bytes[0]),
-        "observed_stderr_bytes":observed_bytes.map(|bytes| bytes[1]),
-        "observed_bytes_unavailable_reason":observed_unavailable,
-        "observed_at_utc":observed_bytes.and_then(|_| utc_now()),
-        "byte_counts_are_observational":true,
-        "output_log_status":if last_output_age_seconds.is_some(){"available"}else{"unavailable"},
-        "output_silence_warning":output_silence_warning,
-        "silence_warning_threshold_seconds":SILENCE_WARNING_THRESHOLD_SECONDS,
         "latest_attempt_id":latest_attempt_id,
         "latest_attempt_outcome":latest_attempt_outcome,
         "latest_attempt_outcome_unavailable_reason":if latest_attempt_outcome.is_none(){Some("attempt has no verified exit outcome")}else{None},
@@ -848,8 +836,14 @@ fn show(conn: &Connection, root: &Path, task: &str) -> Result<Value, CliError> {
         "last_observed_pr":last_observed_pr,
         "last_observed_source":last_observed_source,
         "last_observation":last_observation,
-        "last_observed_pr_unavailable_reason":if last_observed_pr.is_none(){Some("no stored PR observation")}else{None}}),
-    )
+        "last_observed_pr_unavailable_reason":if last_observed_pr.is_none(){Some("no stored PR observation")}else{None}});
+    log_observation(
+        &mut output,
+        root,
+        active_attempt_id.as_deref(),
+        OutputAge::LogOnly,
+    );
+    Ok(output)
 }
 
 fn valid_attempt(id: &str) -> bool {

@@ -461,56 +461,61 @@ fn validate_command(command: &CommandTemplate) -> Result<(), ConfigError> {
         } else if arg.is_empty() {
             return Err(ConfigError::Invalid("invalid worker argument".into()));
         }
-        if sensitive_argument(arg) {
-            return Err(ConfigError::Invalid(
-                "credential-bearing command argument is forbidden".into(),
-            ));
-        }
-        if arg.contains("${")
-            || arg.contains("$(")
-            || arg.contains('`')
-            || arg.contains(';')
-            || arg.contains('|')
-            || arg.contains('>')
-            || arg.contains('<')
-        {
-            return Err(ConfigError::Invalid(
-                "shell interpolation/operators are forbidden in argv templates".into(),
-            ));
-        }
-        let mut rest = arg.as_str();
-        while let Some(start) = rest.find(['{', '}']) {
-            if rest.as_bytes()[start] == b'}' {
-                return Err(ConfigError::Invalid("unmatched template delimiter".into()));
-            }
-            let tail = &rest[start + 1..];
-            let Some(end) = tail.find(['{', '}']) else {
-                return Err(ConfigError::Invalid("unclosed template variable".into()));
-            };
-            if tail.as_bytes()[end] != b'}' {
-                return Err(ConfigError::Invalid("nested template delimiter".into()));
-            }
-            if !matches!(
-                &tail[..end],
-                "task.issue_number"
-                    | "task.repository"
-                    | "task.issue_url"
-                    | "task.id"
-                    | "attempt.id"
-                    | "worktree"
-            ) {
-                return Err(ConfigError::Invalid("unsupported template variable".into()));
-            }
-            rest = &tail[end + 1..];
-        }
-        if rest.contains('}') {
-            return Err(ConfigError::Invalid("unmatched template delimiter".into()));
-        }
+        validate_argument_template(arg)?;
     }
     if expects_value {
         return Err(ConfigError::Invalid(
             "worker option value is missing".into(),
         ));
+    }
+    Ok(())
+}
+
+fn validate_argument_template(arg: &str) -> Result<(), ConfigError> {
+    if sensitive_argument(arg) {
+        return Err(ConfigError::Invalid(
+            "credential-bearing command argument is forbidden".into(),
+        ));
+    }
+    if arg.contains("${")
+        || arg.contains("$(")
+        || arg.contains('`')
+        || arg.contains(';')
+        || arg.contains('|')
+        || arg.contains('>')
+        || arg.contains('<')
+    {
+        return Err(ConfigError::Invalid(
+            "shell interpolation/operators are forbidden in argv templates".into(),
+        ));
+    }
+    let mut rest = arg;
+    while let Some(start) = rest.find(['{', '}']) {
+        if rest.as_bytes()[start] == b'}' {
+            return Err(ConfigError::Invalid("unmatched template delimiter".into()));
+        }
+        let tail = &rest[start + 1..];
+        let Some(end) = tail.find(['{', '}']) else {
+            return Err(ConfigError::Invalid("unclosed template variable".into()));
+        };
+        if tail.as_bytes()[end] != b'}' {
+            return Err(ConfigError::Invalid("nested template delimiter".into()));
+        }
+        if !matches!(
+            &tail[..end],
+            "task.issue_number"
+                | "task.repository"
+                | "task.issue_url"
+                | "task.id"
+                | "attempt.id"
+                | "worktree"
+        ) {
+            return Err(ConfigError::Invalid("unsupported template variable".into()));
+        }
+        rest = &tail[end + 1..];
+    }
+    if rest.contains('}') {
+        return Err(ConfigError::Invalid("unmatched template delimiter".into()));
     }
     Ok(())
 }

@@ -97,13 +97,73 @@ fn historical_terminal_exit_cli_preserves_original_evidence_and_launches_correct
     exercise_retry_cli(true);
 }
 
+struct CliFixture {
+    _dir: tempfile::TempDir,
+    config: Config,
+    config_path: std::path::PathBuf,
+    path: String,
+    calls: std::path::PathBuf,
+}
+struct ExistingAttempt {
+    task: String,
+    previous: String,
+    original: luthor::state::SelectionEvidence,
+    prior_plan: String,
+    initial_receipt: luthor::supervisor::ExitReceipt,
+}
+type DurableRows = Vec<Vec<Vec<rusqlite::types::Value>>>;
+struct RetryEvidence {
+    expected_boot: String,
+    old_rows: DurableRows,
+    old_files: Vec<(std::path::PathBuf, Vec<u8>)>,
+}
 fn exercise_retry_cli(historical: bool) {
-    let temp_root = std::env::var_os("LUTHOR_RETRY_TEST_TMPDIR").unwrap_or_else(|| "/tmp".into());
+    let fixture = cli_fixture(historical);
+    let attempt = dispatch_and_capture(&fixture, historical);
+    correct_config(&fixture);
+    assert_missing_authorization(&fixture, &attempt);
+    assert_initial_boot(&attempt);
+    assert_boot_refusals(&fixture, &attempt);
+    let evidence = restore_prior_boot(&fixture, &attempt, historical);
+    let retried = authorize_retry(&fixture, &attempt, historical);
+    let audit = verify_retry_state(&fixture, &attempt, &retried, &evidence, historical);
+    reconcile_retry(&fixture, &attempt, &retried);
+    assert_calls_and_evidence(&fixture, &retried, &audit, historical);
+}
+
+fn cli_fixture(historical: bool) -> CliFixture {
+    let temp_root = std::env::var_os("LUTHOR_RETRY_TEST_TMPDIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
     let dir = tempfile::Builder::new()
         .prefix("lr")
         .tempdir_in(temp_root)
         .unwrap();
     let root = dir.path();
+    let checkout = fixture_checkout(root);
+    let calls = fixture_github(root);
+    let worker = fixture_worker(root, historical);
+    let command = |prompt| json!({"executable":worker,"args":["--session","{task.id}","--cwd","{worktree}","-p",prompt,"--max-tool-calls","1"]});
+    let config_value = json!({"state_root":root.strip_prefix(std::env::current_dir().unwrap()).unwrap().join("state"), "worktree_root":root.join("worktrees"), "capacity":1,
+        "assignment_login":"acoliver", "sources":[{"project_id":"project","repositories":["org/tracker"],
+            "ready_marker":{"kind":"label","name":"ready"},"milestone":null}],
+        "mappings":[{"tracker_repository":"org/tracker","code_repository":"org/code", "checkout":checkout,
+            "base_branch":"main","push_remote":"origin","allowed_pr_head_repository":"org/code","allowed_pr_author":"acoliver"}],
+        "initial":command("Start {task.issue_url}"), "resume":command("Continue {task.issue_url} for {attempt.id}")});
+    let config_path = root.join("config.json");
+    fs::write(&config_path, config_value.to_string()).unwrap();
+    let path = format!("{}:{}", root.display(), std::env::var("PATH").unwrap());
+    let config = Config::from_json(&config_value.to_string()).unwrap();
+    CliFixture {
+        _dir: dir,
+        config,
+        config_path,
+        path,
+        calls,
+    }
+}
+
+fn fixture_checkout(root: &Path) -> std::path::PathBuf {
     let checkout = root.join("checkout");
     fs::create_dir(&checkout).unwrap();
     git(&checkout, &["init", "-b", "main"]);
@@ -116,6 +176,10 @@ fn exercise_retry_cli(historical: bool) {
     fs::write(checkout.join("README"), "fixture").unwrap();
     git(&checkout, &["add", "README"]);
     git(&checkout, &["commit", "-m", "initial"]);
+    checkout
+}
+
+fn fixture_github(root: &Path) -> std::path::PathBuf {
     let issue = |assigned| {
         json!({"node_id":"issue", "number":7,
         "repository_url":"https://api.github.com/repos/org/tracker",
@@ -133,6 +197,10 @@ fn exercise_retry_cli(historical: bool) {
     let assigned = root.join("assigned");
     fs::write(&gh, format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$2\" in\n graphql) printf '%s\\n' '{}' ;;\n repos/org/tracker) printf '%s\\n' '{{\"node_id\":\"repo\"}}' ;;\n repos/org/tracker/issues/7?per_page=100) if test -f '{}'; then printf '%s\\n' '{}'; else printf '%s\\n' '{}'; fi ;;\n -X) touch '{}'; printf '%s\\n' '{{}}' ;;\n repos/org/code/pulls?*) printf '%s\\n' '[]' ;;\n user) printf '%s\\n' 'acoliver' ;;\n *) exit 99 ;;\nesac\n", calls.display(), project, assigned.display(), issue(true), issue(false), assigned.display())).unwrap();
     fs::set_permissions(&gh, fs::Permissions::from_mode(0o700)).unwrap();
+    calls
+}
+
+fn fixture_worker(root: &Path, historical: bool) -> std::path::PathBuf {
     let worker = root.join("llxprt-code-rs");
     let program = if historical {
         r#"#!/bin/sh
@@ -155,19 +223,16 @@ exit 2
     };
     fs::write(&worker, program).unwrap();
     fs::set_permissions(&worker, fs::Permissions::from_mode(0o700)).unwrap();
-    let command = |prompt| json!({"executable":worker,"args":["--session","{task.id}","--cwd","{worktree}","-p",prompt,"--max-tool-calls","1"]});
-    let config_value = json!({"state_root":root.join("state"), "worktree_root":root.join("worktrees"), "capacity":1,
-        "assignment_login":"acoliver", "sources":[{"project_id":"project","repositories":["org/tracker"],
-            "ready_marker":{"kind":"label","name":"ready"},"milestone":null}],
-        "mappings":[{"tracker_repository":"org/tracker","code_repository":"org/code", "checkout":checkout,
-            "base_branch":"main","push_remote":"origin","allowed_pr_head_repository":"org/code","allowed_pr_author":"acoliver"}],
-        "initial":command("Start {task.issue_url}"), "resume":command("Continue {task.issue_url} for {attempt.id}")});
-    let config_path = root.join("config.json");
-    fs::write(&config_path, config_value.to_string()).unwrap();
-    let path = format!("{}:{}", root.display(), std::env::var("PATH").unwrap());
+    worker
+}
+
+fn dispatch_and_capture(fixture: &CliFixture, historical: bool) -> ExistingAttempt {
+    let config = &fixture.config;
+    let config_path = &fixture.config_path;
+    let path = &fixture.path;
     let out = run(
-        &config_path,
-        &path,
+        config_path,
+        path,
         "dispatch",
         &[
             "--repository",
@@ -187,7 +252,6 @@ exit 2
     let dispatched: Value = serde_json::from_slice(&out.stdout).unwrap();
     let task = dispatched["task_id"].as_str().unwrap();
     let previous = dispatched["attempt_id"].as_str().unwrap();
-    let config = Config::from_json(&config_value.to_string()).unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
     while !config
         .state_root
@@ -197,7 +261,7 @@ exit 2
         assert!(Instant::now() < deadline);
         thread::sleep(Duration::from_millis(20));
     }
-    let out = run(&config_path, &path, "reconcile", &[task]);
+    let out = run(config_path, path, "reconcile", &[task]);
     assert!(
         out.status.success(),
         "{}",
@@ -209,27 +273,7 @@ exit 2
         Some("attention")
     );
     if historical {
-        let db = rusqlite::Connection::open(config.state_root.join("state.sqlite3")).unwrap();
-        let mut plan: luthor::supervisor::LaunchPlan =
-            serde_json::from_str(&store.launch_intent(previous).unwrap().unwrap()).unwrap();
-        *plan.args.last_mut().unwrap() = "1024".into();
-        let payload = serde_json::to_string(&plan).unwrap();
-        db.execute("UPDATE intents SET detail=?1 WHERE attempt_id=?2 AND kind IN ('launch','supervisor_dispatch')", [&payload, previous]).unwrap();
-        fs::write(
-            config
-                .state_root
-                .join(format!("attempts/{previous}.plan.json")),
-            &payload,
-        )
-        .unwrap();
-        let mut selection = store.selection_evidence(task).unwrap().unwrap();
-        *selection.effective_config.initial.args.last_mut().unwrap() = "1024".into();
-        *selection.effective_config.resume.args.last_mut().unwrap() = "1024".into();
-        db.execute(
-            "UPDATE evidence SET payload=?1 WHERE task_id=?2 AND kind='selection'",
-            [serde_json::to_string(&selection).unwrap().as_str(), task],
-        )
-        .unwrap();
+        seed_unsupported_saved_budget(config, &store, task, previous);
     }
     let original = store.selection_evidence(task).unwrap().unwrap();
     let prior_plan = store.launch_intent(previous).unwrap().unwrap();
@@ -243,48 +287,105 @@ exit 2
         .unwrap();
     let ready: Value = serde_json::from_str(&ready).unwrap();
     let pid = ready["pid"].as_i64().unwrap() as i32;
-    while unsafe { libc::kill(pid, 0) } == 0 {
-        assert!(Instant::now() < deadline);
-        thread::sleep(Duration::from_millis(20));
-    }
+    wait_for_supervisor_exit(pid, deadline);
     drop(store);
-    let mut corrected = config.clone();
+    let initial_receipt = serde_json::from_slice(
+        &fs::read(
+            config
+                .state_root
+                .join(format!("attempts/{previous}.receipt.json")),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    ExistingAttempt {
+        task: task.to_owned(),
+        previous: previous.to_owned(),
+        original,
+        prior_plan,
+        initial_receipt,
+    }
+}
+
+fn seed_unsupported_saved_budget(config: &Config, store: &StateStore, task: &str, previous: &str) {
+    let db = rusqlite::Connection::open(config.state_root.join("state.sqlite3")).unwrap();
+    let mut plan: luthor::supervisor::LaunchPlan =
+        serde_json::from_str(&store.launch_intent(previous).unwrap().unwrap()).unwrap();
+    *plan.args.last_mut().unwrap() = "1024".into();
+    let payload = serde_json::to_string(&plan).unwrap();
+    db.execute("UPDATE intents SET detail=?1 WHERE attempt_id=?2 AND kind IN ('launch','supervisor_dispatch')", [&payload, previous]).unwrap();
+    fs::write(
+        config
+            .state_root
+            .join(format!("attempts/{previous}.plan.json")),
+        &payload,
+    )
+    .unwrap();
+    let mut selection = store.selection_evidence(task).unwrap().unwrap();
+    *selection.effective_config.initial.args.last_mut().unwrap() = "1024".into();
+    *selection.effective_config.resume.args.last_mut().unwrap() = "1024".into();
+    db.execute(
+        "UPDATE evidence SET payload=?1 WHERE task_id=?2 AND kind='selection'",
+        [serde_json::to_string(&selection).unwrap().as_str(), task],
+    )
+    .unwrap();
+}
+
+fn correct_config(fixture: &CliFixture) {
+    let config = &fixture.config;
+    let config_path = &fixture.config_path;
+    let mut corrected = (*config).clone();
     *corrected.initial.args.last_mut().unwrap() = "512".into();
     *corrected.resume.args.last_mut().unwrap() = "512".into();
-    fs::write(&config_path, serde_json::to_string(&corrected).unwrap()).unwrap();
-    let invoke = |extra: &[&str]| {
-        Command::new(env!("CARGO_BIN_EXE_luthor"))
-            .args([
-                "retry",
-                task,
-                "--attempt",
-                previous,
-                "--config",
-                config_path.to_str().unwrap(),
-                "--config-revision",
-                "corrected-512",
-                "--actor",
-                "acoliver",
-                "--reason",
-                "correct launch budget",
-            ])
-            .args(extra)
-            .env("PATH", &path)
-            .output()
-            .unwrap()
-    };
-    let before = fs::read_to_string(&calls).unwrap();
+    fs::write(config_path, serde_json::to_string(&corrected).unwrap()).unwrap();
+}
+
+fn invoke_retry(
+    fixture: &CliFixture,
+    attempt: &ExistingAttempt,
+    extra: &[&str],
+) -> std::process::Output {
+    let config_path = &fixture.config_path;
+    let path = &fixture.path;
+    let task = attempt.task.as_str();
+    let previous = attempt.previous.as_str();
+
+    Command::new(env!("CARGO_BIN_EXE_luthor"))
+        .args([
+            "retry",
+            task,
+            "--attempt",
+            previous,
+            "--config",
+            config_path.to_str().unwrap(),
+            "--config-revision",
+            "corrected-512",
+            "--actor",
+            "acoliver",
+            "--reason",
+            "correct launch budget",
+        ])
+        .args(extra)
+        .env("PATH", path)
+        .output()
+        .unwrap()
+}
+
+fn assert_missing_authorization(fixture: &CliFixture, attempt: &ExistingAttempt) {
+    let calls = &fixture.calls;
+    let invoke = |extra: &[&str]| invoke_retry(fixture, attempt, extra);
+    let before = fs::read_to_string(calls).unwrap();
     assert!(!invoke(&[]).status.success());
     assert_eq!(
-        fs::read_to_string(&calls).unwrap(),
+        fs::read_to_string(calls).unwrap(),
         before,
         "missing execution authorization performed GitHub reads"
     );
-    let receipt_file = config
-        .state_root
-        .join(format!("attempts/{previous}.receipt.json"));
-    let initial_receipt: luthor::supervisor::ExitReceipt =
-        serde_json::from_slice(&fs::read(&receipt_file).unwrap()).unwrap();
+}
+
+fn assert_initial_boot(attempt: &ExistingAttempt) {
+    let initial_receipt = &attempt.initial_receipt;
+    assert!(!initial_receipt.boot_identity.is_empty());
     #[cfg(target_os = "macos")]
     {
         let boot = Command::new("/usr/sbin/sysctl")
@@ -303,6 +404,13 @@ exit 2
             )
         );
     }
+}
+
+fn assert_boot_refusals(fixture: &CliFixture, attempt: &ExistingAttempt) {
+    let config = &fixture.config;
+    let previous = attempt.previous.as_str();
+    let calls = &fixture.calls;
+    let invoke = |extra: &[&str]| invoke_retry(fixture, attempt, extra);
     for (boot, reason) in [
         (
             "{ sec = 1790533213, usec = 116017 } Sun Sep 27 15:20:13 2026",
@@ -334,7 +442,7 @@ exit 2
                 (p, bytes)
             })
             .collect();
-        let calls_before = fs::read_to_string(&calls).unwrap();
+        let calls_before = fs::read_to_string(calls).unwrap();
         let out = invoke(&["--execute"]);
         assert!(!out.status.success(), "{boot}");
         assert!(out.stdout.is_empty());
@@ -350,7 +458,7 @@ exit 2
         for (file, bytes) in files {
             assert_eq!(fs::read(file).unwrap(), bytes);
         }
-        let calls_after = fs::read_to_string(&calls).unwrap();
+        let calls_after = fs::read_to_string(calls).unwrap();
         assert!(
             calls_after
                 .strip_prefix(&calls_before)
@@ -360,10 +468,19 @@ exit 2
             "refusal read source or PRs"
         );
     }
+}
+
+fn restore_prior_boot(
+    fixture: &CliFixture,
+    attempt: &ExistingAttempt,
+    historical: bool,
+) -> RetryEvidence {
+    let config = &fixture.config;
+    let previous = attempt.previous.as_str();
     let expected_boot = if historical {
         "{ sec = 1790533213, usec = 116017 } Sun Sep 27 15:20:13 2026"
     } else {
-        &initial_receipt.boot_identity
+        &attempt.initial_receipt.boot_identity
     };
     replace_fixture_boot(&config.state_root, previous, expected_boot);
     let old_rows = state_rows(&config.state_root);
@@ -376,6 +493,16 @@ exit 2
             (p, bytes)
         })
         .collect();
+    RetryEvidence {
+        expected_boot: expected_boot.into(),
+        old_rows,
+        old_files,
+    }
+}
+
+fn authorize_retry(fixture: &CliFixture, attempt: &ExistingAttempt, historical: bool) -> Value {
+    let previous = attempt.previous.as_str();
+    let invoke = |extra: &[&str]| invoke_retry(fixture, attempt, extra);
     let out = if historical {
         invoke(&["--revalidate-terminal-exit", "--execute"])
     } else {
@@ -392,11 +519,27 @@ exit 2
     assert_eq!(retried["config_revision"], "corrected-512");
     assert_ne!(attempt, previous);
     assert!(!invoke(&["--execute"]).status.success());
-    let mut store = StateStore::open(&config.state_root, 1).unwrap();
-    assert_eq!(store.selection_evidence(task).unwrap().unwrap(), original);
-    assert_eq!(store.launch_intent(previous).unwrap().unwrap(), prior_plan);
+    retried
+}
+
+fn verify_retry_state(
+    fixture: &CliFixture,
+    attempt: &ExistingAttempt,
+    retried: &Value,
+    evidence: &RetryEvidence,
+    historical: bool,
+) -> Value {
+    let config = &fixture.config;
+    let task = attempt.task.as_str();
+    let previous = attempt.previous.as_str();
+    let task_attempt = retried["attempt_id"].as_str().unwrap();
+    let original = &attempt.original;
+    let prior_plan = &attempt.prior_plan;
+    let store = StateStore::open(&config.state_root, 1).unwrap();
+    assert_eq!(store.selection_evidence(task).unwrap().unwrap(), *original);
+    assert_eq!(store.launch_intent(previous).unwrap().unwrap(), *prior_plan);
     let new_plan: luthor::supervisor::LaunchPlan =
-        serde_json::from_str(&store.launch_intent(attempt).unwrap().unwrap()).unwrap();
+        serde_json::from_str(&store.launch_intent(task_attempt).unwrap().unwrap()).unwrap();
     assert!(
         new_plan
             .args
@@ -409,7 +552,7 @@ exit 2
     );
     let audit: Value = serde_json::from_str(
         &store
-            .evidence_payloads(task, attempt, "retry_authorized")
+            .evidence_payloads(task, task_attempt, "retry_authorized")
             .unwrap()[0],
     )
     .unwrap();
@@ -420,23 +563,31 @@ exit 2
         );
         assert_eq!(
             audit["terminal_exit"]["receipt"]["boot_identity"],
-            expected_boot
+            evidence.expected_boot
         );
     } else {
         assert!(audit["terminal_exit"].is_null());
     }
-    for (file, bytes) in old_files {
-        assert_eq!(fs::read(file).unwrap(), bytes);
+    for (file, bytes) in &evidence.old_files {
+        assert_eq!(&fs::read(file).unwrap(), bytes);
     }
     let after = state_rows(&config.state_root);
-    for table in 1..=4 {
-        for row in &old_rows[table] {
+    for (table, current_rows) in after.iter().enumerate().take(5).skip(1) {
+        for row in &evidence.old_rows[table] {
             assert!(
-                after[table].contains(row),
+                current_rows.contains(row),
                 "old durable row replaced in table {table}"
             );
         }
     }
+    audit
+}
+
+fn reconcile_retry(fixture: &CliFixture, existing: &ExistingAttempt, retried: &Value) {
+    let config = &fixture.config;
+    let task = existing.task.as_str();
+    let attempt = retried["attempt_id"].as_str().unwrap();
+    let mut store = StateStore::open(&config.state_root, 1).unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
     while !config
         .state_root
@@ -453,6 +604,15 @@ exit 2
             signal: None
         }
     ));
+}
+
+fn assert_calls_and_evidence(
+    fixture: &CliFixture,
+    retried: &Value,
+    audit: &Value,
+    historical: bool,
+) {
+    let calls = &fixture.calls;
     let calls = fs::read_to_string(calls).unwrap();
     assert!(
         calls
@@ -470,4 +630,11 @@ exit 2
         fs::write(path, serde_json::to_string_pretty(&json!({"result":retried,"audit":audit,"old_files_preserved":true,"old_rows_preserved":true,"calls":calls.lines().collect::<Vec<_>>() })).unwrap()).unwrap();
     }
     assert_eq!(calls.lines().filter(|l| l.contains(" -X ")).count(), 1);
+}
+
+fn wait_for_supervisor_exit(pid: i32, deadline: Instant) {
+    while unsafe { libc::kill(pid, 0) } == 0 {
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(20));
+    }
 }

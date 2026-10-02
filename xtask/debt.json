@@ -1,0 +1,412 @@
+[
+  {
+    "key": "coupling::src/pr_evidence->src/state:cyclic_edge",
+    "ceiling": 1,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "coupling::src/state->src/pr_evidence:feedback",
+    "ceiling": 1,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "src/claim.rs::root::fresh:cognitive",
+    "ceiling": 49,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "src/claim.rs::root::fresh:cyclomatic",
+    "ceiling": 41,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "src/claim.rs::root::fresh:function_lines",
+    "ceiling": 91,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "src/cli.rs::file:file_lines",
+    "ceiling": 1010,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "src/cli.rs::root::live_process:cyclomatic",
+    "ceiling": 30,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "src/cli.rs::root::observation_summary:function_lines",
+    "ceiling": 121,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "src/cli.rs::root::show:function_lines",
+    "ceiling": 107,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "src/cli.rs::root::status:function_lines",
+    "ceiling": 100,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "src/cli.rs::root:module_lines",
+    "ceiling": 965,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "src/config.rs::root::Config::validate:cognitive",
+    "ceiling": 34,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "src/config.rs::root::Config::validate:cyclomatic",
+    "ceiling": 32,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "src/config.rs::root::Config::validate:function_lines",
+    "ceiling": 91,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "src/config.rs::root::validate_command:cognitive",
+    "ceiling": 41,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "src/coordinator.rs::file:file_lines",
+    "ceiling": 1190,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "src/coordinator.rs::root::monitor_running_attempt:cyclomatic",
+    "ceiling": 26,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "src/coordinator.rs::root::monitor_running_attempt:function_lines",
+    "ceiling": 107,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "src/coordinator.rs::root::operator_recover_missing_receipt:cyclomatic",
+    "ceiling": 29,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "src/coordinator.rs::root::operator_recover_missing_receipt:function_lines",
+    "ceiling": 115,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "src/coordinator.rs::root::reconcile_source:cognitive",
+    "ceiling": 69,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "src/coordinator.rs::root::reconcile_source:cyclomatic",
+    "ceiling": 39,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "src/coordinator.rs::root::reconcile_source:function_lines",
+    "ceiling": 127,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "src/coordinator.rs::root::tests::verified_stopped_attempt_pr_outcomes_gate_slot:function_lines",
+    "ceiling": 99,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "src/coordinator.rs::root:module_lines",
+    "ceiling": 809,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "src/eligibility.rs::root::select_with:function_lines",
+    "ceiling": 90,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "src/github/project.rs::root::GhProjectReader::issue:cyclomatic",
+    "ceiling": 28,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "src/github/project.rs::root::GhProjectReader::issue:function_lines",
+    "ceiling": 118,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "src/github/project.rs::root::GhProjectReader::page:cyclomatic",
+    "ceiling": 43,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "src/github/project.rs::root::GhProjectReader::page:function_lines",
+    "ceiling": 194,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "src/github/pull_request.rs::root::GhPullRequestReader::checks:cognitive",
+    "ceiling": 40,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "src/github/pull_request.rs::root::GhPullRequestReader::checks:cyclomatic",
+    "ceiling": 47,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "src/github/pull_request.rs::root::parse_evidence:function_lines",
+    "ceiling": 118,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "src/main.rs::root::dispatch:cyclomatic",
+    "ceiling": 29,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "src/main.rs::root::dispatch:function_lines",
+    "ceiling": 105,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "src/state.rs::file:file_lines",
+    "ceiling": 1668,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "src/state.rs::root::StateStore::ensure_dispatch_capacity:function_lines",
+    "ceiling": 85,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "src/state.rs::root::validate_verified_open_pr:cyclomatic",
+    "ceiling": 27,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "src/state.rs::state::StateStore:type_lines",
+    "ceiling": 1253,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "src/state.rs::state::StateStore:type_methods",
+    "ceiling": 49,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "src/supervisor.rs::file:file_lines",
+    "ceiling": 1588,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "src/supervisor.rs::root::execute_with_binary:cyclomatic",
+    "ceiling": 30,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "src/supervisor.rs::root::execute_with_binary:function_lines",
+    "ceiling": 124,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "src/supervisor.rs::root::handle_stop:cyclomatic",
+    "ceiling": 33,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "src/supervisor.rs::root::prepare_resume:cyclomatic",
+    "ceiling": 33,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "src/supervisor.rs::root::run_gated_child_control:cognitive",
+    "ceiling": 41,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "src/supervisor.rs::root::run_gated_child_control:cyclomatic",
+    "ceiling": 56,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "src/supervisor.rs::root::run_gated_child_control:function_lines",
+    "ceiling": 201,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "src/supervisor.rs::root::stop_without_supervisor:cyclomatic",
+    "ceiling": 27,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "src/supervisor.rs::root::supervise:cyclomatic",
+    "ceiling": 30,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "src/supervisor.rs::root:module_lines",
+    "ceiling": 1254,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "src/worktree.rs::root::ensure_worktree_with_hooks:cyclomatic",
+    "ceiling": 33,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "src/worktree.rs::root::ensure_worktree_with_hooks:function_lines",
+    "ceiling": 97,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "tests/claim.rs::file:file_lines",
+    "ceiling": 1023,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "tests/claim.rs::root::claim_fixture_with_milestone:function_lines",
+    "ceiling": 91,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "tests/claim.rs::root:module_lines",
+    "ceiling": 859,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "tests/cli.rs::file:file_lines",
+    "ceiling": 1536,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "tests/cli.rs::root::operator_observations_are_typed_current_and_redacted_in_status_and_show:function_lines",
+    "ceiling": 107,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "tests/cli.rs::root::resume_cli::Harness::seed_running_task:function_lines",
+    "ceiling": 88,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "tests/cli.rs::root:module_lines",
+    "ceiling": 645,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "tests/coordinator.rs::file:file_lines",
+    "ceiling": 887,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "tests/coordinator.rs::root::Fixture::new:function_lines",
+    "ceiling": 93,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "tests/platform_dry_run.rs::root::installed_rs_initial_turn_uses_private_config_and_loopback_provider:function_lines",
+    "ceiling": 246,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "tests/platform_dry_run.rs::root::installed_rs_stop_uses_private_supervisor_and_reconciles:function_lines",
+    "ceiling": 322,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "tests/platform_dry_run.rs::root::serve_stop_fixture:cognitive",
+    "ceiling": 33,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "tests/platform_dry_run.rs::root::serve_stop_fixture:function_lines",
+    "ceiling": 91,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "tests/platform_dry_run.rs::root:module_lines",
+    "ceiling": 747,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "tests/state.rs::file:file_lines",
+    "ceiling": 830,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "tests/state.rs::root:module_lines",
+    "ceiling": 824,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "tests/supervisor.rs::file:file_lines",
+    "ceiling": 3912,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "tests/supervisor.rs::root::committed_worker_resumes_same_session_and_worktree_after_verified_stop:function_lines",
+    "ceiling": 95,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "tests/supervisor.rs::root::escaped_tracked_descendant_holds_valid_receipt_until_reaped:function_lines",
+    "ceiling": 100,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "tests/supervisor.rs::root::live_matching_pr_requests_stop_but_waits_for_exit_and_independent_rechecks:function_lines",
+    "ceiling": 107,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "tests/supervisor.rs::root::live_worker_log_write_failure_stops_and_holds_both_streams:function_lines",
+    "ceiling": 95,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "tests/supervisor.rs::root::missing_receipt_cannot_be_overridden_by_matching_open_pr:function_lines",
+    "ceiling": 90,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "tests/supervisor.rs::root::natural_exit_pr_error_keeps_held_slot_and_evidence:function_lines",
+    "ceiling": 114,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "tests/supervisor.rs::root::natural_exit_seven_attends_and_scheduler_dispatches_only_other_issue:function_lines",
+    "ceiling": 85,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "tests/supervisor.rs::root::operator_recovery_absent_pr_records_telemetry_loss_and_releases_slot:function_lines",
+    "ceiling": 96,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "tests/supervisor.rs::root::operator_recovery_matching_pr_completes_task_and_persists_proof:function_lines",
+    "ceiling": 92,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "tests/supervisor.rs::root::operator_recovery_release_failure_rolls_back_for_absent_and_matching_pr:function_lines",
+    "ceiling": 87,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "tests/supervisor.rs::root::registered_shim_stays_gated_and_survives_supervisor_crash_after_release:function_lines",
+    "ceiling": 174,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  },
+  {
+    "key": "tests/supervisor.rs::root:module_lines",
+    "ceiling": 3645,
+    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
+  }
+]

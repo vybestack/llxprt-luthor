@@ -75,28 +75,20 @@ GitHub read trace. Before/after SHA-256 manifests match for all 11 original priv
 config/state/attempt files. The original receipt SHA-256 is
 `680313e48e0b9874866f90bf63bf0b52ddc21c051d5484c715d42b3d2bede5ed`.
 
-Release binary SHA-256: `8974d089ff670408e1927b387cdc3e960d16581caf6f0a46f54707a6bb750fd1`.
+## Historical release verification
 
-## Exact foreground operator command
+The release checks above used the binary at
+`.bootstrap-issue3/continuation-target-20261001/release/luthor`. Its recorded
+SHA-256, `8974d089ff670408e1927b387cdc3e960d16581caf6f0a46f54707a6bb750fd1`,
+identifies a build from the older `a60ffeff` base. These results and the recorded
+receipt are historical evidence only. They do not establish the state of a
+current task, worker configuration, or checkout.
 
-The command preserves the originally captured HOME and unset XDG/LLXPRT config
-overrides. Both current private worker templates were checked to use 512.
-Run this only from the foreground operator session; implementation verification
-did not invoke it:
+The foreground command recorded with that verification is obsolete. Do not run
+the original issue #2 task retry or reuse its old binary, attempt, or config.
 
-```sh
-/usr/bin/env -u XDG_CONFIG_HOME -u XDG_DATA_HOME -u XDG_STATE_HOME -u LLXPRT_CONFIG_HOME HOME=/Users/acoliver \
-  /Volumes/XS1000/acoliver/projects/llxprt-luthor/.bootstrap-issue3/continuation-target-20261001/release/luthor retry \
-  task-2d4d9c90c78b4596896981c69456b32f \
-  --attempt attempt-bf8bfc3b03cbdc7b971b65ca0e5b69fb \
-  --config /Volumes/XS1000/acoliver/projects/llxprt-luthor/branch-1/tmp/selfhost-issue2/config-sol.json \
-  --config-revision selfhost-issue2-sol-512-terminal-20261001 \
-  --actor acoliver \
-  --reason 'Revalidate recorded native startup rejection and continue with corrected 512 tool-call budget' \
-  --revalidate-terminal-exit --execute
-```
-
-The resulting JSON reports the new attempt ID. External uncertainty or changed
-local evidence retains the task without launching; no manual unassignment,
-SQLite edit, successor task or worker command wrapper is required. PR #4 remains
-open and must not be merged without Andrew's explicit instruction.
+For a future retry that has an authorized operational need, use the supported
+`luthor retry ... --revalidate-terminal-exit` flow documented in the [README](../README.md)
+and [config and state guide](config-and-state.md). Gather fresh evidence for the
+task, attempt, checkout, configuration, and authorization before executing a
+retry. No current task retry was performed for this documentation update.

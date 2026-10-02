@@ -1,3 +1,7 @@
+use ports::completion_claim_failure_reason;
+mod ports;
+mod retry;
+use crate::state::OperatorRecoveryAudit;
 use crate::{
     claim::{self, AssignmentWriter, ClaimError},
     config::Config,
@@ -9,8 +13,10 @@ use crate::{
     pr_evidence::{VerifiedOpenPr, expected_for_task},
     state::{ExitPrEvidence, PausePrEvidence, PausePrStatus, StateError, StateStore},
     supervisor::{self, LaunchPlan, SupervisorError},
-    worktree::{self, WorktreeError, WorktreeInspection},
+    worktree::{self, WorktreeInspection},
 };
+pub use ports::{DispatchError, SupervisorLauncher};
+pub use retry::{RetryDependencies, retry_one};
 use serde::Serialize;
 use std::{
     collections::HashSet,
@@ -195,14 +201,6 @@ pub fn reconcile_source<P: ProjectReader>(
     Ok(report)
 }
 
-fn completion_claim_failure_reason(error: &ClaimError) -> &'static str {
-    match error {
-        ClaimError::Changed => "completion claim changed",
-        ClaimError::Source(_) => "completion claim read failed",
-        _ => unreachable!("completion claim verification only returns source or changed errors"),
-    }
-}
-
 /// Verify that the selected issue is still assigned solely to the configured
 /// login before completion is accepted.
 pub(crate) fn verify_completion_claim<P: ProjectReader>(
@@ -220,15 +218,23 @@ pub(crate) fn verify_completion_claim<P: ProjectReader>(
     Ok(())
 }
 
-#[derive(Serialize)]
-struct OperatorRecoveryAudit<'a> {
-    actor: &'a str,
-    reason: &'a str,
-    observed_at_unix_secs: u64,
-    os_ids: Vec<serde_json::Value>,
-    supervisor: serde_json::Value,
-    child: serde_json::Value,
-    tracked_os_identities: Vec<serde_json::Value>,
+impl VerifiedOpenPr {
+    fn from_recovery_lookup<Q: PullRequestReader>(
+        store: &StateStore,
+        task_id: &str,
+        attempt_id: &str,
+        prs: &mut Q,
+        pr: crate::github::pull_request::PullRequestEvidence,
+        observed_at_unix_secs: u64,
+    ) -> Result<VerifiedOpenPr, &'static str> {
+        let login = prs
+            .authenticated_identity()
+            .map_err(|_| "PR identity unavailable")?;
+        let expected = expected_for_task(store, task_id, prs, &login)
+            .map_err(|_| "PR evidence unavailable")?;
+        VerifiedOpenPr::from_matching(pr, &expected, &login, attempt_id, observed_at_unix_secs)
+            .map_err(|_| "PR verification failed")
+    }
 }
 
 pub fn operator_recover_missing_receipt<P: ProjectReader, Q: PullRequestReader>(
@@ -270,26 +276,17 @@ pub fn operator_recover_missing_receipt<P: ProjectReader, Q: PullRequestReader>(
             if observed_at_unix_secs == 0 {
                 return Ok(held("invalid recovery timestamp"));
             }
-            let verified = (|| {
-                let login = prs
-                    .authenticated_identity()
-                    .map_err(|_| "PR identity unavailable")?;
-                let expected = expected_for_task(store, task_id, prs, &login)
-                    .map_err(|_| "PR evidence unavailable")?;
-                VerifiedOpenPr::from_matching(
-                    *pr,
-                    &expected,
-                    &login,
-                    attempt_id,
-                    observed_at_unix_secs,
-                )
-                .map_err(|_| "PR verification failed")
-            })();
-            let verified = match verified {
-                Ok(proof) => proof,
+            match VerifiedOpenPr::from_recovery_lookup(
+                store,
+                task_id,
+                attempt_id,
+                prs,
+                *pr,
+                observed_at_unix_secs,
+            ) {
+                Ok(proof) => (PausePrStatus::Open, Some(proof)),
                 Err(reason) => return Ok(held(reason)),
-            };
-            (PausePrStatus::Open, Some(verified))
+            }
         }
         Ok(LookupResult::Ambiguous(_)) => return Ok(held("pull request lookup is ambiguous")),
         Err(_) => return Ok(held("pull request lookup failed")),
@@ -297,8 +294,7 @@ pub fn operator_recover_missing_receipt<P: ProjectReader, Q: PullRequestReader>(
     let Some(payload) = store.evidence_payload(task_id, None, "worktree_created")? else {
         return Ok(held("worktree evidence is missing"));
     };
-    let snapshot: crate::state::WorktreeIdentity = serde_json::from_str(&payload)?;
-    if worktree::verify_snapshot(&snapshot).is_err() {
+    if worktree::verify_snapshot(&serde_json::from_str(&payload)?).is_err() {
         return Ok(held("worktree snapshot changed"));
     }
     if let Err(error) = verify_completion_claim(projects, &selection) {
@@ -730,36 +726,12 @@ impl IdCreator for OsIdCreator {
     }
 }
 
-pub trait SupervisorLauncher {
-    fn launch(&mut self, store: &mut StateStore, plan: &LaunchPlan) -> Result<(), SupervisorError>;
-}
-
 pub struct ProductionLauncher;
 
 impl SupervisorLauncher for ProductionLauncher {
     fn launch(&mut self, store: &mut StateStore, plan: &LaunchPlan) -> Result<(), SupervisorError> {
         supervisor::execute(store, plan)
     }
-}
-
-#[derive(Debug, Error)]
-pub enum DispatchError {
-    #[error(transparent)]
-    State(#[from] StateError),
-    #[error(transparent)]
-    Claim(#[from] ClaimError),
-    #[error(transparent)]
-    Worktree(#[from] WorktreeError),
-    #[error(transparent)]
-    PullRequest(#[from] LookupError),
-    #[error(transparent)]
-    Supervisor(#[from] SupervisorError),
-    #[error("retry held: {reason}")]
-    RetryHeld { reason: String },
-    #[error("claim changed before launch")]
-    ChangedClaim,
-    #[error("pull request is no longer absent")]
-    ExistingPr,
 }
 
 #[derive(Debug, Error)]
@@ -1036,141 +1008,6 @@ where
         store.hold_task(task_id, reason)?;
     }
     result
-}
-
-pub struct RetryDependencies<'a, P, Q, L> {
-    pub task_id: &'a str,
-    pub previous_attempt_id: &'a str,
-    pub attempt_id: &'a str,
-    pub config: &'a Config,
-    pub config_revision: &'a str,
-    pub actor: &'a str,
-    pub reason: &'a str,
-    pub revalidate_terminal_exit: bool,
-    pub projects: &'a mut P,
-    pub prs: &'a mut Q,
-    pub launcher: &'a mut L,
-}
-
-/// One explicit continuation. Refusals retain the task and all old attempt evidence.
-/// No assignment, worktree creation, or automatic retry is performed here.
-pub fn retry_one<P: ProjectReader, Q: PullRequestReader, L: SupervisorLauncher>(
-    store: &mut StateStore,
-    dependencies: RetryDependencies<'_, P, Q, L>,
-) -> Result<LaunchPlan, DispatchError> {
-    let RetryDependencies {
-        task_id,
-        previous_attempt_id,
-        attempt_id,
-        config,
-        config_revision,
-        actor,
-        reason,
-        revalidate_terminal_exit,
-        projects,
-        prs,
-        launcher,
-    } = dependencies;
-    let (previous, _) = store.retry_context(task_id, previous_attempt_id)?;
-    let selection = store.selection_for_attempt(&previous)?;
-    let current = crate::state::EffectiveConfigSnapshot::from(config);
-    if config.validate().is_err()
-        || config.state_root != store.root()
-        || !crate::state::same_task_config(&selection.effective_config, &current)
-        || config_revision.trim().is_empty()
-        || config_revision == previous.config_revision
-        || reason.trim().is_empty()
-        || actor != selection.candidate.mapping.allowed_pr_author
-    {
-        return Err(StateError::InvalidConfig.into());
-    }
-    supervisor::validate_stop_socket_path(store.root(), attempt_id)?;
-    store.ensure_dispatch_capacity()?;
-    let mut terminal_exit = None;
-    match supervisor::recheck_retry_exit(
-        store,
-        task_id,
-        previous_attempt_id,
-        revalidate_terminal_exit,
-        &mut terminal_exit,
-    )? {
-        supervisor::Reconciliation::Completed {
-            exit_code: Some(_),
-            signal: None,
-        } => {}
-        supervisor::Reconciliation::Held { reason } => {
-            return Err(DispatchError::RetryHeld { reason });
-        }
-        _ => {
-            return Err(DispatchError::RetryHeld {
-                reason: "previous attempt is not a verified natural exit".into(),
-            });
-        }
-    }
-    let claim = store
-        .source_claim_intent(task_id)?
-        .ok_or(DispatchError::ChangedClaim)?;
-    let expected = serde_json::json!({"principal": config.assignment_login,
-        "repository": selection.candidate.repository, "number": selection.candidate.issue_number});
-    if serde_json::from_str::<serde_json::Value>(&claim).ok() != Some(expected) {
-        return Err(DispatchError::ChangedClaim);
-    }
-    let (item, issue) = claim::fresh(projects, &selection.candidate)?;
-    if issue.assignees != [config.assignment_login.as_str()] {
-        return Err(DispatchError::ChangedClaim);
-    }
-    worktree::verify_existing_worktree(store, task_id)?;
-    if prs.authenticated_identity()? != actor {
-        return Err(DispatchError::ChangedClaim);
-    }
-    let result = lookup(
-        prs,
-        &selection.candidate.mapping.code_repository,
-        &selection.candidate.issue_url,
-    );
-    let status = match &result {
-        Ok(LookupResult::Absent) => PausePrStatus::Absent,
-        Ok(LookupResult::OpenPreexisting(_)) => PausePrStatus::Open,
-        Ok(LookupResult::Ambiguous(_)) => PausePrStatus::Ambiguous,
-        Err(error) => PausePrStatus::Error {
-            category: error.category,
-            code: error.code.into(),
-            http_status: error.status,
-        },
-    };
-    let proof = ExitPrEvidence {
-        observed_at_unix_secs: SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|_| SupervisorError::IdentityUnavailable)?
-            .as_secs(),
-        repository: selection.candidate.mapping.code_repository.clone(),
-        status,
-    };
-    if result? != LookupResult::Absent {
-        return Err(DispatchError::ExistingPr);
-    }
-    let source = crate::state::RetrySourceEvidence {
-        item,
-        issue,
-        claim,
-        observed_at_unix_secs: proof.observed_at_unix_secs,
-    };
-    let plan = supervisor::prepare_retry(
-        store,
-        &previous,
-        supervisor::RetryPlanAuthorization {
-            attempt_id,
-            config,
-            revision: config_revision,
-            actor,
-            reason,
-            pr: proof,
-            source,
-            terminal_exit,
-        },
-    )?;
-    launcher.launch(store, &plan)?;
-    Ok(plan)
 }
 
 #[cfg(test)]

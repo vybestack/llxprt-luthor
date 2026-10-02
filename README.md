@@ -185,3 +185,12 @@ old boot identity. Ordinary historical exits stay held because escaped runtime
 workers cannot be excluded by a receipt and group probes alone. See
 [terminal startup revalidation](dev-docs/config-and-state.md#darwin-boot-identity-and-terminal-startup-revalidation)
 for the proof and refusal boundaries.
+
+## Rust quality gates
+
+From the repository root, use **`cargo xtask ci`** for the same offline, locked
+policy enforced on Ubuntu and macOS. See [the xtask guide](xtask/README.md) for
+the compatible toolchain, deliberate dependency fetch, absolute workspace-local
+Cargo/fixture directories, measurements, debt ratchet and executed contracts.
+Keep cwd stable for Unix stop-socket fixtures; do not use an external `/tmp`
+workaround or weaken production path validation.

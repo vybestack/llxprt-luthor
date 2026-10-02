@@ -1,4 +1,6 @@
 use luthor::platform::{ProcessStatError, parse_linux_process_stat};
+#[cfg(target_os = "macos")]
+use std::io::{Read, Write};
 
 fn stat_fixture(name: &str, state: char, start: &str) -> String {
     let mut fields = vec![state.to_string()];
@@ -27,6 +29,7 @@ fn linux_process_observation_rejects_missing_identity_fields() {
     );
 }
 
+#[cfg(target_os = "macos")]
 fn bounded_sanitized_output(path: &std::path::Path) -> String {
     use std::fs;
 
@@ -68,7 +71,6 @@ fn installed_rs_initial_turn_uses_private_config_and_loopback_provider() {
     };
     use std::{
         fs,
-        io::{Read, Write},
         net::TcpListener,
         path::Path,
         process::Command,
@@ -319,15 +321,7 @@ fn installed_rs_stop_uses_private_supervisor_and_reconciles() {
         supervisor::{execute_with_binary, prepare_initial, prepare_resume},
         worktree::ensure_worktree,
     };
-    use std::{
-        fs,
-        io::{Read, Write},
-        net::TcpListener,
-        path::Path,
-        process::Command,
-        thread,
-        time::{Duration, Instant},
-    };
+    use std::{fs, net::TcpListener, path::Path, process::Command, thread, time::Duration};
     use tempfile::tempdir;
 
     fn git(dir: &Path, args: &[&str]) {
@@ -357,89 +351,7 @@ fn installed_rs_stop_uses_private_supervisor_and_reconciles() {
     listener.set_nonblocking(true).unwrap();
     let address = listener.local_addr().unwrap();
     let (request_tx, request_rx) = std::sync::mpsc::channel();
-    let server = thread::spawn(move || {
-        let deadline = Instant::now() + Duration::from_secs(20);
-        for _ in 0..2 {
-            loop {
-                let (mut stream, _) = loop {
-                    match listener.accept() {
-                        Ok(connection) => break connection,
-                        Err(error)
-                            if error.kind() == std::io::ErrorKind::WouldBlock
-                                && Instant::now() < deadline =>
-                        {
-                            thread::sleep(Duration::from_millis(20))
-                        }
-                        Err(error) => panic!(
-                            "loopback provider did not receive a request before deadline: {error}"
-                        ),
-                    }
-                };
-                stream
-                    .set_read_timeout(Some(Duration::from_secs(5)))
-                    .unwrap();
-                let mut bytes = Vec::new();
-                let mut chunk = [0; 4096];
-                loop {
-                    match stream.read(&mut chunk) {
-                        Ok(0) if bytes.is_empty() => break,
-                        Ok(0) => break,
-                        Ok(n) => bytes.extend_from_slice(&chunk[..n]),
-                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                            panic!("loopback provider request read timed out")
-                        }
-                        Err(error) => panic!("loopback provider request read failed: {error}"),
-                    }
-                    if let Some(split) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
-                        let headers = String::from_utf8_lossy(&bytes[..split]);
-                        let length = headers
-                            .lines()
-                            .find_map(|line| {
-                                let (name, value) = line.split_once(':')?;
-                                name.eq_ignore_ascii_case("content-length")
-                                    .then(|| value.trim().parse::<usize>().ok())
-                                    .flatten()
-                            })
-                            .unwrap_or(0);
-                        if bytes.len() >= split + 4 + length {
-                            break;
-                        }
-                    }
-                }
-                if bytes.is_empty() {
-                    continue;
-                }
-                let split = bytes
-                    .windows(4)
-                    .position(|window| window == b"\r\n\r\n")
-                    .unwrap_or_else(|| panic!("loopback provider received nonempty malformed request without header terminator ({} bytes)", bytes.len()));
-                let headers = String::from_utf8_lossy(&bytes[..split]);
-                if !headers
-                    .lines()
-                    .next()
-                    .is_some_and(|line| line.starts_with("POST "))
-                {
-                    panic!(
-                        "loopback provider received malformed request line: {}",
-                        headers.lines().next().unwrap_or("<empty>")
-                    );
-                }
-                let request_line = headers.lines().next().unwrap();
-                let body_start = split + 4;
-                let request_body = String::from_utf8_lossy(&bytes[body_start..])
-                    .chars()
-                    .take(8192)
-                    .collect::<String>();
-                request_tx
-                    .send(format!("{request_line}\n{request_body}"))
-                    .unwrap();
-                let body = r#"{"id":"chatcmpl-test","object":"chat.completion","created":0,"model":"loopback","choices":[{"index":0,"message":{"role":"assistant","content":"Hello again."},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}"#;
-                write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
-                stream.flush().unwrap();
-                break;
-            }
-        }
-    });
+    let server = thread::spawn(move || serve_stop_fixture(listener, request_tx));
     let profile = dir.path().join("loopback-profile.json");
     fs::write(
         &profile,
@@ -610,14 +522,7 @@ fn installed_rs_stop_uses_private_supervisor_and_reconciles() {
     let receipt_path = config
         .state_root
         .join("attempts/installed-stop.receipt.json");
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while !receipt_path.exists() && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(20));
-    }
-    assert!(
-        receipt_path.exists(),
-        "real rs stop produced no durable receipt"
-    );
+    wait_for_stop_receipt(&receipt_path);
     let receipt: luthor::supervisor::ExitReceipt =
         serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
     assert!(
@@ -662,14 +567,7 @@ fn installed_rs_stop_uses_private_supervisor_and_reconciles() {
     let resume_receipt_path = config
         .state_root
         .join("attempts/installed-resume.receipt.json");
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while !resume_receipt_path.exists() && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(20));
-    }
-    assert!(
-        resume_receipt_path.exists(),
-        "real rs resume produced no exit receipt"
-    );
+    wait_for_stop_receipt(&resume_receipt_path);
     let resume_receipt: luthor::supervisor::ExitReceipt =
         serde_json::from_slice(&fs::read(&resume_receipt_path).unwrap()).unwrap();
     let stream_tail = |path: &Path| {
@@ -738,4 +636,114 @@ fn installed_rs_stop_uses_private_supervisor_and_reconciles() {
         "rs did not create session data under private config root"
     );
     assert!(!dir.path().join("gh-calls").exists());
+}
+
+#[cfg(target_os = "macos")]
+fn serve_stop_fixture(
+    listener: std::net::TcpListener,
+    request_tx: std::sync::mpsc::Sender<String>,
+) {
+    use std::{
+        io::{Read, Write},
+        thread,
+        time::{Duration, Instant},
+    };
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    for _ in 0..2 {
+        loop {
+            let (mut stream, _) = loop {
+                match listener.accept() {
+                    Ok(connection) => break connection,
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::WouldBlock
+                            && Instant::now() < deadline =>
+                    {
+                        thread::sleep(Duration::from_millis(20))
+                    }
+                    Err(error) => panic!(
+                        "loopback provider did not receive a request before deadline: {error}"
+                    ),
+                }
+            };
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut bytes = Vec::new();
+            let mut chunk = [0; 4096];
+            loop {
+                match stream.read(&mut chunk) {
+                    Ok(0) if bytes.is_empty() => break,
+                    Ok(0) => break,
+                    Ok(n) => bytes.extend_from_slice(&chunk[..n]),
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        panic!("loopback provider request read timed out")
+                    }
+                    Err(error) => panic!("loopback provider request read failed: {error}"),
+                }
+                if let Some(split) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&bytes[..split]);
+                    let length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())
+                                .flatten()
+                        })
+                        .unwrap_or(0);
+                    if bytes.len() >= split + 4 + length {
+                        break;
+                    }
+                }
+            }
+            if bytes.is_empty() {
+                continue;
+            }
+            let split = bytes
+                    .windows(4)
+                    .position(|window| window == b"\r\n\r\n")
+                    .unwrap_or_else(|| panic!("loopback provider received nonempty malformed request without header terminator ({} bytes)", bytes.len()));
+            let headers = String::from_utf8_lossy(&bytes[..split]);
+            if !headers
+                .lines()
+                .next()
+                .is_some_and(|line| line.starts_with("POST "))
+            {
+                panic!(
+                    "loopback provider received malformed request line: {}",
+                    headers.lines().next().unwrap_or("<empty>")
+                );
+            }
+            let request_line = headers.lines().next().unwrap();
+            let body_start = split + 4;
+            let request_body = String::from_utf8_lossy(&bytes[body_start..])
+                .chars()
+                .take(8192)
+                .collect::<String>();
+            request_tx
+                .send(format!("{request_line}\n{request_body}"))
+                .unwrap();
+            let body = r#"{"id":"chatcmpl-test","object":"chat.completion","created":0,"model":"loopback","choices":[{"index":0,"message":{"role":"assistant","content":"Hello again."},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}"#;
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+            stream.flush().unwrap();
+            break;
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn wait_for_stop_receipt(receipt_path: &std::path::Path) {
+    use std::{
+        thread,
+        time::{Duration, Instant},
+    };
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !receipt_path.exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        receipt_path.exists(),
+        "real rs stop produced no durable receipt"
+    );
 }

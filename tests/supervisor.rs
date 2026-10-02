@@ -61,7 +61,13 @@ fn configured(root: &Path) -> (Config, Candidate) {
         ],
     };
     let config = Config {
-        state_root: root.join("state"),
+        state_root: if root.is_absolute() {
+            root.strip_prefix(std::env::current_dir().unwrap())
+                .unwrap()
+                .join("state")
+        } else {
+            root.join("state")
+        },
         worktree_root: root.join("worktrees"),
         capacity: 1,
         assignment_login: "operator".into(),
@@ -243,7 +249,14 @@ fn unverified_worktree_or_missing_session_cannot_reserve_or_launch() {
         "-p".into(),
         "prompt".into(),
     ];
-    let mut store = StateStore::open(dir.path().join("other-state"), 1).unwrap();
+    let mut store = StateStore::open(
+        dir.path()
+            .strip_prefix(std::env::current_dir().unwrap())
+            .unwrap()
+            .join("other-state"),
+        1,
+    )
+    .unwrap();
     claimed(&mut store, &config, &candidate, dir.path());
     assert!(matches!(
         prepare_initial(&mut store, "task", "attempt-1"),
@@ -1677,7 +1690,11 @@ impl IdCreator for OtherIds {
 fn natural_exit_seven_attends_and_scheduler_dispatches_only_other_issue() {
     let (_dir, config, mut store) = dispatched_fixture(7);
     let mut prs = ExitPr::default();
-    let (_, mut other) = configured(config.state_root.parent().unwrap());
+    let (_, mut other) = configured(
+        &std::env::current_dir()
+            .unwrap()
+            .join(config.state_root.parent().unwrap()),
+    );
     other.item_id = "other-item".into();
     other.issue_node_id = "other-issue".into();
     other.issue_number = 8;
@@ -1817,7 +1834,10 @@ fn natural_stop_race_fixture() -> (
     let dir = tempfile::tempdir().unwrap();
     let (config, mut store, plan, marker) = prepared_fake_worker(&dir);
     let cleanup = StopRaceCleanup(config.state_root.clone());
-    let release = config.state_root.join("release-natural-exit");
+    let release = std::env::current_dir()
+        .unwrap()
+        .join(&config.state_root)
+        .join("release-natural-exit");
     fs::write(
         &plan.executable,
         format!(
@@ -1922,98 +1942,7 @@ fn assert_natural_stop_accounted(
     ));
     drop(store);
 
-    let config_path = config.state_root.join("config.json");
-    fs::write(&config_path, serde_json::to_vec(config).unwrap()).unwrap();
-    let resume = Command::new(env!("CARGO_BIN_EXE_luthor"))
-        .args(["resume", "task", "--config"])
-        .arg(&config_path)
-        .arg("--execute")
-        .output()
-        .unwrap();
-    assert!(!resume.status.success());
-    assert!(String::from_utf8_lossy(&resume.stderr).contains("resume held: task is not resumable"));
-
-    let mut store = StateStore::open(&config.state_root, config.capacity).unwrap();
-    let view = |args: &[&str]| -> serde_json::Value {
-        let output = luthor::cli::execute(
-            &config.state_root,
-            &args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>(),
-        )
-        .unwrap();
-        serde_json::from_str(&output).unwrap()
-    };
-    let status = view(&["status"]);
-    let shown = view(&["show", "task"]);
-    assert_eq!(status["tasks"].as_array().unwrap().len(), 1);
-    let task = &status["tasks"][0];
-    assert_eq!(task["phase"], "attention");
-    assert_eq!(shown["phase"], task["phase"]);
-    assert_eq!(task["latest_attempt_id"], "attempt-real");
-    assert_eq!(shown["latest_attempt_id"], task["latest_attempt_id"]);
-    assert_eq!(task["latest_attempt_lifecycle"], "completed");
-    assert_eq!(
-        shown["attempts"][0]["lifecycle"],
-        task["latest_attempt_lifecycle"]
-    );
-    assert_eq!(
-        task["latest_attempt_outcome"],
-        "exit_code=Some(7);signal=None"
-    );
-    assert_eq!(
-        shown["latest_attempt_outcome"],
-        task["latest_attempt_outcome"]
-    );
-    assert_eq!(task["reserved_slot"], false);
-    assert_eq!(shown["reserved_slot"], task["reserved_slot"]);
-    assert_eq!(status["capacity"]["reserved"], 0);
-    assert_eq!(shown["attempts"].as_array().unwrap().len(), 1);
-    assert_eq!(shown["attempts"][0]["reservation"], "released");
-    assert_eq!(shown["session"], plan.session_id);
-    assert_eq!(
-        shown["worktree"],
-        serde_json::to_value(&plan.expected_worktree).unwrap()
-    );
-    let claims: Vec<_> = shown["evidence"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|event| event["kind"] == "claim_verified")
-        .collect();
-    assert_eq!(claims.len(), 1);
-    assert_eq!(claims[0]["detail"], config.assignment_login);
-    let launch: luthor::supervisor::LaunchPlan =
-        serde_json::from_str(&store.launch_intent("attempt-real").unwrap().unwrap()).unwrap();
-    assert_eq!(&launch, plan);
-    assert!(!store.has_attempt("task", "attempt-next").unwrap());
-    let kinds = store.evidence_kinds("task").unwrap();
-    assert_eq!(
-        kinds.iter().filter(|kind| *kind == "attempt_exit").count(),
-        1
-    );
-    assert!(!kinds.contains(&"independent_stop_signal".into()));
-    assert!(!kinds.contains(&"independent_stop_decision".into()));
-    assert_eq!(fs::read(receipt_path(config)).unwrap(), receipt);
-    let mut projects = OtherProject(
-        store.selection_evidence("task").unwrap().unwrap().candidate,
-        1,
-    );
-    assert!(matches!(
-        luthor::coordinator::reconcile_with_pr(
-            &mut store,
-            "task",
-            "attempt-real",
-            &mut projects,
-            &mut prs
-        )
-        .unwrap(),
-        Reconciliation::Completed { .. }
-    ));
-    assert_eq!(prs.reads, 1);
-    assert_eq!(store.reservation_count().unwrap(), 0);
-    assert_eq!(
-        store.task_phase("task").unwrap().as_deref(),
-        Some("attention")
-    );
+    assert_natural_stop_views_and_restart(config, plan, receipt, &mut prs);
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -3368,15 +3297,15 @@ fn same_binary_ready_without_release_does_not_launch_worker() {
 fn registered_shim_stays_gated_and_survives_supervisor_crash_after_release() {
     #[cfg(target_os = "linux")]
     if std::env::var_os("LUTHOR_STOP_TEST_SUBREAPER").is_none() {
-        let status = Command::new(std::env::current_exe().unwrap())
+        let output = Command::new(std::env::current_exe().unwrap())
             .arg("--exact")
             .arg("registered_shim_stays_gated_and_survives_supervisor_crash_after_release")
             .env("LUTHOR_STOP_TEST_SUBREAPER", "1")
-            .status()
+            .output()
             .unwrap();
         assert!(
-            status.success(),
-            "isolated subreaper test process failed: {status}"
+            output.status.success(),
+            "isolated subreaper test process failed: {output:?}"
         );
         return;
     }
@@ -3537,24 +3466,7 @@ fn registered_shim_stays_gated_and_survives_supervisor_crash_after_release() {
         Some(libc::ESRCH)
     );
     assert!(!attempts.join("attempt-real.receipt.json").exists());
-    let kinds = store.evidence_kinds("task").unwrap();
-    assert!(kinds.contains(&"independent_stop_decision".into()));
-    assert!(kinds.contains(&"independent_stop_signal".into()));
-    assert!(kinds.contains(&"independent_group_absent".into()));
-    assert!(matches!(
-        reconcile_attempt(&mut store, "task", "attempt-real").unwrap(),
-        Reconciliation::Held { reason } if reason == "live worker identity or reservation unverified"
-    ));
-    assert_eq!(store.reservation_count().unwrap(), 1);
-    drop(store);
-    let store = StateStore::open(&config.state_root, 1).unwrap();
-    assert_eq!(store.reservation_count().unwrap(), 1);
-    assert!(
-        store
-            .evidence_kinds("task")
-            .unwrap()
-            .contains(&"independent_group_absent".into())
-    );
+    assert_crashed_supervisor_reservation(&config, store);
 }
 
 #[cfg(unix)]
@@ -4275,872 +4187,55 @@ fn initial_rejects_conflicting_session_and_cwd_arguments_before_reservation() {
 }
 
 #[cfg(unix)]
-fn retry_fixture() -> (tempfile::TempDir, Config, StateStore) {
-    retry_fixture_with_saved_budget(None)
-}
-
-#[cfg(unix)]
-fn retry_fixture_with_saved_budget(
-    budget: Option<&str>,
-) -> (tempfile::TempDir, Config, StateStore) {
-    use std::os::unix::fs::PermissionsExt;
-    let dir = tempfile::tempdir().unwrap();
-    let (mut config, candidate) = configured(dir.path());
-    let worker = dir.path().join("llxprt-code-rs");
-    fs::write(&worker, r#"#!/bin/sh
-session=''
-budget=''
-while test "$#" -gt 0; do
-  case "$1" in
-    --session) session="$2"; shift ;;
-    --max-tool-calls) budget="$2"; shift ;;
-  esac
-  shift
-done
-if test "$budget" = 1024; then
-  printf '{"error":{"code":"max-tool-calls","message":"--max-tool-calls must be -1 or an integer from 1 through 512 (got 1024)"},"session_id":"%s","status":"error"}\n' "$session"
-fi
-exit 2
-"#).unwrap();
-    fs::set_permissions(&worker, fs::Permissions::from_mode(0o700)).unwrap();
-    config.initial.executable = worker.clone();
-    config.resume.executable = worker;
-    let mut store = StateStore::open(&config.state_root, 1).unwrap();
-    claimed(&mut store, &config, &candidate, dir.path());
-    if let Some(budget) = budget {
-        // Reproduce a selection saved by a build that accepted the unsupported budget.
-        let mut saved = store.selection_evidence("task").unwrap().unwrap();
-        saved
-            .effective_config
-            .initial
-            .args
-            .extend(["--max-tool-calls".into(), budget.into()]);
-        saved
-            .effective_config
-            .resume
-            .args
-            .extend(["--max-tool-calls".into(), budget.into()]);
-        let db = rusqlite::Connection::open(config.state_root.join("state.sqlite3")).unwrap();
-        db.execute(
-            "UPDATE evidence SET payload=?1 WHERE task_id='task' AND kind='selection'",
-            [serde_json::to_string(&saved).unwrap()],
-        )
-        .unwrap();
-    }
-    let plan = prepare_initial(&mut store, "task", "attempt-real").unwrap();
-    execute_with_binary(&mut store, &plan, Path::new(env!("CARGO_BIN_EXE_luthor"))).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !receipt_path(&config).exists() {
-        assert!(
-            Instant::now() < deadline,
-            "retry fixture receipt missing: {:?}",
-            fs::read_to_string(
-                config
-                    .state_root
-                    .join("attempts/attempt-real.supervisor-error.json")
-            )
-        );
-        thread::sleep(Duration::from_millis(20));
-    }
-    let selection = store.selection_evidence("task").unwrap().unwrap();
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        let result = luthor::coordinator::reconcile_with_pr(
-            &mut store,
-            "task",
-            "attempt-real",
-            &mut OtherProject(selection.candidate.clone(), 1),
-            &mut ExitPr::default(),
-        )
-        .unwrap();
-        if store.task_phase("task").unwrap().as_deref() == Some("attention") {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "fixture exit not reconciled: {result:?}"
-        );
-        thread::sleep(Duration::from_millis(20));
-    }
-    // A completed receipt may precede the detached supervisor's own termination.
-    let db = rusqlite::Connection::open(config.state_root.join("state.sqlite3")).unwrap();
-    let ready: String = db.query_row("SELECT payload FROM evidence WHERE attempt_id='attempt-real' AND kind='supervisor_ready'", [], |r| r.get(0)).unwrap();
-    let ready: serde_json::Value = serde_json::from_str(&ready).unwrap();
-    wait_for_process_and_group_absence(ready["pid"].as_i64().unwrap() as i32);
-    assert_eq!(
-        store.task_phase("task").unwrap().as_deref(),
-        Some("attention")
-    );
-    (dir, config, store)
-}
-
-#[cfg(unix)]
-fn retry(
-    store: &mut StateStore,
-    config: &Config,
-    projects: &mut OtherProject,
-    prs: &mut ExitPr,
-    launcher: &mut impl SupervisorLauncher,
-) -> Result<luthor::supervisor::LaunchPlan, luthor::coordinator::DispatchError> {
-    luthor::coordinator::retry_one(
-        store,
-        luthor::coordinator::RetryDependencies {
-            task_id: "task",
-            previous_attempt_id: "attempt-real",
-            attempt_id: "attempt-retry",
-            config,
-            config_revision: "corrected",
-            actor: "operator",
-            reason: "correct worker budget",
-            revalidate_terminal_exit: false,
-            projects,
-            prs,
-            launcher,
-        },
-    )
-}
-
-#[cfg(unix)]
 #[test]
 fn retry_natural_exit_audits_current_argv_preserves_history_and_reconciles_new_revision() {
-    let (_dir, mut config, mut store) = retry_fixture();
-    let original = store.selection_evidence("task").unwrap().unwrap();
-    let old_plan = store.launch_intent("attempt-real").unwrap().unwrap();
-    let old_receipt = fs::read(receipt_path(&config)).unwrap();
-    config
-        .resume
-        .args
-        .extend(["--max-tool-calls".into(), "512".into()]);
-    let mut prs = ExitPr::default();
-    let mut projects = OtherProject(original.candidate.clone(), 1);
-    let mut launcher = OtherLauncher::default();
-    let plan = retry(&mut store, &config, &mut projects, &mut prs, &mut launcher).unwrap();
-    assert_eq!(launcher.0, 1);
-    assert_eq!(
-        prs.reads, 1,
-        "cached PR absence must not authorize continuation"
-    );
-    assert_eq!(plan.config_revision, "corrected");
-    assert_eq!(plan.session_id, "task");
-    assert_eq!(plan.expected_worktree.branch, "luthor/task");
-    assert!(
-        plan.args
-            .windows(2)
-            .any(|pair| pair == ["--max-tool-calls", "512"])
-    );
-    let prompt = plan.args.windows(2).find(|p| p[0] == "--prompt").unwrap()[1].as_str();
-    assert!(prompt.contains("naturally exited worker"));
-    assert!(!prompt.contains("interrupted or canceled turn"));
-    assert_eq!(store.selection_evidence("task").unwrap().unwrap(), original);
-    assert_eq!(
-        store.launch_intent("attempt-real").unwrap().unwrap(),
-        old_plan
-    );
-    assert_eq!(fs::read(receipt_path(&config)).unwrap(), old_receipt);
-    assert_eq!(store.reservation_count().unwrap(), 1);
-    let audit = store
-        .evidence_payloads("task", "attempt-retry", "retry_authorized")
-        .unwrap();
-    let audit: serde_json::Value = serde_json::from_str(&audit[0]).unwrap();
-    assert_eq!(audit["actor"], "operator");
-    assert_eq!(audit["reason"], "correct worker budget");
-    assert_eq!(audit["previous_plan"]["config_revision"], "rev");
-    assert_eq!(audit["plan"]["attempt_id"], "attempt-retry");
-    assert_eq!(audit["reservation"], "attempt-retry");
-    assert_eq!(audit["pr"]["status"]["status"], "absent");
-    assert!(retry(&mut store, &config, &mut projects, &mut prs, &mut launcher).is_err());
-    assert_eq!(launcher.0, 1);
-    execute_with_binary(&mut store, &plan, Path::new(env!("CARGO_BIN_EXE_luthor"))).unwrap();
-    let path = config
-        .state_root
-        .join("attempts/attempt-retry.receipt.json");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !path.exists() {
-        assert!(
-            Instant::now() < deadline,
-            "authorized new revision did not pass worker gate"
-        );
-        thread::sleep(Duration::from_millis(20));
-    }
-    assert!(matches!(
-        reconcile_attempt(&mut store, "task", "attempt-retry").unwrap(),
-        Reconciliation::Completed {
-            exit_code: Some(2),
-            signal: None
-        }
-    ));
-    assert_eq!(store.reservation_count().unwrap(), 0);
+    retry_cases::ordinary::retry_natural_exit_audits_current_argv_preserves_history_and_reconciles_new_revision();
 }
 
 #[cfg(unix)]
 #[test]
 fn retry_refusals_never_reserve_or_launch_or_rewrite_selection() {
-    for historical in [false, true] {
-        retry_refusals_with_history(historical);
-    }
-}
-
-#[cfg(unix)]
-fn retry_refusals_with_history(historical: bool) {
-    for refusal in [
-        "receipt",
-        "plan",
-        "outcome",
-        "stop",
-        "active",
-        "reserved",
-        "incomplete",
-        "receipt_corrupt",
-        "source",
-        "mapping",
-        "identity",
-        "worktree",
-        "capacity",
-        "pr_error",
-        "pr_present",
-        "pr_ambiguous",
-        "pr_identity",
-        "task_identity",
-        "claim_intent",
-        "tracked_live",
-        "tracked_reused",
-        "supervisor_contradiction",
-        "receipt_contradiction",
-        "supervisor_error",
-        "invalid_config",
-    ] {
-        let (_dir, mut config, mut store) = if historical {
-            historical_retry_fixture()
-        } else {
-            retry_fixture()
-        };
-        let original = store.selection_evidence("task").unwrap().unwrap();
-        let old_plan = store.launch_intent("attempt-real").unwrap().unwrap();
-        let mut projects = OtherProject(original.candidate.clone(), 1);
-        let mut prs = ExitPr::default();
-        let db = rusqlite::Connection::open(config.state_root.join("state.sqlite3")).unwrap();
-        match refusal {
-            "receipt" => {
-                fs::remove_file(receipt_path(&config)).unwrap();
-            }
-            "plan" => {
-                fs::write(
-                    config.state_root.join("attempts/attempt-real.plan.json"),
-                    "{}",
-                )
-                .unwrap();
-            }
-            "outcome" => {
-                db.execute(
-                    "UPDATE attempts SET outcome='wrong' WHERE id='attempt-real'",
-                    [],
-                )
-                .unwrap();
-            }
-            "stop" => {
-                store
-                    .record_intent("late-stop", "task", Some("attempt-real"), "stop", "{}")
-                    .unwrap();
-            }
-            "active" => {
-                store.set_task_phase("task", "held").unwrap();
-            }
-            "reserved" => {
-                db.execute(
-                    "UPDATE reservations SET status='reserved' WHERE attempt_id='attempt-real'",
-                    [],
-                )
-                .unwrap();
-            }
-            "incomplete" => {
-                db.execute("UPDATE attempts SET lifecycle='launch_intended',outcome=NULL WHERE id='attempt-real'", []).unwrap();
-            }
-            "receipt_corrupt" => {
-                fs::write(receipt_path(&config), "{").unwrap();
-            }
-            "source" => {
-                projects.1 = 0;
-            }
-            "mapping" => {
-                config.mappings[0].base_branch = "other".into();
-            }
-            "identity" => {
-                config.assignment_login = "another".into();
-            }
-            "worktree" => {
-                git(
-                    &config.worktree_root.join("task"),
-                    &["checkout", "--detach"],
-                );
-            }
-            "capacity" => {
-                let mut other = original.candidate.clone();
-                other.issue_node_id = "other".into();
-                other.item_id = "other".into();
-                other.issue_number = 8;
-                other.issue_url = "https://github.com/org/tracker/issues/8".into();
-                store.create_task("other", &other, "rev", &config).unwrap();
-                store.reserve("other", "other-attempt").unwrap();
-            }
-            "pr_error" => {
-                prs.fail = true;
-            }
-            "pr_present" => {
-                prs.matching = Some((original.candidate.issue_url.clone(), "luthor/task".into()));
-            }
-            "pr_ambiguous" => {
-                prs.ambiguous = true;
-                prs.matching = Some((original.candidate.issue_url.clone(), "luthor/task".into()));
-            }
-            "pr_identity" => {
-                prs.login = Some("another".into());
-            }
-            "task_identity" => {
-                db.execute(
-                    "UPDATE tasks SET tracker_repo_id='different' WHERE id='task'",
-                    [],
-                )
-                .unwrap();
-            }
-            "claim_intent" => {
-                db.execute("UPDATE intents SET detail='{}' WHERE task_id='task' AND kind='claim_assignment'", []).unwrap();
-            }
-            "tracked_live" | "tracked_reused" => {
-                let (boot, mut start) = test_process_identity(std::process::id());
-                if refusal == "tracked_reused" {
-                    start = "different historical start".into();
-                }
-                store.record_evidence("task", Some("attempt-real"), "tracked_descendant", &serde_json::json!({"pid":std::process::id(), "boot_identity":boot,"start_identity":start}).to_string()).unwrap();
-            }
-            "supervisor_contradiction" => {
-                db.execute("UPDATE evidence SET payload=json_set(payload,'$.boot_identity','contradiction') WHERE attempt_id='attempt-real' AND kind='supervisor_ready'", []).unwrap();
-            }
-            "receipt_contradiction" => {
-                edit_receipt(&config, |receipt| {
-                    receipt.boot_identity = "contradiction".into()
-                });
-            }
-            "supervisor_error" => {
-                fs::write(
-                    config
-                        .state_root
-                        .join("attempts/attempt-real.supervisor-error.json"),
-                    "{}",
-                )
-                .unwrap();
-            }
-            "invalid_config" => {
-                config
-                    .resume
-                    .args
-                    .extend(["--max-tool-calls".into(), "1024".into()]);
-            }
-            _ => unreachable!(),
-        }
-        let reservations = store.reservation_count().unwrap();
-        let rows = old_retry_rows(&config);
-        let mut launcher = OtherLauncher::default();
-        assert!(
-            (if historical {
-                historical_retry(&mut store, &config, &mut projects, &mut prs, &mut launcher)
-            } else {
-                retry(&mut store, &config, &mut projects, &mut prs, &mut launcher)
-            })
-            .is_err(),
-            "{refusal}"
-        );
-        assert_eq!(launcher.0, 0, "{refusal}");
-        assert_eq!(
-            old_retry_rows(&config),
-            rows,
-            "refusal changed old history: {refusal}, historical={historical}"
-        );
-        assert!(
-            store
-                .evidence_payloads("task", "attempt-retry", "retry_authorized")
-                .unwrap()
-                .is_empty(),
-            "{refusal}"
-        );
-        assert_eq!(
-            store.reservation_count().unwrap(),
-            reservations,
-            "{refusal}"
-        );
-        assert_eq!(
-            store.latest_attempt("task").unwrap().as_deref(),
-            Some("attempt-real"),
-            "{refusal}"
-        );
-        assert_eq!(
-            store.selection_evidence("task").unwrap().unwrap(),
-            original,
-            "{refusal}"
-        );
-        assert_eq!(
-            store.launch_intent("attempt-real").unwrap().unwrap(),
-            old_plan,
-            "{refusal}"
-        );
-        assert!(
-            store.launch_intent("attempt-retry").unwrap().is_none(),
-            "{refusal}"
-        );
-    }
+    retry_cases::ordinary::retry_refusals_never_reserve_or_launch_or_rewrite_selection();
 }
 
 #[cfg(unix)]
 #[test]
 fn retry_unsupported_saved_budget_uses_corrected_template_without_rewriting_old_argv() {
-    let (_dir, mut config, mut store) = retry_fixture_with_saved_budget(Some("1024"));
-    let original = store.selection_evidence("task").unwrap().unwrap();
-    let old_plan = store.launch_intent("attempt-real").unwrap().unwrap();
-    let old_plan_typed: luthor::supervisor::LaunchPlan = serde_json::from_str(&old_plan).unwrap();
-    assert!(
-        old_plan_typed
-            .args
-            .windows(2)
-            .any(|p| p == ["--max-tool-calls", "1024"])
-    );
-    config
-        .initial
-        .args
-        .extend(["--max-tool-calls".into(), "512".into()]);
-    config
-        .resume
-        .args
-        .extend(["--max-tool-calls".into(), "512".into()]);
-    let mut launcher = OtherLauncher::default();
-    let plan = retry(
-        &mut store,
-        &config,
-        &mut OtherProject(original.candidate.clone(), 1),
-        &mut ExitPr::default(),
-        &mut launcher,
-    )
-    .unwrap();
-    assert!(
-        plan.args
-            .windows(2)
-            .any(|p| p == ["--max-tool-calls", "512"])
-    );
-    assert!(!plan.args.iter().any(|arg| arg == "1024"));
-    assert_eq!(launcher.0, 1);
-    assert_eq!(store.selection_evidence("task").unwrap().unwrap(), original);
-    assert_eq!(
-        store.launch_intent("attempt-real").unwrap().unwrap(),
-        old_plan
-    );
-}
-
-#[cfg(unix)]
-fn historical_retry_fixture() -> (tempfile::TempDir, Config, StateStore) {
-    historical_retry_fixture_with_boot(
-        "{ sec = 1790533213, usec = 116017 } Sun Sep 27 15:20:13 2026",
-    )
-}
-
-#[cfg(unix)]
-fn historical_retry_fixture_with_boot(old: &str) -> (tempfile::TempDir, Config, StateStore) {
-    let (dir, mut config, store) = retry_fixture_with_saved_budget(Some("1024"));
-    let path = receipt_path(&config);
-    let mut receipt: luthor::supervisor::ExitReceipt =
-        serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-    receipt.boot_identity = old.into();
-    fs::write(path, serde_json::to_vec(&receipt).unwrap()).unwrap();
-    let path = config.state_root.join("attempts/attempt-real.child.json");
-    let mut child: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-    child["boot_identity"] = old.into();
-    fs::write(path, serde_json::to_vec(&child).unwrap()).unwrap();
-    let db = rusqlite::Connection::open(config.state_root.join("state.sqlite3")).unwrap();
-    db.execute("UPDATE evidence SET payload=json_set(payload,'$.boot_identity',?1) WHERE attempt_id='attempt-real' AND kind IN ('child_registered','supervisor_ready','gate_sent','tracked_descendant')", [old]).unwrap();
-    db.execute(
-        "UPDATE evidence SET payload=?1 WHERE attempt_id='attempt-real' AND kind='attempt_exit'",
-        [serde_json::to_string(&receipt).unwrap()],
-    )
-    .unwrap();
-    db.execute("UPDATE intents SET detail=json_set(detail,'$.boot_identity',?1) WHERE attempt_id='attempt-real' AND kind='gate_release'", [old]).unwrap();
-    config
-        .initial
-        .args
-        .extend(["--max-tool-calls".into(), "512".into()]);
-    config
-        .resume
-        .args
-        .extend(["--max-tool-calls".into(), "512".into()]);
-    (dir, config, store)
-}
-
-#[cfg(unix)]
-fn historical_retry(
-    store: &mut StateStore,
-    config: &Config,
-    projects: &mut OtherProject,
-    prs: &mut ExitPr,
-    launcher: &mut impl SupervisorLauncher,
-) -> Result<luthor::supervisor::LaunchPlan, luthor::coordinator::DispatchError> {
-    luthor::coordinator::retry_one(
-        store,
-        luthor::coordinator::RetryDependencies {
-            task_id: "task",
-            previous_attempt_id: "attempt-real",
-            attempt_id: "attempt-retry",
-            config,
-            config_revision: "corrected",
-            actor: "operator",
-            reason: "revalidate native startup rejection and correct worker budget",
-            revalidate_terminal_exit: true,
-            projects,
-            prs,
-            launcher,
-        },
-    )
-}
-
-#[cfg(unix)]
-fn old_retry_rows(config: &Config) -> Vec<String> {
-    let db = rusqlite::Connection::open(config.state_root.join("state.sqlite3")).unwrap();
-    ["SELECT json_array(id,task_id,lifecycle,outcome) FROM attempts WHERE id='attempt-real'",
-     "SELECT json_array(attempt_id,task_id,status) FROM reservations WHERE attempt_id='attempt-real'",
-     "SELECT json_array(id,task_id,attempt_id,kind,detail) FROM intents WHERE attempt_id='attempt-real' OR attempt_id IS NULL ORDER BY rowid",
-     "SELECT json_array(task_id,attempt_id,kind,payload) FROM evidence WHERE attempt_id='attempt-real' OR attempt_id IS NULL ORDER BY rowid"]
-    .into_iter().flat_map(|sql| db.prepare(sql).unwrap().query_map([], |row| row.get::<_, String>(0)).unwrap().collect::<Result<Vec<_>, _>>().unwrap()).collect()
+    retry_cases::ordinary::retry_unsupported_saved_budget_uses_corrected_template_without_rewriting_old_argv();
 }
 
 #[cfg(unix)]
 #[test]
 fn historical_startup_exit_revalidation_launches_once_preserving_all_old_rows_and_files() {
-    for old_boot in [
-        "{ sec = 1790533213, usec = 116017 } Sun Sep 27 15:20:13 2026",
-        "{ sec = 1790533213, usec = 220969 } Sun Sep 27 15:20:13 2026",
-    ] {
-        let (_dir, config, mut store) = historical_retry_fixture_with_boot(old_boot);
-        let original = store.selection_evidence("task").unwrap().unwrap();
-        let rows = old_retry_rows(&config);
-        let files: Vec<_> = fs::read_dir(config.state_root.join("attempts"))
-            .unwrap()
-            .map(|e| e.unwrap().path())
-            .filter(|p| p.is_file())
-            .map(|p| {
-                let bytes = fs::read(&p).unwrap();
-                (p, bytes)
-            })
-            .collect();
-        let mut projects = OtherProject(original.candidate, 1);
-        let mut prs = ExitPr::default();
-        let mut launcher = OtherLauncher::default();
-        assert!(retry(&mut store, &config, &mut projects, &mut prs, &mut launcher).is_err());
-        let plan =
-            historical_retry(&mut store, &config, &mut projects, &mut prs, &mut launcher).unwrap();
-        assert_eq!(launcher.0, 1);
-        assert_eq!(prs.reads, 1);
-        assert_eq!(plan.session_id, "task");
-        assert_eq!(old_retry_rows(&config), rows);
-        for (path, bytes) in files {
-            assert_eq!(fs::read(path).unwrap(), bytes);
-        }
-        let audit: serde_json::Value = serde_json::from_str(
-            &store
-                .evidence_payloads("task", "attempt-retry", "retry_authorized")
-                .unwrap()[0],
-        )
-        .unwrap();
-        assert_eq!(audit["terminal_exit"]["receipt"]["exit_code"], 2);
-        assert_eq!(
-            audit["terminal_exit"]["basis"],
-            "native_max_tool_calls_preflight"
-        );
-        assert_eq!(audit["terminal_exit"]["receipt"]["boot_identity"], old_boot);
-        assert!(
-            audit["terminal_exit"]["observed_at_unix_secs"]
-                .as_u64()
-                .unwrap()
-                > 0
-        );
-        assert_eq!(
-            audit["source"]["issue"]["assignees"],
-            serde_json::json!(["operator"])
-        );
-        assert_eq!(store.reservation_count().unwrap(), 1);
-        assert!(
-            historical_retry(&mut store, &config, &mut projects, &mut prs, &mut launcher).is_err()
-        );
-        execute_with_binary(&mut store, &plan, Path::new(env!("CARGO_BIN_EXE_luthor"))).unwrap();
-        let path = config
-            .state_root
-            .join("attempts/attempt-retry.receipt.json");
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while !path.exists() {
-            assert!(Instant::now() < deadline);
-            thread::sleep(Duration::from_millis(20));
-        }
-        assert!(matches!(
-            reconcile_attempt(&mut store, "task", "attempt-retry").unwrap(),
-            Reconciliation::Completed {
-                exit_code: Some(2),
-                signal: None
-            }
-        ));
-        assert_eq!(old_retry_rows(&config), rows);
-    }
+    retry_cases::historical::historical_startup_exit_revalidation_launches_once_preserving_all_old_rows_and_files();
 }
 
 #[cfg(unix)]
 #[test]
 fn historical_revalidation_refuses_unknown_runtime_and_live_or_reused_registered_processes() {
-    for refusal in [
-        "diagnostic",
-        "log_length",
-        "session",
-        "receipt_missing",
-        "gate_sent_missing",
-        "exit_code",
-        "child_live",
-        "child_reused",
-        "supervisor_live",
-        "supervisor_reused",
-        "tracked_escaped",
-        "log_symlink",
-        "boot_contradiction",
-        "child_group",
-    ] {
-        let (_dir, config, mut store) = historical_retry_fixture();
-        let db = rusqlite::Connection::open(config.state_root.join("state.sqlite3")).unwrap();
-        let child_path = config.state_root.join("attempts/attempt-real.child.json");
-        let mut child: serde_json::Value =
-            serde_json::from_slice(&fs::read(&child_path).unwrap()).unwrap();
-        let mut receipt: luthor::supervisor::ExitReceipt =
-            serde_json::from_slice(&fs::read(receipt_path(&config)).unwrap()).unwrap();
-        match refusal {
-            "diagnostic" | "session" => {
-                let mut bytes = fs::read(&receipt.stdout_path).unwrap();
-                let needle = if refusal == "session" {
-                    b"task".as_slice()
-                } else {
-                    b"max-tool-calls".as_slice()
-                };
-                let pos = bytes
-                    .windows(needle.len())
-                    .position(|b| b == needle)
-                    .unwrap();
-                bytes[pos] = b'X';
-                fs::write(&receipt.stdout_path, bytes).unwrap();
-            }
-            "log_length" => {
-                fs::write(&receipt.stdout_path, "runtime could have executed tools").unwrap();
-            }
-            "receipt_missing" => {
-                fs::remove_file(receipt_path(&config)).unwrap();
-            }
-            "gate_sent_missing" => {
-                db.execute(
-                    "DELETE FROM evidence WHERE attempt_id='attempt-real' AND kind='gate_sent'",
-                    [],
-                )
-                .unwrap();
-            }
-            "exit_code" => {
-                receipt.exit_code = Some(7);
-                fs::write(receipt_path(&config), serde_json::to_vec(&receipt).unwrap()).unwrap();
-                db.execute("UPDATE evidence SET payload=?1 WHERE attempt_id='attempt-real' AND kind='attempt_exit'", [serde_json::to_string(&receipt).unwrap()]).unwrap();
-                db.execute("UPDATE attempts SET outcome='exit_code=Some(7);signal=None' WHERE id='attempt-real'", []).unwrap();
-            }
-            "child_live" | "child_reused" => {
-                child["pid"] = std::process::id().into();
-                child["group_id"] = child["pid"].clone();
-                if refusal == "child_reused" {
-                    child["start_identity"] = "different historical start".into();
-                }
-                receipt.child_pid = std::process::id();
-                receipt.child_start_identity = child["start_identity"].as_str().unwrap().into();
-                fs::write(&child_path, serde_json::to_vec(&child).unwrap()).unwrap();
-                fs::write(receipt_path(&config), serde_json::to_vec(&receipt).unwrap()).unwrap();
-                db.execute("UPDATE evidence SET payload=?1 WHERE attempt_id='attempt-real' AND kind='child_registered'", [child.to_string()]).unwrap();
-                db.execute("UPDATE evidence SET payload=?1 WHERE attempt_id='attempt-real' AND kind='attempt_exit'", [serde_json::to_string(&receipt).unwrap()]).unwrap();
-            }
-            "supervisor_live" | "supervisor_reused" => {
-                let payload = serde_json::json!({"pid":std::process::id(), "boot_identity":receipt.boot_identity, "start_identity":if refusal == "supervisor_reused" {"different historical start"} else {"original start"}}).to_string();
-                db.execute("UPDATE evidence SET payload=?1 WHERE attempt_id='attempt-real' AND kind IN ('supervisor_ready','gate_sent')", [&payload]).unwrap();
-                db.execute("UPDATE intents SET detail=?1 WHERE attempt_id='attempt-real' AND kind='gate_release'", [&payload]).unwrap();
-            }
-            "tracked_escaped" => {
-                store.record_evidence("task", Some("attempt-real"), "tracked_descendant", &serde_json::json!({"pid":std::process::id(),"boot_identity":receipt.boot_identity,"start_identity":"escaped-start"}).to_string()).unwrap();
-            }
-            "log_symlink" => {
-                let content = fs::read(&receipt.stdout_path).unwrap();
-                let other = config.state_root.join("other.log");
-                fs::write(&other, content).unwrap();
-                fs::remove_file(&receipt.stdout_path).unwrap();
-                std::os::unix::fs::symlink(other, &receipt.stdout_path).unwrap();
-            }
-            "boot_contradiction" => {
-                db.execute("UPDATE evidence SET payload=json_set(payload,'$.boot_identity','different') WHERE attempt_id='attempt-real' AND kind='supervisor_ready'", []).unwrap();
-            }
-            "child_group" => {
-                child["group_id"] = std::process::id().into();
-                fs::write(&child_path, serde_json::to_vec(&child).unwrap()).unwrap();
-                db.execute("UPDATE evidence SET payload=?1 WHERE attempt_id='attempt-real' AND kind='child_registered'", [child.to_string()]).unwrap();
-            }
-            _ => unreachable!(),
-        }
-        let rows = old_retry_rows(&config);
-        let selection = store.selection_evidence("task").unwrap().unwrap();
-        let mut projects = OtherProject(selection.candidate, 1);
-        let mut prs = ExitPr::default();
-        let mut launcher = OtherLauncher::default();
-        assert!(
-            historical_retry(&mut store, &config, &mut projects, &mut prs, &mut launcher).is_err(),
-            "{refusal}"
-        );
-        assert_eq!(launcher.0, 0, "{refusal}");
-        assert_eq!(prs.reads, 0, "{refusal}");
-        assert_eq!(projects.1, 1, "{refusal}");
-        assert_eq!(store.reservation_count().unwrap(), 0, "{refusal}");
-        assert_eq!(
-            store.latest_attempt("task").unwrap().as_deref(),
-            Some("attempt-real")
-        );
-        assert_eq!(old_retry_rows(&config), rows, "{refusal}");
-    }
+    retry_cases::historical::historical_revalidation_refuses_unknown_runtime_and_live_or_reused_registered_processes();
 }
 
 #[cfg(unix)]
 #[test]
 fn historical_exit_handoff_refuses_surviving_groups_even_with_reaped_leaders() {
-    use std::os::unix::process::CommandExt;
-    struct Group(i32);
-    impl Drop for Group {
-        fn drop(&mut self) {
-            unsafe {
-                libc::kill(-self.0, libc::SIGKILL);
-            }
-        }
-    }
-    for who in ["child", "supervisor"] {
-        let (_dir, config, mut store) = historical_retry_fixture();
-        let mut leader = Command::new("/bin/sh")
-            .args(["-c", "/bin/sleep 30 >/dev/null 2>&1 &"])
-            .process_group(0)
-            .spawn()
-            .unwrap();
-        let pid = leader.id();
-        let _group = Group(pid as i32);
-        leader.wait().unwrap();
-        assert_eq!(unsafe { libc::kill(pid as i32, 0) }, -1);
-        assert_eq!(
-            unsafe { libc::kill(-(pid as i32), 0) },
-            0,
-            "fixture group absent"
-        );
-        let db = rusqlite::Connection::open(config.state_root.join("state.sqlite3")).unwrap();
-        let receipt_file = receipt_path(&config);
-        let mut receipt: luthor::supervisor::ExitReceipt =
-            serde_json::from_slice(&fs::read(&receipt_file).unwrap()).unwrap();
-        if who == "child" {
-            let child_file = config.state_root.join("attempts/attempt-real.child.json");
-            let mut child: serde_json::Value =
-                serde_json::from_slice(&fs::read(&child_file).unwrap()).unwrap();
-            child["pid"] = pid.into();
-            child["group_id"] = pid.into();
-            receipt.child_pid = pid;
-            fs::write(child_file, serde_json::to_vec(&child).unwrap()).unwrap();
-            fs::write(receipt_file, serde_json::to_vec(&receipt).unwrap()).unwrap();
-            db.execute("UPDATE evidence SET payload=?1 WHERE attempt_id='attempt-real' AND kind='child_registered'", [child.to_string()]).unwrap();
-            db.execute("UPDATE evidence SET payload=?1 WHERE attempt_id='attempt-real' AND kind='attempt_exit'", [serde_json::to_string(&receipt).unwrap()]).unwrap();
-        } else {
-            let ready: String = db.query_row("SELECT payload FROM evidence WHERE attempt_id='attempt-real' AND kind='supervisor_ready'", [], |row| row.get(0)).unwrap();
-            let mut ready: serde_json::Value = serde_json::from_str(&ready).unwrap();
-            ready["pid"] = pid.into();
-            db.execute("UPDATE evidence SET payload=?1 WHERE attempt_id='attempt-real' AND kind IN ('supervisor_ready','gate_sent')", [ready.to_string()]).unwrap();
-            db.execute("UPDATE intents SET detail=?1 WHERE attempt_id='attempt-real' AND kind='gate_release'", [ready.to_string()]).unwrap();
-        }
-        let rows = old_retry_rows(&config);
-        let selection = store.selection_evidence("task").unwrap().unwrap();
-        let mut projects = OtherProject(selection.candidate, 1);
-        let mut prs = ExitPr::default();
-        let mut launcher = OtherLauncher::default();
-        let error = historical_retry(&mut store, &config, &mut projects, &mut prs, &mut launcher)
-            .unwrap_err();
-        assert!(
-            matches!(error, luthor::coordinator::DispatchError::RetryHeld { reason } if reason == "registered process group is present or its absence is unproven")
-        );
-        assert_eq!(launcher.0, 0);
-        assert_eq!(prs.reads, 0);
-        assert_eq!(store.reservation_count().unwrap(), 0);
-        assert_eq!(old_retry_rows(&config), rows);
-    }
+    retry_cases::historical::historical_exit_handoff_refuses_surviving_groups_even_with_reaped_leaders();
 }
 
 #[cfg(unix)]
 #[test]
 fn historical_handoff_requires_exhaustive_pr_absence_and_rechecks_transaction_state() {
-    struct Pr {
-        pages: usize,
-        conflict: bool,
-        state: std::path::PathBuf,
-    }
-    impl PullRequestReader for Pr {
-        fn authenticated_identity(&mut self) -> Result<String, LookupError> {
-            Ok("operator".into())
-        }
-        fn page(&mut self, _: &str, page: u32) -> Result<Vec<serde_json::Value>, LookupError> {
-            self.pages += 1;
-            if page == 1 {
-                return Ok((1..=100)
-                    .map(|n| serde_json::json!({"number":n,"body":"unrelated issue"}))
-                    .collect());
-            }
-            if !self.conflict {
-                return Err(LookupError {
-                    category: ErrorCategory::Transport,
-                    code: "offline",
-                    status: None,
-                });
-            }
-            let db = rusqlite::Connection::open(self.state.join("state.sqlite3")).unwrap();
-            db.execute("UPDATE tasks SET state='held' WHERE id='task'", [])
-                .unwrap();
-            Ok(vec![])
-        }
-        fn detail(&mut self, _: &str, _: u64) -> Result<serde_json::Value, LookupError> {
-            panic!("unlinked PR detail requested")
-        }
-        fn repository_identity(&mut self, _: &str) -> Result<u64, LookupError> {
-            panic!("unlinked PR identity requested")
-        }
-    }
-    for conflict in [false, true] {
-        let (_dir, config, mut store) = historical_retry_fixture();
-        let rows = old_retry_rows(&config);
-        let selection = store.selection_evidence("task").unwrap().unwrap();
-        let mut projects = OtherProject(selection.candidate, 1);
-        let mut prs = Pr {
-            pages: 0,
-            conflict,
-            state: config.state_root.clone(),
-        };
-        let mut launcher = OtherLauncher::default();
-        let result = luthor::coordinator::retry_one(
-            &mut store,
-            luthor::coordinator::RetryDependencies {
-                task_id: "task",
-                previous_attempt_id: "attempt-real",
-                attempt_id: "attempt-retry",
-                config: &config,
-                config_revision: "corrected",
-                actor: "operator",
-                reason: "correct native startup argv",
-                revalidate_terminal_exit: true,
-                projects: &mut projects,
-                prs: &mut prs,
-                launcher: &mut launcher,
-            },
-        );
-        assert!(result.is_err());
-        assert_eq!(prs.pages, 2);
-        assert_eq!(launcher.0, 0);
-        assert_eq!(store.reservation_count().unwrap(), 0);
-        assert_eq!(old_retry_rows(&config), rows);
-        assert!(store.launch_intent("attempt-retry").unwrap().is_none());
-    }
+    retry_cases::historical::historical_handoff_requires_exhaustive_pr_absence_and_rechecks_transaction_state();
 }
+
+#[cfg(unix)]
+mod supervisor_support {
+    use super::*;
+    pub(super) mod retry_cases;
+    pub(super) mod stop_views;
+}
+#[cfg(unix)]
+use supervisor_support::{
+    retry_cases,
+    stop_views::{assert_crashed_supervisor_reservation, assert_natural_stop_views_and_restart},
+};
