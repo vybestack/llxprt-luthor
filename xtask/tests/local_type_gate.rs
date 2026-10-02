@@ -174,3 +174,49 @@ fn actual_policy_gate_accepts_twenty_and_rejects_twenty_one_local_methods() {
         }
     }
 }
+
+#[test]
+fn actual_policy_gate_enforces_attribute_file_boundaries_and_suppressions() {
+    let root = tempdir().unwrap();
+    let gate = compile_gate(root.path());
+    for lines in [799, 800, 801] {
+        let mut source = String::from("#[repr(C)]\n#[derive(Debug)]\npub struct Record {\n");
+        for index in 0..lines - 2 {
+            source.push_str(&format!("pub field_{index}: u8,\n"));
+        }
+        source.push_str("}\n");
+        fs::write(root.path().join("src/lib.rs"), &source).unwrap();
+        let output = Command::new(&gate)
+            .arg("policy")
+            .current_dir(root.path())
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(i32::from(lines > 800)),
+            "{stderr}"
+        );
+        if lines > 800 {
+            assert!(stderr.contains("file_lines=801 limit=800"), "{stderr}");
+        } else {
+            assert!(stderr.is_empty(), "{stderr}");
+        }
+        if lines == 800 {
+            fs::write(
+                root.path().join("src/lib.rs"),
+                format!("#[allow(warnings)]\n{source}"),
+            )
+            .unwrap();
+            let output = Command::new(&gate)
+                .arg("policy")
+                .current_dir(root.path())
+                .output()
+                .unwrap();
+            let stderr = String::from_utf8(output.stderr).unwrap();
+            assert_eq!(output.status.code(), Some(1), "{stderr}");
+            assert!(stderr.contains("forbidden lint suppression"), "{stderr}");
+            assert!(!stderr.contains("file_lines="), "{stderr}");
+        }
+    }
+}

@@ -42,14 +42,53 @@ use the **maximum** per-symbol measurement; aggregates conservatively include
 all alternatives. Initial scanner output is not platform-dependent.
 
 New code ceilings: **800 effective lines/file, 80/function, cyclomatic 25,
-cognitive 30** (the issue's proposals, unchanged). A line counts once when it
-contains a Rust token other than an attribute. Blank lines, comments and
-attribute-only lines do not count. Strings are tokens, not parsed code; their
-contents do not create fake statements. CRLF, empty files and missing final
-newlines are covered by fixtures. Nested branches/loops/match arms/boolean
-operators contribute to the documented traversal's complexity; cognitive
-nesting adds weight. This is a conservative syntax metric, not Clippy's exact
-cognitive algorithm; both independent checks enforce their ceilings.
+cognitive 30** (the issue's proposals, unchanged). For file LOC, a physical line
+counts once when it contains a Rust token outside a parsed attribute. Blank
+lines, comments and attribute-only lines do not count. The scanner excludes
+attribute token positions, not whole source lines: code before or after an
+attribute on the same line still counts. Multiline attributes, inner attributes,
+field/variant/parameter/statement/arm attributes and attributes in parsed
+standard macro arguments follow the same rule. Doc comments are parsed doc
+attributes; explicit doc strings and literal `include_str!` doc values are
+metadata too. Ordinary multiline strings still count on every occupied line;
+attribute-looking text inside a string is never stripped. CRLF, empty files and
+missing final newlines are covered by fixtures.
+
+Attributes remain in the syntax tree for suppression and source validation.
+Both cfg alternatives count; nested cfg_attr metadata is validated regardless
+of its condition. Unknown attribute macros, unknown derives, source-path
+attributes and unsupported doc expressions fail rather than requiring an
+unmeasured expansion. [The attribute policy](src/attribute_policy.rs) lists
+supported metadata and derives. Standard derives resolve through their builtin
+bindings, including raw identifiers and equivalent core/std paths. Local imports,
+aliases and reexports are resolved before granting an exemption. Serde
+Serialize/Deserialize and thiserror Error require Cargo's offline, locked resolution
+to the supported crates.io packages and registry-only dependency trees. Renamed
+dependencies are supported; path/git replacements and unresolvable external
+reexports or glob bindings fail closed. A standalone metric call cannot verify
+procedural dependencies and requires a workspace scan for these derives.
+
+Serde helpers are accepted only on a record, variant or field belonging to a
+verified serde derive, and their values must be literal metadata. Thiserror helpers
+require a verified Error derive: error accepts only a single string literal or
+transparent, while from/source/backtrace are field markers. Additional formatting
+arguments, blocks, includes and other executable helper forms fail rather than
+being excluded from measurement. Raw builtin metadata, used/no_std and supported
+unsafe attribute wrappers retain their exemption. These known derives are measured
+as handwritten source, without counting their generated implementations. The
+scanner does not execute procedural attributes or infer arbitrary expansions.
+Attributes inside opaque xtask token-construction macros remain input tokens,
+not parsed attributes.
+
+Function LOC retains its signature/body token measurement, excluding the
+function's own attributes but including nested attributes in that body. Type
+and module LOC retain their sums of function LOC. This file correction does
+not change those metrics. Nested branches/loops/match arms/boolean operators
+contribute to the documented traversal's complexity; cognitive nesting adds
+weight. This is a conservative syntax metric, not Clippy's exact cognitive
+algorithm; both independent checks enforce their ceilings. Compiled record
+fixtures and an executable policy-gate fixture verify that 799 and 800 file
+lines pass, 801 fails, and excluded lint suppressions still fail.
 
 Behavior-heavy types: **400 effective implementation lines / 20 methods**,
 aggregated across inherent and trait impls and files, normalizing generic
@@ -92,7 +131,10 @@ both stale and unowned keys. Acyclic growth does not create cycle debt.
 The cyclic portion of `measurement.json` now includes the three already
 existing non-feedback cyclic edges: `src/pr_evidence->src/state`,
 `src/state->src/supervisor`, and `src/supervisor->src/worktree`. The initial
-structural snapshot is retained. Each added debt entry has measured ceiling 1;
+structural snapshot is retained; its file LOC predates attribute exclusion.
+The nine affected file-debt ceilings in `debt.json` have been lowered to the
+corrected measurements. Function/type/module and cyclic debt are unchanged.
+Each added cyclic debt entry has measured ceiling 1;
 no original feedback key or numeric ceiling changed. Each structural outlier
 and edge is owned by [remediation issue #6](https://github.com/vybestack/llxprt-luthor/issues/6).
 `owners.json` is reviewed GitHub evidence (open, assigned acoliver); ownership

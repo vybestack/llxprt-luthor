@@ -51,46 +51,66 @@ pub struct Report {
 }
 
 pub fn effective_lines(tokens: TokenStream) -> usize {
+    token_lines(tokens, &BTreeSet::new())
+}
+
+type TokenPosition = ((usize, usize), (usize, usize));
+
+fn position(span: Span) -> TokenPosition {
+    let start = span.start();
+    let end = span.end();
+    ((start.line, start.column), (end.line, end.column))
+}
+
+fn token_lines(tokens: TokenStream, attributes: &BTreeSet<TokenPosition>) -> usize {
     let mut lines = BTreeSet::new();
-    mark_tokens(tokens, &mut lines);
+    visit_spans(tokens, &mut |span| {
+        if !attributes.contains(&position(span)) {
+            lines.extend(span.start().line..=span.end().line);
+        }
+    });
     lines.len()
 }
 
-fn mark_tokens(tokens: TokenStream, lines: &mut BTreeSet<usize>) {
+fn visit_spans(tokens: TokenStream, visitor: &mut impl FnMut(Span)) {
     for token in tokens {
         match token {
             TokenTree::Group(group) => {
-                mark(group.span_open(), lines);
-                mark_tokens(group.stream(), lines);
-                mark(group.span_close(), lines);
+                visitor(group.span_open());
+                visit_spans(group.stream(), visitor);
+                visitor(group.span_close());
             }
-            TokenTree::Literal(literal) => mark(literal.span(), lines),
-            TokenTree::Ident(ident) => mark(ident.span(), lines),
-            TokenTree::Punct(punct) => mark(punct.span(), lines),
+            TokenTree::Literal(literal) => visitor(literal.span()),
+            TokenTree::Ident(ident) => visitor(ident.span()),
+            TokenTree::Punct(punct) => visitor(punct.span()),
         }
     }
 }
 
-fn mark(span: Span, lines: &mut BTreeSet<usize>) {
-    lines.extend(span.start().line..=span.end().line);
+pub fn analyze(path: &str, source: &str) -> Result<Report, String> {
+    let syntax = syn::parse_file(source).map_err(|e| format!("{path}: parse error: {e}"))?;
+    crate::attribute_validation::standalone(path, &syntax)?;
+    analyze_validated(path, source)
 }
 
-pub fn analyze(path: &str, source: &str) -> Result<Report, String> {
+pub(crate) fn analyze_validated(path: &str, source: &str) -> Result<Report, String> {
     let syntax = syn::parse_file(source).map_err(|e| format!("{path}: parse error: {e}"))?;
     crate::macro_policy::validate_bindings(path, &syntax)?;
     let mut collector = Collector {
         report: Report {
             path: path.into(),
-            file_lines: effective_lines(syntax.to_token_stream()),
+            file_lines: 0,
             ..Report::default()
         },
         module: "root".into(),
         owner: None,
         errors: Vec::new(),
         macro_depth: 0,
+        attributes: BTreeSet::new(),
     };
     collector.visit_file(&syntax);
     if collector.errors.is_empty() {
+        collector.report.file_lines = token_lines(syntax.to_token_stream(), &collector.attributes);
         Ok(collector.report)
     } else {
         Err(collector.errors.join("\n"))
@@ -103,6 +123,7 @@ struct Collector {
     owner: Option<String>,
     errors: Vec<String>,
     macro_depth: usize,
+    attributes: BTreeSet<TokenPosition>,
 }
 
 impl Collector {
@@ -185,15 +206,11 @@ impl<'ast> Visit<'ast> for Collector {
                 attribute,
             ));
         }
-        if attribute.path().is_ident("path")
-            || (attribute.path().is_ident("cfg_attr")
-                && attribute.to_token_stream().to_string().contains("path"))
-        {
-            self.errors.push(format!(
-                "{}: unsupported source path attribute",
-                self.report.path
-            ));
-        }
+        // Attributes have already passed binding, context and input validation.
+        // Match token positions, not entire lines: adjacent code must still count.
+        visit_spans(attribute.to_token_stream(), &mut |span| {
+            self.attributes.insert(position(span));
+        });
         visit::visit_attribute(self, attribute);
     }
     fn visit_item_macro(&mut self, item: &'ast syn::ItemMacro) {
