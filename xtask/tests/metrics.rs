@@ -27,18 +27,18 @@ fn effective_lines_ignore_comments_not_strings_and_handle_line_endings() {
 fn file_and_function_boundaries_and_cfg_variants() {
     let source = "#[cfg(unix)]\nfn a() {\nlet x = 1;\n}\n#[cfg(windows)]\nfn b() {}";
     let mut limits = Limits {
-        file_lines: 6,
+        file_lines: 4,
         function_lines: 3,
         ..Limits::default()
     };
     assert!(findings(source, limits).is_empty());
-    limits.file_lines = 5;
+    limits.file_lines = 3;
     limits.function_lines = 2;
     let errors = findings(source, limits);
     assert!(
         errors
             .iter()
-            .any(|e| e.contains("file_lines=6") && e.contains("limit=5"))
+            .any(|e| e.contains("file_lines=4") && e.contains("limit=3"))
     );
     assert!(errors.iter().any(|e| e.contains("a")
         && e.contains("function_lines=3")

@@ -45,9 +45,12 @@ pub fn scan(root: &Path, roots: &[&str]) -> Result<Scan, String> {
         let syntax =
             syn::parse_file(&source).map_err(|e| format!("{relative}: parse error: {e}"))?;
         quote_used |= crate::macro_policy::validate_bindings(&relative, &syntax)?;
-        reports.push(metrics::analyze(&relative, &source)?);
         suppressions.extend(crate::suppression::check(&relative, &source)?);
         sources.push((relative, source));
+    }
+    crate::attribute_validation::files(root, &sources)?;
+    for (relative, source) in &sources {
+        reports.push(metrics::analyze_validated(relative, source)?);
     }
     if quote_used {
         crate::quote_identity::verify(root)?;

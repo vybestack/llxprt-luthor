@@ -1,7 +1,10 @@
 //! One fail-closed quality policy for local and CI execution.
+mod attribute_policy;
+mod attribute_validation;
 pub mod ci;
 pub mod contracts;
 pub mod coupling;
+mod derive_identity;
 pub mod driver;
 pub mod environment;
 pub mod inventory;

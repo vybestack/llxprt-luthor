@@ -41,7 +41,7 @@ struct Suppressions<'a> {
 
 impl Suppressions<'_> {
     fn meta(&mut self, meta: &Meta) {
-        if meta.path().is_ident("allow") || meta.path().is_ident("expect") {
+        if ["allow", "expect"].contains(&crate::attribute_policy::name(meta.path()).as_str()) {
             self.findings.push(format!(
                 "{}:{}: forbidden lint suppression {}",
                 self.path,
@@ -50,7 +50,7 @@ impl Suppressions<'_> {
             ));
         }
         if let Meta::List(list) = meta
-            && list.path.is_ident("cfg_attr")
+            && crate::attribute_policy::name(&list.path) == "cfg_attr"
         {
             match Punctuated::<Meta, Token![,]>::parse_terminated.parse2(list.tokens.clone()) {
                 Ok(metas) => {
