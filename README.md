@@ -134,3 +134,12 @@ Use pause only when you intend to stop that task. Reconciliation can leave a tas
 - **Offline Cargo commands cannot resolve dependencies**: the locked dependencies are not cached locally. Populate Cargo's cache through your approved environment before repeating the commands.
 
 For state layout, migrations, and configuration details, see [Configuration and state](dev-docs/config-and-state.md). For what validation has and has not established, see [WP05 validation](dev-docs/wp05-validation.md).
+
+## Rust quality gates
+
+From the repository root, use **`cargo xtask ci`** for the same offline, locked
+policy enforced on Ubuntu and macOS. See [the xtask guide](xtask/README.md) for
+the compatible toolchain, deliberate dependency fetch, absolute workspace-local
+Cargo/fixture directories, measurements, debt ratchet and executed contracts.
+Keep cwd stable for Unix stop-socket fixtures; do not use an external `/tmp`
+workaround or weaken production path validation.
