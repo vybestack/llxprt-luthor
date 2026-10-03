@@ -160,3 +160,24 @@ fn unavailable_checks_are_distinct_from_observed_empty_checks() {
     assert_eq!(unavailable["checks"], serde_json::Value::Null);
     assert_eq!(observed_empty["checks"], serde_json::json!([]));
 }
+
+#[test]
+fn closing_references_do_not_replace_exact_tracker_provenance() {
+    for closing in ["Fixes #4", "Fixes tracker/repo#4"] {
+        let body = format!("Tracker-Issue: https://github.com/tracker/repo/issues/4\n{closing}");
+        assert!(matches!(
+            verify(evidence(), &expected(), &body),
+            Verification::Matching(_)
+        ));
+        let wrong_tracker =
+            format!("Tracker-Issue: https://github.com/code/repo/issues/4\n{closing}");
+        assert!(!matches!(
+            verify(evidence(), &expected(), &wrong_tracker),
+            Verification::Matching(_)
+        ));
+        assert!(!matches!(
+            verify(evidence(), &expected(), closing),
+            Verification::Matching(_)
+        ));
+    }
+}
