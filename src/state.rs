@@ -1,47 +1,16 @@
-use crate::github::pull_request::ErrorCategory;
-use crate::{
-    config::{CommandTemplate, Config, Mapping, Source},
-    eligibility::Candidate,
-    pr_evidence::VerifiedOpenPr,
-};
+mod attempts;
+pub use crate::model::*;
+pub(crate) use attempts::attempt_selection;
+pub(crate) use attempts::same_task_config;
+use attempts::{retry_context, retry_evidence_matches};
+
+use crate::{config::Config, eligibility::Candidate, pr_evidence::VerifiedOpenPr};
 use fs2::FileExt;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
-use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, File, OpenOptions},
     path::{Path, PathBuf},
 };
-use thiserror::Error;
-
-#[derive(Debug, Error)]
-pub enum StateError {
-    #[error(transparent)]
-    Sql(#[from] rusqlite::Error),
-    #[error(transparent)]
-    Io(#[from] std::io::Error),
-    #[error(transparent)]
-    Serialization(#[from] serde_json::Error),
-    #[error("task identity already exists: {0}/{1}")]
-    DuplicateTask(String, String),
-    #[error("capacity exhausted: {reserved} reservations for capacity {capacity}")]
-    Capacity { reserved: usize, capacity: usize },
-    #[error("capacity must be positive")]
-    InvalidCapacity,
-    #[error("invalid configuration")]
-    InvalidConfig,
-    #[error("invalid explicit target")]
-    InvalidTarget,
-    #[error("multiple tasks match explicit target {0}/{1}")]
-    AmbiguousTarget(String, u64),
-    #[error("candidate selection does not match effective configuration")]
-    InvalidSelection,
-    #[error("launch requires a verified worktree and an unused, accounted task")]
-    LaunchBlocked,
-    #[error("configured capacity {configured} does not match persisted capacity {persisted}")]
-    CapacityMismatch { configured: usize, persisted: usize },
-    #[error("unsupported database version {0}")]
-    UnsupportedDatabaseVersion(i32),
-}
 
 fn validate_selection(candidate: &Candidate, config: &Config) -> Result<(), StateError> {
     let source = &candidate.source;
@@ -86,98 +55,6 @@ pub struct StateStore {
     connection: Connection,
     _lock: StateLock,
     root: PathBuf,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorktreeIntent {
-    pub path: PathBuf,
-    pub branch: String,
-    pub base: String,
-    pub repository: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorktreeIdentity {
-    pub path: PathBuf,
-    pub device: u64,
-    pub inode: u64,
-    pub branch: String,
-    pub base: String,
-    pub head: String,
-    pub repository: String,
-    pub git_directory: PathBuf,
-    pub remote: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WorktreeRecord {
-    pub intent: WorktreeIntent,
-    pub identity: Option<WorktreeIdentity>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
-pub struct EffectiveConfigSnapshot {
-    pub state_root: PathBuf,
-    pub worktree_root: PathBuf,
-    pub capacity: usize,
-    pub assignment_login: String,
-    pub sources: Vec<Source>,
-    pub mappings: Vec<Mapping>,
-    pub initial: CommandTemplate,
-    pub resume: CommandTemplate,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "status", rename_all = "snake_case")]
-pub enum PausePrStatus {
-    Absent,
-    Open,
-    Ambiguous,
-    Error {
-        category: ErrorCategory,
-        code: String,
-        http_status: Option<u16>,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PausePrEvidence {
-    pub observed_at_unix_secs: u64,
-    pub repository: String,
-    pub status: PausePrStatus,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ExitPrEvidence {
-    pub observed_at_unix_secs: u64,
-    pub repository: String,
-    pub status: PausePrStatus,
-}
-
-#[derive(Serialize)]
-pub(crate) struct OperatorRecoveryAudit<'a> {
-    pub(crate) actor: &'a str,
-    pub(crate) reason: &'a str,
-    pub(crate) observed_at_unix_secs: u64,
-    pub(crate) os_ids: Vec<serde_json::Value>,
-    pub(crate) supervisor: serde_json::Value,
-    pub(crate) child: serde_json::Value,
-    pub(crate) tracked_os_identities: Vec<serde_json::Value>,
-}
-
-impl From<&Config> for EffectiveConfigSnapshot {
-    fn from(config: &Config) -> Self {
-        Self {
-            state_root: config.state_root.clone(),
-            worktree_root: config.worktree_root.clone(),
-            capacity: config.capacity,
-            assignment_login: config.assignment_login.clone(),
-            sources: config.sources.clone(),
-            mappings: config.mappings.clone(),
-            initial: config.initial.clone(),
-            resume: config.resume.clone(),
-        }
-    }
 }
 
 fn resume_context(
@@ -226,7 +103,7 @@ fn resume_context(
         .into_iter()
         .next()
         .ok_or(StateError::LaunchBlocked)?;
-    let receipt: crate::supervisor::ExitReceipt = serde_json::from_str(&exit)?;
+    let receipt: crate::model::ExitReceipt = serde_json::from_str(&exit)?;
     let outcome: String = connection.query_row(
         "SELECT outcome FROM attempts WHERE id=?1",
         [&latest_id],
@@ -243,13 +120,6 @@ fn resume_context(
         return Err(StateError::LaunchBlocked);
     }
     Ok((first_plan, latest_plan, exit))
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
-pub struct SelectionEvidence {
-    pub candidate: Candidate,
-    pub config_revision: String,
-    pub effective_config: EffectiveConfigSnapshot,
 }
 
 fn validate_verified_open_pr(
@@ -1096,78 +966,7 @@ impl StateStore {
         attempt_id: &str,
         detail: &str,
     ) -> Result<(), StateError> {
-        if attempt_id.is_empty()
-            || attempt_id.len() > 128
-            || !attempt_id
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
-        {
-            return Err(StateError::LaunchBlocked);
-        }
-        let tx = self.connection.transaction()?;
-        let phase: Option<String> = tx
-            .query_row("SELECT state FROM tasks WHERE id=?1", [task_id], |row| {
-                row.get(0)
-            })
-            .optional()?;
-        let claims: i64 = tx.query_row(
-            "SELECT COUNT(*) FROM evidence WHERE task_id=?1 AND kind='claim_verified'",
-            [task_id],
-            |row| row.get(0),
-        )?;
-        let worktrees: i64 = tx.query_row(
-            "SELECT COUNT(*) FROM evidence WHERE task_id=?1 AND kind='worktree_created'",
-            [task_id],
-            |row| row.get(0),
-        )?;
-        let attempts: i64 = tx.query_row(
-            "SELECT COUNT(*) FROM attempts WHERE task_id=?1",
-            [task_id],
-            |row| row.get(0),
-        )?;
-        match phase.as_deref() {
-            Some("claimed") if attempts == 0 && claims == 1 && worktrees == 1 => {}
-            Some("paused") if claims == 1 && worktrees == 1 => {
-                resume_context(&tx, task_id)?;
-            }
-            _ => return Err(StateError::LaunchBlocked),
-        }
-        let prior_intents: i64 = tx.query_row(
-            "SELECT COUNT(*) FROM intents WHERE attempt_id=?1",
-            [attempt_id],
-            |row| row.get(0),
-        )?;
-        if prior_intents != 0 {
-            return Err(StateError::LaunchBlocked);
-        }
-        let capacity: usize = tx.query_row(
-            "SELECT value FROM state_meta WHERE key='capacity'",
-            [],
-            |row| row.get(0),
-        )?;
-        let reserved: usize = tx.query_row(
-            "SELECT COUNT(*) FROM reservations WHERE status='reserved'",
-            [],
-            |row| row.get(0),
-        )?;
-        if reserved >= capacity {
-            return Err(StateError::Capacity { reserved, capacity });
-        }
-        tx.execute(
-            "INSERT INTO attempts(id,task_id,lifecycle) VALUES(?1,?2,'launch_intended')",
-            params![attempt_id, task_id],
-        )?;
-        tx.execute(
-            "INSERT INTO reservations(attempt_id,task_id,status) VALUES(?1,?2,'reserved')",
-            params![attempt_id, task_id],
-        )?;
-        tx.execute(
-            "INSERT INTO intents(id,task_id,attempt_id,kind,detail) VALUES(?1,?2,?3,'launch',?4)",
-            params![format!("launch-{attempt_id}"), task_id, attempt_id, detail],
-        )?;
-        tx.execute("UPDATE tasks SET state='held' WHERE id=?1", [task_id])?;
-        tx.commit()?;
-        Ok(())
+        hold_launch(self, task_id, attempt_id, detail, None)
     }
 
     pub fn launch_intent(&self, attempt_id: &str) -> Result<Option<String>, StateError> {
@@ -1525,7 +1324,7 @@ impl StateStore {
         let Some(exit) = exit else {
             return Ok(false);
         };
-        let receipt: crate::supervisor::ExitReceipt = serde_json::from_str(&exit)?;
+        let receipt: crate::model::ExitReceipt = serde_json::from_str(&exit)?;
         Ok(receipt.attempt_id == attempt_id && !receipt.stop_signals.is_empty())
     }
 
@@ -1554,7 +1353,7 @@ impl StateStore {
         let Some((exit, outcome)) = exit else {
             return Ok(false);
         };
-        let receipt: crate::supervisor::ExitReceipt = serde_json::from_str(&exit)?;
+        let receipt: crate::model::ExitReceipt = serde_json::from_str(&exit)?;
         Ok(receipt.attempt_id == attempt_id
             && receipt.stop_signals.is_empty()
             && outcome
@@ -1789,3 +1588,171 @@ impl StateStore {
 
 #[cfg(test)]
 mod recovery_tests;
+
+pub(crate) fn initial_launch(store: &StateStore, task_id: &str) -> Result<String, StateError> {
+    let first: String = store.connection.query_row(
+        "SELECT i.detail FROM attempts a JOIN intents i ON i.attempt_id=a.id
+         WHERE a.task_id=?1 AND i.task_id=?1 AND i.kind='launch' ORDER BY a.rowid LIMIT 1",
+        [task_id],
+        |row| row.get(0),
+    )?;
+    Ok(first)
+}
+
+fn hold_launch(
+    store: &mut StateStore,
+    task_id: &str,
+    attempt_id: &str,
+    detail: &str,
+    retry: Option<&RetryAuthorization>,
+) -> Result<(), StateError> {
+    if attempt_id.is_empty()
+        || attempt_id.len() > 128
+        || !attempt_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    {
+        return Err(StateError::LaunchBlocked);
+    }
+    let tx = store.connection.transaction()?;
+    let phase: Option<String> = tx
+        .query_row("SELECT state FROM tasks WHERE id=?1", [task_id], |row| {
+            row.get(0)
+        })
+        .optional()?;
+    authorize_launch_phase(&tx, task_id, attempt_id, phase.as_deref(), retry)?;
+    let prior_intents: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM intents WHERE attempt_id=?1",
+        [attempt_id],
+        |row| row.get(0),
+    )?;
+    if prior_intents != 0 {
+        return Err(StateError::LaunchBlocked);
+    }
+    let capacity: usize = tx.query_row(
+        "SELECT value FROM state_meta WHERE key='capacity'",
+        [],
+        |row| row.get(0),
+    )?;
+    let reserved: usize = tx.query_row(
+        "SELECT COUNT(*) FROM reservations WHERE status='reserved'",
+        [],
+        |row| row.get(0),
+    )?;
+    if reserved >= capacity {
+        return Err(StateError::Capacity { reserved, capacity });
+    }
+    tx.execute(
+        "INSERT INTO attempts(id,task_id,lifecycle) VALUES(?1,?2,'launch_intended')",
+        params![attempt_id, task_id],
+    )?;
+    tx.execute(
+        "INSERT INTO reservations(attempt_id,task_id,status) VALUES(?1,?2,'reserved')",
+        params![attempt_id, task_id],
+    )?;
+    tx.execute(
+        "INSERT INTO intents(id,task_id,attempt_id,kind,detail) VALUES(?1,?2,?3,'launch',?4)",
+        params![format!("launch-{attempt_id}"), task_id, attempt_id, detail],
+    )?;
+    if let Some(audit) = retry {
+        tx.execute(
+            "INSERT INTO evidence(task_id,attempt_id,kind,payload) VALUES(?1,?2,'retry_authorized',?3)",
+            params![task_id, attempt_id, serde_json::to_string(audit)?],
+        )?;
+        tx.execute("INSERT INTO evidence(task_id,attempt_id,kind,payload) VALUES(?1,?2,'retry_pr_lookup',?3)", params![task_id, attempt_id, serde_json::to_string(&audit.pr)?])?;
+    }
+    tx.execute("UPDATE tasks SET state='held' WHERE id=?1", [task_id])?;
+    tx.commit()?;
+    Ok(())
+}
+
+pub fn retry_context_for_task(
+    store: &StateStore,
+    task_id: &str,
+    previous_attempt_id: &str,
+) -> Result<(crate::model::LaunchPlan, crate::model::ExitReceipt), StateError> {
+    retry_context(&store.connection, task_id, previous_attempt_id)
+}
+
+pub(crate) fn selection_for_attempt(
+    store: &StateStore,
+    plan: &crate::model::LaunchPlan,
+) -> Result<SelectionEvidence, StateError> {
+    attempt_selection(&store.connection, plan)
+}
+
+pub(crate) fn hold_retry_intent(
+    store: &mut StateStore,
+    audit: &RetryAuthorization,
+) -> Result<(), StateError> {
+    hold_launch(
+        store,
+        &audit.plan.task_id,
+        &audit.plan.attempt_id,
+        &serde_json::to_string(&audit.plan)?,
+        Some(audit),
+    )
+}
+
+fn authorize_launch_phase(
+    tx: &Transaction<'_>,
+    task_id: &str,
+    attempt_id: &str,
+    phase: Option<&str>,
+    retry: Option<&RetryAuthorization>,
+) -> Result<(), StateError> {
+    let claims: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM evidence WHERE task_id=?1 AND kind='claim_verified'",
+        [task_id],
+        |row| row.get(0),
+    )?;
+    let worktrees: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM evidence WHERE task_id=?1 AND kind='worktree_created'",
+        [task_id],
+        |row| row.get(0),
+    )?;
+    let attempts: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM attempts WHERE task_id=?1",
+        [task_id],
+        |row| row.get(0),
+    )?;
+    match phase {
+        Some("claimed") if retry.is_none() && attempts == 0 && claims == 1 && worktrees == 1 => {}
+        Some("paused") if retry.is_none() && claims == 1 && worktrees == 1 => {
+            resume_context(tx, task_id)?;
+        }
+        Some("attention") if retry.is_some() && claims == 1 && worktrees == 1 => {
+            authorize_retry(tx, retry.expect("retry checked above"), task_id, attempt_id)?;
+        }
+        _ => return Err(StateError::LaunchBlocked),
+    }
+    Ok(())
+}
+
+fn authorize_retry(
+    tx: &Transaction<'_>,
+    audit: &RetryAuthorization,
+    task_id: &str,
+    attempt_id: &str,
+) -> Result<(), StateError> {
+    let (prior, _) = retry_context(tx, task_id, &audit.previous_plan.attempt_id)?;
+    let previous = attempt_selection(tx, &prior)?;
+    if audit.previous_plan != prior
+        || !retry_evidence_matches(tx, audit, &previous)?
+        || audit.previous_config != previous.effective_config
+        || !same_task_config(&previous.effective_config, &audit.config)
+        || audit.actor != previous.candidate.mapping.allowed_pr_author
+        || audit.reason.trim().is_empty()
+        || audit.plan.attempt_id != attempt_id
+        || audit.plan.task_id != task_id
+        || audit.reservation != attempt_id
+        || audit.pr.status != PausePrStatus::Absent
+        || audit.pr.observed_at_unix_secs == 0
+        || audit.pr.repository != previous.candidate.mapping.code_repository
+        || audit.plan.config_revision.trim().is_empty()
+        || audit.plan.config_revision == prior.config_revision
+    {
+        return Err(StateError::LaunchBlocked);
+    }
+    Ok(())
+}

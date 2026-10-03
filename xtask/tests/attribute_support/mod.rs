@@ -12,12 +12,8 @@ pub struct Fixture {
     gate: PathBuf,
 }
 
-fn cargo(root: &Path, arguments: &[&str]) -> std::process::Output {
-    let output = Command::new("cargo")
-        .args(arguments)
-        .current_dir(root)
-        .output()
-        .unwrap();
+fn cargo(command: &mut Command, arguments: &[&str]) -> std::process::Output {
+    let output = command.args(arguments).output().unwrap();
     assert!(
         output.status.success(),
         "{arguments:?}: {}",
@@ -29,7 +25,7 @@ fn cargo(root: &Path, arguments: &[&str]) -> std::process::Output {
 fn libraries() -> BTreeMap<String, PathBuf> {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let output = cargo(
-        workspace,
+        Command::new("cargo").current_dir(workspace),
         &[
             "build",
             "--lib",
@@ -128,8 +124,17 @@ impl Fixture {
         result
     }
 
+    pub fn cargo(&self) -> Command {
+        let mut command = Command::new("cargo");
+        // These workspaces reuse package identities but compile different sources.
+        command
+            .current_dir(&self.root)
+            .env("CARGO_TARGET_DIR", self.root.join("tmp/target"));
+        command
+    }
+
     pub fn lock(&self) {
-        cargo(&self.root, &["generate-lockfile", "--offline"]);
+        cargo(&mut self.cargo(), &["generate-lockfile", "--offline"]);
     }
 
     pub fn manifest(&self, from: &str, to: &str) {
@@ -143,7 +148,7 @@ impl Fixture {
     pub fn suppressed(&self, label: &str, source: &str) {
         fs::write(self.root.join("src/lib.rs"), source).unwrap();
         cargo(
-            &self.root,
+            &mut self.cargo(),
             &[
                 "check",
                 "--workspace",
@@ -183,7 +188,7 @@ impl Fixture {
     pub fn compiled(&self, label: &str, source: &str, accepted: bool, diagnostic: &str) {
         fs::write(self.root.join("src/lib.rs"), source).unwrap();
         cargo(
-            &self.root,
+            &mut self.cargo(),
             &[
                 "check",
                 "--workspace",

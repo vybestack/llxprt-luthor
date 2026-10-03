@@ -1,3 +1,6 @@
+use ports::completion_claim_failure_reason;
+mod ports;
+mod retry;
 use crate::state::OperatorRecoveryAudit;
 use crate::{
     claim::{self, AssignmentWriter, ClaimError},
@@ -10,8 +13,10 @@ use crate::{
     pr_evidence::{VerifiedOpenPr, expected_for_task},
     state::{ExitPrEvidence, PausePrEvidence, PausePrStatus, StateError, StateStore},
     supervisor::{self, LaunchPlan, SupervisorError},
-    worktree::{self, WorktreeError, WorktreeInspection},
+    worktree::{self, WorktreeInspection},
 };
+pub use ports::{DispatchError, SupervisorLauncher};
+pub use retry::{RetryDependencies, retry_one};
 use serde::Serialize;
 use std::{
     collections::HashSet,
@@ -194,14 +199,6 @@ pub fn reconcile_source<P: ProjectReader>(
         &serde_json::to_string(&report)?,
     )?;
     Ok(report)
-}
-
-fn completion_claim_failure_reason(error: &ClaimError) -> &'static str {
-    match error {
-        ClaimError::Changed => "completion claim changed",
-        ClaimError::Source(_) => "completion claim read failed",
-        _ => unreachable!("completion claim verification only returns source or changed errors"),
-    }
 }
 
 /// Verify that the selected issue is still assigned solely to the configured
@@ -729,34 +726,12 @@ impl IdCreator for OsIdCreator {
     }
 }
 
-pub trait SupervisorLauncher {
-    fn launch(&mut self, store: &mut StateStore, plan: &LaunchPlan) -> Result<(), SupervisorError>;
-}
-
 pub struct ProductionLauncher;
 
 impl SupervisorLauncher for ProductionLauncher {
     fn launch(&mut self, store: &mut StateStore, plan: &LaunchPlan) -> Result<(), SupervisorError> {
         supervisor::execute(store, plan)
     }
-}
-
-#[derive(Debug, Error)]
-pub enum DispatchError {
-    #[error(transparent)]
-    State(#[from] StateError),
-    #[error(transparent)]
-    Claim(#[from] ClaimError),
-    #[error(transparent)]
-    Worktree(#[from] WorktreeError),
-    #[error(transparent)]
-    PullRequest(#[from] LookupError),
-    #[error(transparent)]
-    Supervisor(#[from] SupervisorError),
-    #[error("claim changed before launch")]
-    ChangedClaim,
-    #[error("pull request is no longer absent")]
-    ExistingPr,
 }
 
 #[derive(Debug, Error)]
@@ -843,6 +818,7 @@ where
             DispatchError::ExistingPr => "prelaunch PR present",
             DispatchError::PullRequest(_) => "prelaunch PR read failed",
             DispatchError::Supervisor(_) => "launch preparation or dispatch failed",
+            DispatchError::RetryHeld { .. } => "retry held before launch",
             DispatchError::State(_) => "state transition failed",
         };
         store.hold_task(task_id, reason)?;
@@ -1025,6 +1001,7 @@ where
             DispatchError::ExistingPr => "resume PR present",
             DispatchError::PullRequest(_) => "resume PR read failed",
             DispatchError::Supervisor(_) => "resume preparation or dispatch failed",
+            DispatchError::RetryHeld { .. } => "retry held before launch",
             DispatchError::State(_) => "resume state transition failed",
             DispatchError::Worktree(_) => "resume worktree failed",
         };

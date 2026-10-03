@@ -54,14 +54,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         Some("daemon") => luthor::daemon::run(&args.collect::<Vec<_>>()),
         Some("dispatch") => dispatch(args.collect()),
         Some("resume") => resume(args.collect()),
+        Some("retry") => retry(args.collect()),
         Some("recover") => recover(args.collect()),
         Some("--help" | "-h") => {
             println!(
-                "Usage: luthor discover --config <path>\n       luthor daemon --config PATH --config-revision REV [--repository owner/repo --issues N,N,...] [--once] [--execute]\n       luthor dispatch --config <path> --repository owner/repo --issue N --config-revision REV [--execute]\n       luthor resume TASK --config <path> --execute\n       luthor recover TASK --attempt ID --config PATH --actor LOGIN --reason TEXT --execute\n       luthor status --config <path>\n       luthor show TASK --config <path>\n       luthor logs TASK [--attempt ATTEMPT] --config <path>"
+                "Usage: luthor discover --config <path>\n       luthor daemon --config PATH --config-revision REV [--repository owner/repo --issues N,N,...] [--once] [--execute]\n       luthor dispatch --config <path> --repository owner/repo --issue N --config-revision REV [--execute]\n       luthor resume TASK --config <path> --execute\n       luthor retry TASK --attempt ID --config PATH --config-revision REV --actor LOGIN --reason TEXT [--revalidate-terminal-exit] --execute\n       luthor recover TASK --attempt ID --config PATH --actor LOGIN --reason TEXT --execute\n       luthor status --config <path>\n       luthor show TASK --config <path>\n       luthor logs TASK [--attempt ATTEMPT] --config <path>"
             );
             Ok(())
         }
-        _ => Err("expected `discover`, `daemon`, `dispatch`, `resume`, or `recover`".into()),
+        _ => {
+            Err("expected `discover`, `daemon`, `dispatch`, `resume`, `retry`, or `recover`".into())
+        }
     }
 }
 
@@ -370,7 +373,7 @@ fn dispatch(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn safe_error_stage(error: &luthor::coordinator::DispatchError) -> &'static str {
+fn safe_error_stage(error: &luthor::coordinator::DispatchError) -> &str {
     use luthor::coordinator::DispatchError;
     match error {
         DispatchError::State(_) => "state transition failed",
@@ -380,6 +383,9 @@ fn safe_error_stage(error: &luthor::coordinator::DispatchError) -> &'static str 
         DispatchError::ExistingPr => "pull request exists",
         DispatchError::PullRequest(_) => "pull request lookup failed",
         DispatchError::Supervisor(_) => "worker launch failed",
+        // Retry reasons originate from fixed reconciliation messages, never
+        // supplied identities, paths, argv, or external error text.
+        DispatchError::RetryHeld { reason } => reason,
     }
 }
 
@@ -448,5 +454,65 @@ fn resume(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
             return Err(format!("resume {status}: {}", safe_error_stage(&error)).into());
         }
     }
+    Ok(())
+}
+
+fn retry(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
+    let revalidate_terminal_exit = args.len() == 13 && args[11] == "--revalidate-terminal-exit";
+    if !(args.len() == 12 || revalidate_terminal_exit)
+        || args[1] != "--attempt"
+        || args[3] != "--config"
+        || args[5] != "--config-revision"
+        || args[7] != "--actor"
+        || args[9] != "--reason"
+        || args.last().map(String::as_str) != Some("--execute")
+        || [0, 2, 4, 6, 8, 10]
+            .iter()
+            .any(|i| args[*i].trim().is_empty() || args[*i].starts_with('-'))
+    {
+        return Err("expected TASK --attempt ID --config PATH --config-revision REV --actor LOGIN --reason TEXT [--revalidate-terminal-exit] --execute".into());
+    }
+    let config = Config::from_json(
+        &fs::read_to_string(&args[4]).map_err(|_| "retry configuration unavailable")?,
+    )
+    .map_err(
+        |_| "retry configuration invalid (check worker flags and --max-tool-calls: -1 or 1..512)",
+    )?;
+    let mut store = StateStore::open(&config.state_root, config.capacity)?;
+    luthor::state::retry_context_for_task(&store, &args[0], &args[2])
+        .map_err(|_| "retry requires the latest verified natural exit in attention")?;
+    let selection = store
+        .selection_evidence(&args[0])?
+        .ok_or("task selection missing")?;
+    verify_authenticated_account(PathBuf::from("gh").as_path(), &selection.candidate)?;
+    if args[8] != selection.candidate.mapping.allowed_pr_author {
+        return Err("retry actor is not the authenticated authorized PR author".into());
+    }
+    let attempt_id = format!("attempt-{}", random_id()?);
+    let mut projects = GhProjectReader::new(PathBuf::from("gh"));
+    let mut prs = GhPullRequestReader::new(PathBuf::from("gh"));
+    let mut launcher = ProductionLauncher;
+    let plan = luthor::coordinator::retry_one(
+        &mut store,
+        luthor::coordinator::RetryDependencies {
+            task_id: &args[0],
+            previous_attempt_id: &args[2],
+            attempt_id: &attempt_id,
+            config: &config,
+            config_revision: &args[6],
+            actor: &args[8],
+            reason: &args[10],
+            revalidate_terminal_exit,
+            projects: &mut projects,
+            prs: &mut prs,
+            launcher: &mut launcher,
+        },
+    )
+    .map_err(|error| format!("retry refused or held: {}", safe_error_stage(&error)))?;
+    println!(
+        "{}",
+        json!({"task_id": plan.task_id, "previous_attempt_id": args[2],
+        "attempt_id": plan.attempt_id, "config_revision": plan.config_revision, "status": "retried"})
+    );
     Ok(())
 }

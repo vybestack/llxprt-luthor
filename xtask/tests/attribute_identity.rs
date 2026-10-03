@@ -293,9 +293,9 @@ fn compiled_builtin_namespace_and_transitive_replacements_fail_closed() {
     );
     fixture.manifest("core = { path = \"tmp/core\" }", "");
     let metadata: serde_json::Value = serde_json::from_slice(
-        &std::process::Command::new("cargo")
+        &fixture
+            .cargo()
             .args(["metadata", "--offline", "--locked", "--format-version", "1"])
-            .current_dir(&fixture.root)
             .output()
             .unwrap()
             .stdout,

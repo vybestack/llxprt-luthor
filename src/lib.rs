@@ -14,3 +14,5 @@ pub mod github {
 pub mod state;
 pub mod supervisor;
 pub mod worktree;
+
+pub(crate) mod model;

@@ -46,3 +46,115 @@ luthor reconcile task-7f3a --config "$CONFIG"
 Dispatch without `--execute` stops with an authorization message and makes no scheduling writes. Resume without it likewise does not launch. `pause` and `reconcile` are state-changing controls, so use them only when you intend to affect the task lifecycle. `reconcile TASK --config` also handles source-intent reconciliation when the task has no attempt; with an attempt, it reconciles process and pull-request evidence.
 
 The marker name/value and optional milestone are exact selectors. Omitting milestone removes only that eligibility check. State uses SQLite schema version 3 with task, attempt, intent, reservation, evidence and metadata tables. Reservations are durable per-attempt history keyed by attempt ID, with a partial unique index allowing at most one active reservation per task. Opening a fresh database creates the current schema. Version 1 databases gain persisted capacity metadata, and version 1 or 2 databases are upgraded transactionally to version 3, preserving task, attempt, intent, reservation and evidence rows. If a migration cannot complete, its schema changes and version update roll back together. Versions above 3 are rejected. Configured capacity is persisted and must match on later opens. Creating a task stores a typed selection-evidence record in the same transaction as task identity, preserving the selected Project and item, issue URL and identity, marker, milestone, repository mapping, observation time, source, configuration revision, and a typed effective configuration snapshot (state/worktree roots, capacity, sources, mappings, and initial/resume executable and argv). The snapshot is validated before task creation and committed atomically with the task and selection evidence. Credentials are excluded by configuration validation; invalid-configuration errors do not echo supplied values or raw JSON. Duplicate task creation rolls back without leaving a second selection record. A process-level coordinator lock (where used) supplements database transactions; reservations remain authoritative and uncertain work must retain capacity.
+
+
+## Audited natural-exit continuation
+
+`retry TASK --attempt ID --config PATH --config-revision REV --actor LOGIN --reason TEXT [--revalidate-terminal-exit] --execute`
+is separate from `resume`. It renders the current validated `resume` template
+for exactly one new attempt after rechecking a naturally completed, released
+latest attempt in `attention`. The original selection snapshot and task revision
+stay unchanged. `retry_authorized` is private per-attempt evidence binding the
+exact new launch plan to the old plan/config, new command templates, actor/reason,
+fresh source/claim observation, absent PR lookup, and reservation. Gate and reconciliation readers accept a
+new revision only through that exact authorization and unchanged task identity.
+Successful `retry_pr_lookup` observations are appended to the new attempt in the
+same transaction, never to the old attempt, and visible as redacted summaries
+in `show`/`status`; launch arguments and configuration remain private.
+
+Only command templates can change. Sources, mappings, principals, roots and
+capacity must equal the stored snapshot. Natural receipts must have an exit code,
+no signal, no sent stop signals, and no stop intent. Receipt files, launch/dispatch
+records, child/supervisor identities, log lengths and current absence of registered
+processes/groups/descendants must agree. The new launch intent, audit evidence and
+reservation commit together under the coordinator lock. Failures before that
+transaction create no attempt; launch uncertainty afterwards retains the slot.
+
+Luthor validates the observed native `--max-tool-calls` boundary: exactly one
+literal value, `-1` or `1..512`, in either separated or inline form. Unknown flags,
+credential-bearing arguments, bad templates and shell operators remain rejected.
+Other native flag value semantics, profile contents, executable availability and
+provider behavior belong to the configured worker. Revalidate its help when
+changing worker builds. Stored historical snapshots are not rewritten or rejected
+merely because they contain the old unsupported budget; the current private
+configuration must pass validation. Both its templates must be valid.
+
+Normal stop/resume invariants and stored-selection semantics are unchanged. A
+changed-revision retry cannot subsequently use normal `resume` to adopt that
+configuration. No startup, scheduler or reconciliation path launches a retry.
+
+
+### Darwin boot identity and terminal startup revalidation
+
+New Darwin process registrations use the validated, lowercase
+`darwin-bootsessionuuid:<UUID>` identity from `kern.bootsessionuuid`. Empty,
+malformed, nil, non-UTF-8 or unavailable UUID output fails closed. There is no
+`kern.boottime` fallback. Process-start identity still comes from
+`PROC_PIDTBSDINFO`; its PID and start timestamp checks are unchanged.
+
+Ordinary retry requires the recorded child, supervisor and tracked descendants to agree
+on the current boot identity. Independent PID and group probes must all return
+ESRCH. A live or reused PID, present group, permission error, unavailable identity
+or contradictory record refuses continuation before a new reservation or launch.
+Retry holds expose fixed reconciliation messages; they do not print recorded
+identities, paths, command arguments or external error details.
+
+Historical `kern.boottime` records remain unchanged and cannot establish boot
+continuity with a new UUID. The observed historical value
+`{ sec = 1790533213, usec = 116017 } Sun Sep 27 15:20:13 2026` and later value
+`{ sec = 1790533213, usec = 220969 } Sun Sep 27 15:20:13 2026` illustrate why
+whole-string comparison was unstable. Equal seconds/date do not establish a
+boot-session identity. Present-day ESRCH probes establish current absence of
+registered IDs, but cannot recover the boot-session identity of an exited
+historical process. An operator statement or an audit recording those same
+observations supplies no independent continuity evidence.
+
+Ordinary historical retry still refuses with:
+
+```text
+luthor: retry refused or held: historical Darwin boot identity cannot prove boot continuity
+```
+
+`--revalidate-terminal-exit` selects an additional, narrow terminal proof for an
+already completed and released native CLI startup rejection. It does not claim
+boot continuity. All ordinary receipt, registration, claim, worktree, source,
+author, capacity and exhaustive PR checks remain required. The extra proof requires:
+
+1. An exact, already reconciled supervisor receipt from `try_wait`/`waitpid`, with
+   natural exit code 2, no signal or stop, and matching private drained logs.
+2. A direct configured `llxprt-code-rs` executable, one saved
+   `--max-tool-calls 1024` argument, and the entire stdout equal to the native
+   CLI's single JSON startup error for that limit and task session. Stderr must
+   be empty. Extra output, a different session, another error or another executable
+   cannot supply this proof.
+3. Internally consistent original child/supervisor/gate registrations, no recorded
+   descendants, and current ESRCH for both registered PIDs and both dedicated
+   process groups. Reused PIDs, surviving group members, zombies and permission
+   errors refuse. No signal is sent during revalidation.
+4. A readable current boot identity recorded only as a new observation. No old
+   identity is replaced or compared by seconds, date or microseconds.
+
+The native CLI validates this limit before constructing its session, backend,
+profiling runtime or tools. Consequently this specific rejection never launched
+tool subprocesses that could escape the registered groups. Log EOF alone would
+not prove that fact: a runtime descendant can close its pipes and escape. Generic
+historical natural exits, missing telemetry and any tracked-descendant evidence
+therefore remain held. This proof relies on the configured, trusted native CLI's
+startup contract. The executable name and diagnostic do not constitute executable
+attestation; arbitrary or untrusted programs that imitate that contract are not
+supported. For issue #2, the configured native binary and its early validation
+path were inspected and reproduced independently with a synthetic session.
+
+The new `retry_authorized` record retains the old receipt, exact registration/gate
+payloads, full startup diagnostic, observation time, current boot observation,
+and the `native_max_tool_calls_preflight` basis. It also binds the actor/reason,
+old/new plans and configs, new revision/reservation, fresh source item/issue and
+claim, verified worktree snapshot, and fresh exhaustive PR absence. The transaction
+rechecks the old receipt and payloads, source identity, task phase and capacity.
+The new supervisor accepts the new revision only through that audit. Historical
+attempt rows, their evidence/intent payloads and files remain unchanged.
+
+This path supports issue #2's original startup rejection without creating a
+successor task, moving its source claim, replacing its worktree/branch history,
+editing SQLite or launching a duplicate worker. The operator must invoke the
+verified binary explicitly; no daemon or reconciliation path authorizes it.

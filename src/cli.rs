@@ -1,8 +1,10 @@
+mod observation_labels;
 use crate::github::pull_request::ErrorCategory;
 use crate::state::{PausePrEvidence, PausePrStatus};
 #[cfg(unix)]
 use crate::supervisor::{ChildIdentity, recorded_process, verified_live_process};
 use crate::supervisor::{ExitReceipt, LaunchPlan};
+use observation_labels::{observation_stage, pr_stage_label};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -86,12 +88,7 @@ fn observation_summary(
     payload: &str,
     recorded_secs: Option<i64>,
 ) -> Value {
-    let stage = match kind {
-        "pause_pr_lookup" => "pause_pr_lookup",
-        "exit_pr_lookup" => "exit_pr_lookup",
-        "source_observation" => "source_observation",
-        _ => unreachable!(),
-    };
+    let stage = observation_stage(kind);
     let id = attempt.filter(|id| valid_attempt(id));
     let utc = |seconds: i64| -> Option<String> {
         conn.query_row(
@@ -218,7 +215,7 @@ fn observations(conn: &Connection, task: &str) -> Result<ObservationSummaries, C
         .prepare(
             "SELECT sequence,kind,attempt_id,payload,
         CAST(strftime('%s',created_at) AS INTEGER) FROM evidence
-        WHERE task_id=?1 AND kind IN ('pause_pr_lookup','exit_pr_lookup','source_observation')
+        WHERE task_id=?1 AND kind IN ('pause_pr_lookup','exit_pr_lookup','retry_pr_lookup','source_observation')
         ORDER BY sequence",
         )
         .map_err(|_| CliError::Database)?;
@@ -273,11 +270,7 @@ fn displayed_reason(
         if summary["stage"] == "source_observation" {
             return Some("source reconciliation held".into());
         }
-        let stage = if summary["stage"] == "pause_pr_lookup" {
-            "pause"
-        } else {
-            "exit"
-        };
+        let stage = pr_stage_label(summary["stage"].as_str());
         return Some(format!(
             "{stage} PR {}",
             summary["category"].as_str().unwrap_or("malformed")
@@ -634,16 +627,17 @@ fn events(conn: &Connection, table: &str, task: &str) -> Result<Vec<Value>, CliE
         // Launch and dispatch details contain executable arguments and prompts.
         let detail = match (table, kind.as_str()) {
             ("evidence", "held_reason" | "claim_verified") => Some(json!(payload)),
-            ("evidence", "pause_pr_lookup" | "exit_pr_lookup" | "source_observation") => {
-                Some(observation_summary(
-                    conn,
-                    task,
-                    &kind,
-                    attempt_id.as_deref(),
-                    &payload,
-                    created_at_unix_secs,
-                ))
-            }
+            (
+                "evidence",
+                "pause_pr_lookup" | "exit_pr_lookup" | "retry_pr_lookup" | "source_observation",
+            ) => Some(observation_summary(
+                conn,
+                task,
+                &kind,
+                attempt_id.as_deref(),
+                &payload,
+                created_at_unix_secs,
+            )),
             ("evidence", "attempt_exit") => serde_json::from_str::<ExitReceipt>(&payload)
                 .ok()
                 .map(|receipt| receipt_summary(&receipt)),

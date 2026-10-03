@@ -10,26 +10,6 @@
     "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
   },
   {
-    "key": "coupling::src/state->src/supervisor:cyclic_edge",
-    "ceiling": 1,
-    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
-  },
-  {
-    "key": "coupling::src/supervisor->src/state:feedback",
-    "ceiling": 1,
-    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
-  },
-  {
-    "key": "coupling::src/supervisor->src/worktree:cyclic_edge",
-    "ceiling": 1,
-    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
-  },
-  {
-    "key": "coupling::src/worktree->src/state:feedback",
-    "ceiling": 1,
-    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
-  },
-  {
     "key": "src/claim.rs::root::fresh:cognitive",
     "ceiling": 49,
     "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
@@ -46,7 +26,7 @@
   },
   {
     "key": "src/cli.rs::file:file_lines",
-    "ceiling": 1016,
+    "ceiling": 1010,
     "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
   },
   {
@@ -56,7 +36,7 @@
   },
   {
     "key": "src/cli.rs::root::observation_summary:function_lines",
-    "ceiling": 126,
+    "ceiling": 121,
     "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
   },
   {
@@ -71,7 +51,7 @@
   },
   {
     "key": "src/cli.rs::root:module_lines",
-    "ceiling": 973,
+    "ceiling": 965,
     "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
   },
   {
@@ -91,22 +71,12 @@
   },
   {
     "key": "src/config.rs::root::validate_command:cognitive",
-    "ceiling": 59,
-    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
-  },
-  {
-    "key": "src/config.rs::root::validate_command:cyclomatic",
-    "ceiling": 31,
-    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
-  },
-  {
-    "key": "src/config.rs::root::validate_command:function_lines",
-    "ceiling": 100,
+    "ceiling": 41,
     "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
   },
   {
     "key": "src/coordinator.rs::file:file_lines",
-    "ceiling": 1202,
+    "ceiling": 1190,
     "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
   },
   {
@@ -151,7 +121,7 @@
   },
   {
     "key": "src/coordinator.rs::root:module_lines",
-    "ceiling": 814,
+    "ceiling": 809,
     "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
   },
   {
@@ -206,17 +176,12 @@
   },
   {
     "key": "src/state.rs::file:file_lines",
-    "ceiling": 1674,
+    "ceiling": 1668,
     "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
   },
   {
     "key": "src/state.rs::root::StateStore::ensure_dispatch_capacity:function_lines",
     "ceiling": 85,
-    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
-  },
-  {
-    "key": "src/state.rs::root::StateStore::hold_launch_intent:cyclomatic",
-    "ceiling": 27,
     "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
   },
   {
@@ -226,7 +191,7 @@
   },
   {
     "key": "src/state.rs::state::StateStore:type_lines",
-    "ceiling": 1324,
+    "ceiling": 1253,
     "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
   },
   {
@@ -236,7 +201,7 @@
   },
   {
     "key": "src/supervisor.rs::file:file_lines",
-    "ceiling": 2287,
+    "ceiling": 1588,
     "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
   },
   {
@@ -257,21 +222,6 @@
   {
     "key": "src/supervisor.rs::root::prepare_resume:cyclomatic",
     "ceiling": 33,
-    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
-  },
-  {
-    "key": "src/supervisor.rs::root::reconcile_attempt:cognitive",
-    "ceiling": 51,
-    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
-  },
-  {
-    "key": "src/supervisor.rs::root::reconcile_attempt:cyclomatic",
-    "ceiling": 52,
-    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
-  },
-  {
-    "key": "src/supervisor.rs::root::reconcile_attempt:function_lines",
-    "ceiling": 140,
     "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
   },
   {
@@ -301,7 +251,7 @@
   },
   {
     "key": "src/supervisor.rs::root:module_lines",
-    "ceiling": 1903,
+    "ceiling": 1254,
     "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
   },
   {
@@ -396,7 +346,7 @@
   },
   {
     "key": "tests/supervisor.rs::file:file_lines",
-    "ceiling": 3991,
+    "ceiling": 3912,
     "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
   },
   {
@@ -456,7 +406,7 @@
   },
   {
     "key": "tests/supervisor.rs::root:module_lines",
-    "ceiling": 3739,
+    "ceiling": 3645,
     "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
   }
 ]

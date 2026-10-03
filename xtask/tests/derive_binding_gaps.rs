@@ -1,6 +1,6 @@
 mod attribute_support;
 use attribute_support::Fixture;
-use std::{fs, process::Command};
+use std::fs;
 
 fn executable_generator(fixture: &Fixture) {
     fs::write(fixture.root.join("tmp/macro/src/lib.rs"), "extern crate proc_macro;
@@ -29,7 +29,8 @@ fn runtime(fixture: &Fixture, label: &str, function: &str) {
         format!("#[test] fn smoke() {{ assert_eq!(luthor::{function}(), 900); }}\n"),
     )
     .unwrap();
-    let output = Command::new("cargo")
+    let output = fixture
+        .cargo()
         .args([
             "test",
             "-p",
@@ -40,7 +41,6 @@ fn runtime(fixture: &Fixture, label: &str, function: &str) {
             "--offline",
             "--locked",
         ])
-        .current_dir(&fixture.root)
         .output()
         .unwrap();
     assert!(
@@ -96,10 +96,10 @@ fn compiled_procedural_derive_attributes_fail_closed() {
 }
 
 fn metadata(fixture: &Fixture, features: &[&str]) -> serde_json::Value {
-    let output = Command::new("cargo")
+    let output = fixture
+        .cargo()
         .args(["metadata", "--offline", "--locked", "--format-version", "1"])
         .args(features)
-        .current_dir(&fixture.root)
         .output()
         .unwrap();
     assert!(
@@ -108,6 +108,19 @@ fn metadata(fixture: &Fixture, features: &[&str]) -> serde_json::Value {
         String::from_utf8_lossy(&output.stderr)
     );
     serde_json::from_slice(&output.stdout).unwrap()
+}
+
+#[test]
+fn generated_fixtures_use_distinct_local_cargo_target_directories() {
+    let first = Fixture::new();
+    let second = Fixture::new();
+    let targets = [&first, &second].map(|fixture| {
+        let metadata = metadata(fixture, &[]);
+        let target = std::path::PathBuf::from(metadata["target_directory"].as_str().unwrap());
+        assert_eq!(target, fixture.root.join("tmp/target"));
+        target
+    });
+    assert_ne!(targets[0], targets[1]);
 }
 
 fn core_dependency(metadata: &serde_json::Value) -> bool {

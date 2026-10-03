@@ -123,5 +123,35 @@
     "scenario": "platform supported confined Unix socket",
     "target": "confined_socket",
     "test": "confined_relative_socket_connects_without_accepting_overlong_absolute_paths"
+  },
+  {
+    "scenario": "audited changed-revision retry reconciles without rewriting prior history or extra worktree",
+    "target": "supervisor",
+    "test": "retry_natural_exit_audits_current_argv_preserves_history_and_reconciles_new_revision"
+  },
+  {
+    "scenario": "retry refusals preserve history and forbid reservations and launches",
+    "target": "supervisor",
+    "test": "retry_refusals_never_reserve_or_launch_or_rewrite_selection"
+  },
+  {
+    "scenario": "historical startup revalidation preserves immutable evidence and launches once",
+    "target": "supervisor",
+    "test": "historical_startup_exit_revalidation_launches_once_preserving_all_old_rows_and_files"
+  },
+  {
+    "scenario": "explicit retry CLI uses corrected config without assignment or reselection",
+    "target": "retry_cli",
+    "test": "explicit_retry_cli_uses_private_config_and_never_reassigns_or_reselects"
+  },
+  {
+    "scenario": "historical retry CLI retains exact old boot and terminal evidence",
+    "target": "retry_cli",
+    "test": "historical_terminal_exit_cli_preserves_original_evidence_and_launches_corrected_worker"
+  },
+  {
+    "scenario": "every natural-exit retry requires its exact audit before worker launch and capacity release even after original revision reuse",
+    "target": "supervisor",
+    "test": "supervisor_support::retry_cases::identity::two_retries_require_exact_audit_even_when_revision_returns_to_selection"
   }
 ]
