@@ -1,4 +1,4 @@
-use luthor::config::{CommandTemplate, Config, TaskValues};
+use luthor::config::{CommandTemplate, Config, ConfigError, Marker, TaskValues};
 
 #[test]
 fn documented_json_example_loads_and_round_trips() {
@@ -309,4 +309,365 @@ fn native_tool_budget_rejects_unsupported_values_and_accepts_unlimited() {
         .args
         .extend(["--max-tool-calls=512".into(), "--max-tool-calls=-1".into()]);
     assert!(config.validate().is_err());
+}
+
+mod validation_characterization {
+    use super::*;
+
+    fn assert_invalid(config: &Config, expected: &str) {
+        match config.validate().unwrap_err() {
+            ConfigError::Invalid(message) => assert_eq!(message, expected),
+            other => panic!("expected ConfigError::Invalid, got {other}"),
+        }
+    }
+
+    fn invalid_after(change: impl FnOnce(&mut Config), expected: &str) {
+        let mut config = Config::from_json(valid()).unwrap();
+        change(&mut config);
+        assert_invalid(&config, expected);
+    }
+
+    #[test]
+    fn capacity_collections_and_logins_keep_exact_errors() {
+        let required = "capacity, sources and mappings must be non-empty";
+        invalid_after(|c| c.capacity = 0, required);
+        invalid_after(|c| c.sources.clear(), required);
+        invalid_after(|c| c.mappings.clear(), required);
+        for login in ["", " ", "bad/login", "bot@example", "böt"] {
+            invalid_after(
+                |c| c.assignment_login = login.into(),
+                "invalid assignment_login",
+            );
+            invalid_after(
+                |c| c.mappings[0].allowed_pr_author = login.into(),
+                "invalid allowed_pr_author",
+            );
+        }
+        let mut config = Config::from_json(valid()).unwrap();
+        config.assignment_login = "Bot_1-2".into();
+        config.mappings[0].allowed_pr_author = "Author_1-2".into();
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn sources_keep_required_fields_and_marker_errors() {
+        let required = "source project_id and repositories are required";
+        for id in ["", " "] {
+            invalid_after(|c| c.sources[0].project_id = id.into(), required);
+        }
+        invalid_after(|c| c.sources[0].repositories.clear(), required);
+        for empty in ["", " "] {
+            invalid_after(
+                |c| c.sources[0].ready_marker = Marker::Label { name: empty.into() },
+                "empty label marker",
+            );
+            for (name, value) in [(empty, "Ready"), ("Status", empty)] {
+                invalid_after(
+                    |c| {
+                        c.sources[0].ready_marker = Marker::ProjectField {
+                            name: name.into(),
+                            value: value.into(),
+                        }
+                    },
+                    "project marker name and value are required",
+                );
+            }
+            invalid_after(
+                |c| c.sources[0].milestone = Some(empty.into()),
+                "milestone cannot be empty",
+            );
+        }
+        let mut config = Config::from_json(valid()).unwrap();
+        config.sources[0].ready_marker = Marker::ProjectField {
+            name: "Status".into(),
+            value: "Ready".into(),
+        };
+        Config::from_json(&serde_json::to_string(&config).unwrap()).unwrap();
+        invalid_after(
+            |c| c.sources.push(c.sources[0].clone()),
+            "duplicate source project_id",
+        );
+        invalid_after(
+            |c| c.sources[0].repositories[0] = "org/unmapped".into(),
+            "source repository has no mapping",
+        );
+    }
+
+    #[test]
+    fn mappings_keep_exact_repository_path_and_remote_errors() {
+        invalid_after(
+            |c| c.mappings.push(c.mappings[0].clone()),
+            "duplicate mapping",
+        );
+        invalid_after(
+            |c| c.mappings[0].checkout = "".into(),
+            "mapping checkout and base_branch are required",
+        );
+        for branch in ["", " "] {
+            invalid_after(
+                |c| c.mappings[0].base_branch = branch.into(),
+                "mapping checkout and base_branch are required",
+            );
+        }
+        for repository in [
+            "",
+            "org",
+            "/repo",
+            "org/",
+            "org/repo/extra",
+            "org/re po",
+            "org/répö",
+        ] {
+            invalid_after(
+                |c| c.sources[0].repositories[0] = repository.into(),
+                "invalid repository name",
+            );
+            invalid_after(
+                |c| c.mappings[0].tracker_repository = repository.into(),
+                "source repository has no mapping",
+            );
+            invalid_after(
+                |c| c.mappings[0].code_repository = repository.into(),
+                "invalid repository name",
+            );
+            invalid_after(
+                |c| c.mappings[0].allowed_pr_head_repository = repository.into(),
+                "invalid repository name",
+            );
+        }
+        for (remotes, expected) in [
+            (
+                &[
+                    "",
+                    "bad remote",
+                    "-origin",
+                    "org/../repo",
+                    "ssh://host/repo?query",
+                ][..],
+                "invalid push_remote",
+            ),
+            (
+                &["ftp://host/repo", "ssh://user@host/repo", "https://host"][..],
+                "invalid push_remote URL",
+            ),
+        ] {
+            for remote in remotes {
+                invalid_after(|c| c.mappings[0].push_remote = (*remote).into(), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn config_first_error_order_is_stable() {
+        let mut c = Config::from_json(valid()).unwrap();
+        c.capacity = 0;
+        c.assignment_login = "bad/login".into();
+        c.sources[0].project_id.clear();
+        c.sources[0].repositories = vec!["bad".into()];
+        c.sources[0].ready_marker = Marker::Label { name: "".into() };
+        c.sources[0].milestone = Some("".into());
+        c.mappings[0].code_repository = "bad".into();
+        c.mappings[0].checkout = "".into();
+        c.mappings[0].push_remote = "-bad".into();
+        c.mappings[0].allowed_pr_head_repository = "bad".into();
+        c.mappings[0].allowed_pr_author.clear();
+        c.initial.executable = "".into();
+        c.resume.args = vec!["--unknown".into()];
+        assert_invalid(&c, "capacity, sources and mappings must be non-empty");
+        c.capacity = 1;
+        assert_invalid(&c, "invalid assignment_login");
+        c.assignment_login = "bot".into();
+        assert_invalid(&c, "source project_id and repositories are required");
+        c.sources[0].project_id = "PVT_1".into();
+        assert_invalid(&c, "invalid repository name");
+        c.sources[0].repositories = vec!["org/unmapped".into()];
+        assert_invalid(&c, "source repository has no mapping");
+        c.sources[0].repositories = vec!["org/tracker".into()];
+        assert_invalid(&c, "empty label marker");
+        c.sources[0].ready_marker = Marker::Label {
+            name: "Ready".into(),
+        };
+        assert_invalid(&c, "milestone cannot be empty");
+        c.sources[0].milestone = None;
+        assert_invalid(&c, "invalid repository name");
+        c.mappings[0].code_repository = "org/code".into();
+        assert_invalid(&c, "mapping checkout and base_branch are required");
+        c.mappings[0].checkout = "/src/code".into();
+        assert_invalid(&c, "invalid push_remote");
+        c.mappings[0].push_remote = "origin".into();
+        assert_invalid(&c, "invalid repository name");
+        c.mappings[0].allowed_pr_head_repository = "org/fork".into();
+        assert_invalid(&c, "invalid allowed_pr_author");
+        c.mappings[0].allowed_pr_author = "alice".into();
+        assert_invalid(&c, "command executable is required");
+        c.initial.executable = "/bin/llxprt-code-rs".into();
+        assert_invalid(&c, "unrecognized worker argument option");
+    }
+
+    fn with_worker_args(resume: bool, args: &[&str]) -> Config {
+        let mut config = Config::from_json(valid()).unwrap();
+        let command = if resume {
+            &mut config.resume
+        } else {
+            &mut config.initial
+        };
+        command.args = args.iter().map(|arg| (*arg).into()).collect();
+        config
+    }
+
+    #[test]
+    fn initial_and_resume_parser_keep_exact_errors_and_precedence() {
+        let cases: &[(&[&str], &str)] = &[
+            (&["--prompt"], "worker option value is missing"),
+            (&["--prompt", "--help"], "worker option value is missing"),
+            (
+                &["--prompt", "--unknown"],
+                "unrecognized worker argument option",
+            ),
+            (
+                &["--prompt", "--header"],
+                "forbidden worker argument option",
+            ),
+            (
+                &["--prompt", "--env=value"],
+                "forbidden worker argument option",
+            ),
+            (
+                &["--allow-shell=yes"],
+                "worker option does not accept a value",
+            ),
+            (&["--help=yes"], "worker option does not accept a value"),
+            (&[""], "invalid worker argument"),
+            (&["--help", ""], "invalid worker argument"),
+            (&["--prompt", "-1"], "unrecognized worker argument option"),
+            (
+                &["--prompt", "--help=yes"],
+                "worker option value is missing",
+            ),
+        ];
+        for resume in [false, true] {
+            for (args, expected) in cases {
+                assert_invalid(&with_worker_args(resume, args), expected);
+            }
+            for args in [
+                vec!["--prompt=literal", "--cwd", "{worktree}"],
+                vec!["--prompt", "literal", "--cwd={worktree}"],
+                vec!["--prompt=", "--prompt", ""],
+                vec!["--allow-shell", "--help", "--version"],
+                vec!["--max-tool-calls", "-1", "--prompt", "literal"],
+            ] {
+                let config = with_worker_args(resume, &args);
+                config.validate().unwrap();
+                let command = if resume {
+                    &config.resume
+                } else {
+                    &config.initial
+                };
+                let expected: Vec<_> = args
+                    .iter()
+                    .map(|arg| arg.replace("{worktree}", &task_values().worktree))
+                    .collect();
+                assert_eq!(command.render(&task_values()).unwrap().args, expected);
+            }
+        }
+    }
+
+    #[test]
+    fn initial_and_resume_budgets_keep_exact_errors_and_run_first() {
+        let error = "--max-tool-calls requires exactly one value: -1 or 1..512";
+        for resume in [false, true] {
+            for value in ["-1", "1", "512", "0", "513", "1024", "no", "{attempt.id}"] {
+                for args in [
+                    vec!["--max-tool-calls".into(), value.into()],
+                    vec![format!("--max-tool-calls={value}")],
+                ] {
+                    let refs: Vec<_> = args.iter().map(String::as_str).collect();
+                    let config = with_worker_args(resume, &refs);
+                    if ["-1", "1", "512"].contains(&value) {
+                        config.validate().unwrap();
+                    } else {
+                        assert_invalid(&config, error);
+                    }
+                }
+            }
+            for args in [
+                vec!["--max-tool-calls"],
+                vec!["--max-tool-calls", "--help"],
+                vec!["--unknown", "--max-tool-calls=0"],
+                vec!["--max-tool-calls=1", "--max-tool-calls=-1"],
+                vec!["--max-tool-calls", "512", "--max-tool-calls=1"],
+            ] {
+                let mut config = with_worker_args(resume, &args);
+                let command = if resume {
+                    &mut config.resume
+                } else {
+                    &mut config.initial
+                };
+                command.executable = "".into();
+                assert_invalid(&config, error);
+            }
+        }
+    }
+
+    #[test]
+    fn duplicate_checks_keep_per_item_order_before_fields() {
+        let mut c = Config::from_json(valid()).unwrap();
+        c.sources.push(c.sources[0].clone());
+        c.sources[1].repositories[0] = "bad".into();
+        assert_invalid(&c, "duplicate source project_id");
+        c.sources[1].project_id.clear();
+        assert_invalid(&c, "source project_id and repositories are required");
+        c.sources.pop();
+        c.mappings.push(c.mappings[0].clone());
+        c.mappings[1].checkout = "".into();
+        assert_invalid(&c, "duplicate mapping");
+        c.mappings[1].code_repository = "bad".into();
+        assert_invalid(&c, "invalid repository name");
+        c.mappings[1].code_repository = "org/code".into();
+        c.mappings[1].tracker_repository = "org/other".into();
+        assert_invalid(&c, "duplicate code repository mapping");
+        c.mappings[1].tracker_repository = "bad".into();
+        assert_invalid(&c, "invalid repository name");
+        // Earlier items finish validation before later items' duplicate checks.
+        c.sources[0].milestone = Some("".into());
+        assert_invalid(&c, "milestone cannot be empty");
+    }
+
+    #[test]
+    fn initial_and_resume_credentials_stay_redacted_and_ordered() {
+        for resume in [false, true] {
+            for arg in [
+                "PRIVATE-TOKEN: ISSUE12_SENTINEL",
+                "API_KEY=ISSUE12_SENTINEL",
+            ] {
+                let config = with_worker_args(resume, &["--prompt", arg]);
+                assert_invalid(&config, "credential-bearing command argument is forbidden");
+                assert!(
+                    !config
+                        .validate()
+                        .unwrap_err()
+                        .to_string()
+                        .contains("ISSUE12_SENTINEL")
+                );
+            }
+            let mut config = with_worker_args(resume, &["--unknown"]);
+            let command = if resume {
+                &mut config.resume
+            } else {
+                &mut config.initial
+            };
+            command.executable = "/bin/agent-SECRET-ISSUE12_SENTINEL".into();
+            assert_invalid(
+                &config,
+                "credential-bearing command executable is forbidden",
+            );
+            let command = if resume {
+                &mut config.resume
+            } else {
+                &mut config.initial
+            };
+            command.executable = "".into();
+            assert_invalid(&config, "command executable is required");
+        }
+    }
 }

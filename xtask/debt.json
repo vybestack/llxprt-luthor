@@ -55,26 +55,6 @@
     "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
   },
   {
-    "key": "src/config.rs::root::Config::validate:cognitive",
-    "ceiling": 34,
-    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
-  },
-  {
-    "key": "src/config.rs::root::Config::validate:cyclomatic",
-    "ceiling": 32,
-    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
-  },
-  {
-    "key": "src/config.rs::root::Config::validate:function_lines",
-    "ceiling": 91,
-    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
-  },
-  {
-    "key": "src/config.rs::root::validate_command:cognitive",
-    "ceiling": 41,
-    "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
-  },
-  {
     "key": "src/coordinator.rs::file:file_lines",
     "ceiling": 1190,
     "owner": "https://github.com/vybestack/llxprt-luthor/issues/6"
