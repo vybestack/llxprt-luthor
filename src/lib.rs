@@ -16,3 +16,5 @@ pub mod supervisor;
 pub mod worktree;
 
 pub(crate) mod model;
+
+mod worker_instructions;
