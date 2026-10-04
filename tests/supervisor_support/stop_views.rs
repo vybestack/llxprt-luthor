@@ -130,3 +130,5 @@ pub(crate) fn assert_natural_stop_cached_views(
     assert_eq!(claims.len(), 1);
     assert_eq!(claims[0]["detail"], config.assignment_login);
 }
+
+mod identity_races;

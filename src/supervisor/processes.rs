@@ -93,6 +93,39 @@ pub(crate) fn group_absent(pid: i32) -> bool {
     std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
 }
 
+/// Resolve identity failure without mistaking observations across exit for a live group.
+#[cfg(unix)]
+pub(crate) fn unavailable_supervisor_group_is_quiescent(pgid: i32) -> bool {
+    unavailable_supervisor_group_with(pgid, group_absent, |pid| {
+        // Darwin can retain a detached supervisor as a zombie until its parent
+        // reaps it. Child-group absence is checked independently by the caller.
+        #[cfg(target_os = "macos")]
+        {
+            zombie(pid as u32)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = pid;
+            false
+        }
+    })
+}
+
+#[cfg(unix)]
+fn unavailable_supervisor_group_with(
+    pgid: i32,
+    mut absent: impl FnMut(i32) -> bool,
+    mut inert: impl FnMut(i32) -> bool,
+) -> bool {
+    if absent(pgid) || inert(pgid) {
+        return true;
+    }
+    // Identity and zombie probes may straddle exit and reaping. A failed zombie
+    // probe is not liveness evidence: check the group again for ESRCH. If it is
+    // still present (or probing fails), keep the reservation held.
+    absent(pgid)
+}
+
 #[cfg(unix)]
 pub(crate) fn matching_child(child: &ChildIdentity) -> bool {
     let Ok(pid) = i32::try_from(child.pid) else {
@@ -424,5 +457,65 @@ mod registered_absence_tests {
                 "{contradiction}"
             );
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod supervisor_exit_race_tests {
+    use super::unavailable_supervisor_group_with;
+    use std::cell::RefCell;
+
+    #[test]
+    fn supervisor_reaped_between_group_and_zombie_probes_requires_fresh_absence() {
+        let probes = RefCell::new(Vec::new());
+        let mut absence = [false, true].into_iter();
+        assert!(unavailable_supervisor_group_with(
+            101,
+            |pid| {
+                probes.borrow_mut().push(("group", pid));
+                absence.next().expect("only two absence probes")
+            },
+            |pid| {
+                probes.borrow_mut().push(("zombie", pid));
+                false
+            },
+        ));
+        assert_eq!(
+            *probes.borrow(),
+            [("group", 101), ("zombie", 101), ("group", 101)]
+        );
+    }
+
+    #[test]
+    fn unavailable_identity_with_present_or_unproven_group_remains_held() {
+        let mut probes = 0;
+        assert!(!unavailable_supervisor_group_with(
+            101,
+            |_| {
+                probes += 1;
+                false
+            },
+            |_| false
+        ));
+        assert_eq!(probes, 2);
+    }
+
+    #[test]
+    fn absent_group_or_verified_darwin_zombie_needs_no_retry() {
+        assert!(unavailable_supervisor_group_with(
+            101,
+            |_| true,
+            |_| panic!("already absent")
+        ));
+        let mut probes = 0;
+        assert!(unavailable_supervisor_group_with(
+            101,
+            |_| {
+                probes += 1;
+                false
+            },
+            |_| true
+        ));
+        assert_eq!(probes, 1);
     }
 }
