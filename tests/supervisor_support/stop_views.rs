@@ -130,3 +130,6 @@ pub(crate) fn assert_natural_stop_cached_views(
     assert_eq!(claims.len(), 1);
     assert_eq!(claims[0]["detail"], config.assignment_login);
 }
+
+pub(crate) mod completion;
+pub(crate) use completion::{assert_claim_hold, completion_fixture};
