@@ -9,9 +9,17 @@ pub(crate) fn retry_fixture() -> (tempfile::TempDir, Config, StateStore) {
 pub(crate) fn retry_fixture_with_saved_budget(
     budget: Option<&str>,
 ) -> (tempfile::TempDir, Config, StateStore) {
+    retry_fixture_for_mapping(budget, false)
+}
+
+#[cfg(unix)]
+pub(crate) fn retry_fixture_for_mapping(
+    budget: Option<&str>,
+    same_repository: bool,
+) -> (tempfile::TempDir, Config, StateStore) {
     use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
-    let (mut config, candidate) = configured(dir.path());
+    let (mut config, candidate) = prompts::configured_mapping(dir.path(), same_repository);
     let worker = dir.path().join("llxprt-code-rs");
     fs::write(&worker, r#"#!/bin/sh
 session=''
@@ -32,7 +40,7 @@ exit 2
     config.initial.executable = worker.clone();
     config.resume.executable = worker;
     let mut store = StateStore::open(&config.state_root, 1).unwrap();
-    claimed(&mut store, &config, &candidate, dir.path());
+    prompts::claimed_for_mapping(&mut store, &config, &candidate);
     if let Some(budget) = budget {
         // Reproduce a selection saved by a build that accepted the unsupported budget.
         let mut saved = store.selection_evidence("task").unwrap().unwrap();
