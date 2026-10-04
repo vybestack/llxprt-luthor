@@ -6,3 +6,5 @@ mod identity;
 pub(crate) mod ordinary;
 mod refusals;
 use refusals::retry_refusals_with_history;
+
+mod prompts;

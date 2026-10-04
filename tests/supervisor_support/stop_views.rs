@@ -132,3 +132,5 @@ pub(crate) fn assert_natural_stop_cached_views(
 }
 
 mod identity_races;
+pub(crate) mod completion;
+pub(crate) use completion::{assert_claim_hold, completion_fixture};
