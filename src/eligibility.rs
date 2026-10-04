@@ -50,8 +50,12 @@ pub fn select<R: ProjectReader>(
     sources: &[Source],
     mappings: &[Mapping],
 ) -> Result<Vec<Candidate>, EligibilityError> {
+    let repositories: Vec<_> = sources
+        .iter()
+        .flat_map(|source| source.repositories.iter().cloned())
+        .collect();
     select_with(reader, sources, mappings, |reader, source| {
-        enumerate(reader, &source.project_id)
+        enumerate(reader, &source.project_id, &repositories)
     })
 }
 
