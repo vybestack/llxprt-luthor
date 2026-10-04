@@ -863,7 +863,7 @@ fn dispatched_fixture(code: i32) -> (tempfile::TempDir, Config, StateStore) {
         }
         thread::sleep(Duration::from_millis(20));
     }
-    assert!(receipt.exists());
+    supervisor_support::stop_views::completion::wait_for_fixture_exit(&config, &store);
     (dir, config, store)
 }
 
@@ -1484,7 +1484,7 @@ fn stopped_exit_matching_pr_is_proved_and_persisted() {
 #[cfg(unix)]
 #[test]
 fn natural_exit_stale_assignee_is_held_despite_matching_open_pr() {
-    let (_dir, mut config, mut store) = dispatched_fixture(7);
+    let (_dir, mut config, mut store) = supervisor_support::stop_views::completion_fixture();
     config.capacity = 1;
     let selection = store.selection_evidence("task").unwrap().unwrap();
     let identity = store
@@ -1506,7 +1506,7 @@ fn natural_exit_stale_assignee_is_held_despite_matching_open_pr() {
         &mut prs,
     )
     .unwrap();
-    assert!(matches!(result, Reconciliation::Held { .. }));
+    supervisor_support::stop_views::assert_claim_hold(result);
     assert!(
         store
             .held_reason("task")
@@ -1547,7 +1547,7 @@ fn natural_exit_stale_assignee_is_held_despite_matching_open_pr() {
 #[cfg(unix)]
 #[test]
 fn stopped_exit_stale_assignee_is_held_despite_matching_open_pr() {
-    let (_dir, config, mut store) = dispatched_fixture(7);
+    let (_dir, config, mut store) = supervisor_support::stop_views::completion_fixture();
     store.record_stop_intent("task", "attempt-real").unwrap();
     edit_receipt(&config, |receipt| {
         receipt.stop_signals = vec![libc::SIGTERM]
@@ -1572,7 +1572,7 @@ fn stopped_exit_stale_assignee_is_held_despite_matching_open_pr() {
         &mut prs,
     )
     .unwrap();
-    assert!(matches!(result, Reconciliation::Held { .. }));
+    supervisor_support::stop_views::assert_claim_hold(result);
     assert!(
         store
             .held_reason("task")
