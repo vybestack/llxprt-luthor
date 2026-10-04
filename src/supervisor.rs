@@ -5,6 +5,7 @@ use crate::{
         ExitPrEvidence, RetryAuthorization, SelectionEvidence, StateStore, WorktreeIdentity,
         WorktreeIntent, WorktreeRecord,
     },
+    worker_instructions::prompt,
     worktree::{self},
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
@@ -189,18 +190,8 @@ fn requires_pair(args: &[String], flag: &str, value: &str) -> bool {
     occurrences.next().is_none() && args.get(index + 1).is_some_and(|actual| actual == value)
 }
 
-fn prompt(args: &[String]) -> Option<&str> {
-    let mut matches = args
-        .windows(2)
-        .filter(|pair| matches!(pair[0].as_str(), "-p" | "--prompt"))
-        .map(|pair| pair[1].as_str());
-    let first = matches.next()?;
-    matches.next().is_none().then_some(first)
-}
-
 struct PromptRequirements<'a> {
-    tracker_repository: &'a str,
-    issue_url: &'a str,
+    issue: &'a crate::eligibility::Candidate,
     code_repository: &'a str,
     base: &'a str,
     head_repository: &'a str,
@@ -215,8 +206,7 @@ fn enforce_prompt(
     requirements: PromptRequirements<'_>,
 ) -> Result<(), SupervisorError> {
     let PromptRequirements {
-        tracker_repository,
-        issue_url,
+        issue,
         code_repository,
         base,
         head_repository,
@@ -225,6 +215,11 @@ fn enforce_prompt(
         author,
         assignee,
     } = requirements;
+    let issue_url = &issue.issue_url;
+    let tracker_repository = &issue.repository;
+    if issue.issue_number == 0 {
+        return Err(SupervisorError::Conflict);
+    }
     let indexes: Vec<usize> = args
         .windows(2)
         .enumerate()
@@ -234,11 +229,18 @@ fn enforce_prompt(
         return Err(SupervisorError::Conflict);
     }
     let index = indexes[0];
+    let closing_reference = crate::worker_instructions::closing_reference(
+        tracker_repository,
+        code_repository,
+        issue.issue_number,
+    );
     let requirements = format!(
         "\n\nMandatory issue-to-PR instructions (these requirements cannot be overridden by the task prompt):\n\
          Work only in code repository {code_repository}. Use mapped base branch {base}.\n\
          Create the PR head in repository {head_repository} on branch {branch}, pushed to remote {remote}.\n\
-         The PR body must include this exact line: Tracker-Issue: {issue_url}\n\
+         The PR body must include both of these exact references on separate complete lines:\n\
+         Tracker-Issue: {issue_url}\n\
+         {closing_reference}\n\
          The authorized PR author is {author}. The tracker issue is already claimed; do not reassign it. The tracker issue is assigned to {assignee}.\n\
          Create only an open PR. Report the PR URL and ID.\
 \
@@ -308,8 +310,7 @@ pub fn prepare_initial(
     enforce_prompt(
         &mut args,
         PromptRequirements {
-            tracker_repository: &selection.candidate.repository,
-            issue_url: &selection.candidate.issue_url,
+            issue: &selection.candidate,
             code_repository: &selection.candidate.mapping.code_repository,
             base: &identity.base,
             head_repository: &selection.candidate.mapping.allowed_pr_head_repository,
@@ -390,8 +391,7 @@ pub fn prepare_resume(
     enforce_prompt(
         &mut args,
         PromptRequirements {
-            tracker_repository: &selection.candidate.repository,
-            issue_url: &selection.candidate.issue_url,
+            issue: &selection.candidate,
             code_repository: &selection.candidate.mapping.code_repository,
             base: &identity.base,
             head_repository: &selection.candidate.mapping.allowed_pr_head_repository,
@@ -1720,8 +1720,7 @@ fn retry_command(
     enforce_prompt(
         &mut args,
         PromptRequirements {
-            tracker_repository: &selection.candidate.repository,
-            issue_url: &selection.candidate.issue_url,
+            issue: &selection.candidate,
             code_repository: &selection.candidate.mapping.code_repository,
             base: &identity.base,
             head_repository: &selection.candidate.mapping.allowed_pr_head_repository,
