@@ -221,16 +221,7 @@ fn receipt_process_quiescence(
         Err(_) => {
             let supervisor_group =
                 i32::try_from(supervisor.pid).map_err(|_| SupervisorError::IdentityUnavailable)?;
-            if !group_absent(supervisor_group) {
-                // Darwin retains detached supervisors as zombies until their
-                // parent reaps them; a zombie cannot launch or control a worker.
-                #[cfg(target_os = "macos")]
-                if zombie(supervisor.pid) {
-                    // Child group absence is checked separately below.
-                } else {
-                    return Ok(Err("supervisor identity unavailable"));
-                }
-                #[cfg(not(target_os = "macos"))]
+            if !unavailable_supervisor_group_is_quiescent(supervisor_group) {
                 return Ok(Err("supervisor identity unavailable"));
             }
         }
