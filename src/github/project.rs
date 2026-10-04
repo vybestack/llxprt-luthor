@@ -619,9 +619,11 @@ fn required_string(value: &Value, key: &str, category: &str) -> Result<String, S
         .ok_or_else(|| category.to_owned())
 }
 
+/// Enumerates all project items, reading details only from configured repositories.
 pub fn enumerate<R: ProjectReader>(
     reader: &mut R,
     project_id: &str,
+    repositories: &[String],
 ) -> Result<Vec<(ProjectItem, Issue)>, ProjectError> {
     let mut cursor = None;
     let mut cursors_seen = HashSet::new();
@@ -639,6 +641,12 @@ pub fn enumerate<R: ProjectReader>(
             if item.issue_node_id.is_empty() {
                 return Err(ProjectError::InvalidItem(item.item_id));
             }
+            if !issues_seen.insert(item.issue_node_id.clone()) {
+                return Err(ProjectError::Duplicate(item.issue_node_id));
+            }
+            if !repositories.contains(&item.repository) {
+                continue;
+            }
             let issue = reader.issue(&item).map_err(ProjectError::IssueRead)?;
             if issue.node_id != item.issue_node_id
                 || issue.repository != item.repository
@@ -654,9 +662,6 @@ pub fn enumerate<R: ProjectReader>(
                     item_id: item.item_id,
                     issue_id: item.issue_node_id,
                 });
-            }
-            if !issues_seen.insert(issue.node_id.clone()) {
-                return Err(ProjectError::Duplicate(issue.node_id));
             }
             result.push((item, issue));
         }
