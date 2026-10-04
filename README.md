@@ -194,3 +194,28 @@ the compatible toolchain, deliberate dependency fetch, absolute workspace-local
 Cargo/fixture directories, measurements, debt ratchet and executed contracts.
 Keep cwd stable for Unix stop-socket fixtures; do not use an external `/tmp`
 workaround or weaken production path validation.
+
+### PR provenance and issue-closing references
+
+Every initial worker launch, stopped-session resume and audited natural-exit
+retry requires both references on separate complete lines in the PR body:
+
+```text
+Tracker-Issue: https://github.com/OWNER/REPO/issues/N
+Fixes #N
+```
+
+The tracker repository and issue number come from the verified task selection.
+When the tracker and code repositories differ, the closing line is instead
+`Fixes OWNER/REPO#N`, referring to the **tracker** repository. The exact
+`Tracker-Issue` line remains required for supervisor provenance matching;
+`Fixes` alone cannot satisfy it. Author, claim, base and head checks are unchanged.
+
+GitHub closing keywords in PR bodies only automatically close issues when the
+PR targets the code repository's **default branch**. The maintained Luthor base
+is `work/luthor-issue-to-pr-daemon`, while this repository's default is
+`bootstrap/luthor-base`. These references improve linking but cannot by
+themselves guarantee closure after merge to the maintained base. The operator
+must continue verifying merged delivery and closing remaining issues until
+branch policy is deliberately aligned; this does not change the configured
+base, repository default, branch protection or safety checks.
