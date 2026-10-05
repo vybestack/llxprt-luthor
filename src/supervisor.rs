@@ -1,18 +1,14 @@
 //! Launch planning and the Unix gated child runner.
 use crate::{
     config::{Config, RenderedCommand, TaskValues},
-    state::{
-        ExitPrEvidence, RetryAuthorization, SelectionEvidence, StateStore, WorktreeIdentity,
-        WorktreeIntent, WorktreeRecord,
-    },
+    state::{ExitPrEvidence, RetryAuthorization, SelectionEvidence, StateStore, WorktreeIdentity},
     worker_instructions::prompt,
     worktree::{self},
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
-use serde::Serialize;
 use std::{
     env,
-    fs::{self, File, OpenOptions},
+    fs::{self, File},
     io::{Read, Write},
     path::{Path, PathBuf},
     process::{Command, ExitStatus, Stdio},
@@ -29,9 +25,32 @@ use std::{
     process::Child,
 };
 
+mod binding;
+#[cfg(unix)]
+mod binding_gate;
+mod command;
+mod launch;
+#[cfg(unix)]
+mod worker;
+pub use launch::execute;
+#[cfg(unix)]
+pub use launch::{execute_amended, execute_amended_with_binary, execute_with_binary};
+#[cfg(unix)]
+pub use worker::worker_gate;
+#[cfg(unix)]
+use worker::{configure_session, verify_launch_worktree};
+mod storage;
+use command::{PromptRequirements, enforce_prompt, requires_pair};
+#[cfg(unix)]
+pub use storage::validate_stop_socket_path;
+use storage::{private_file, write_private_json};
+#[cfg(unix)]
+use storage::{stop_socket, write_private_json_atomic};
 mod error;
 mod evidence;
 mod processes;
+#[cfg(unix)]
+mod readiness;
 mod reconciliation;
 mod recovery;
 mod terminal_exit;
@@ -41,6 +60,7 @@ pub use crate::model::{
     ExitReceipt, LaunchPlan, Reconciliation, RecoveryInspection, SessionEnvironment,
     TerminalExitProof,
 };
+pub use command::validate_saved_initial_plan;
 pub use error::SupervisorError;
 #[cfg(unix)]
 pub(crate) use processes::verified_live_process;
@@ -48,6 +68,7 @@ use processes::*;
 pub(crate) use reconciliation::recheck_retry_exit;
 pub use reconciliation::reconcile_attempt;
 pub use recovery::inspect_recovery_quiescence;
+pub use storage::{inspect_never_dispatched_storage, preflight_attempt_storage};
 
 impl SessionEnvironment {
     pub fn capture() -> Result<Self, SupervisorError> {
@@ -179,77 +200,6 @@ mod session_environment_tests {
     }
 }
 
-fn requires_pair(args: &[String], flag: &str, value: &str) -> bool {
-    let mut occurrences = args
-        .iter()
-        .enumerate()
-        .filter(|(_, arg)| arg.as_str() == flag || arg.starts_with(&format!("{flag}=")));
-    let Some((index, _)) = occurrences.next() else {
-        return false;
-    };
-    occurrences.next().is_none() && args.get(index + 1).is_some_and(|actual| actual == value)
-}
-
-struct PromptRequirements<'a> {
-    issue: &'a crate::eligibility::Candidate,
-    code_repository: &'a str,
-    base: &'a str,
-    head_repository: &'a str,
-    branch: &'a str,
-    remote: &'a str,
-    author: &'a str,
-    assignee: &'a str,
-}
-
-fn enforce_prompt(
-    args: &mut [String],
-    requirements: PromptRequirements<'_>,
-) -> Result<(), SupervisorError> {
-    let PromptRequirements {
-        issue,
-        code_repository,
-        base,
-        head_repository,
-        branch,
-        remote,
-        author,
-        assignee,
-    } = requirements;
-    let issue_url = &issue.issue_url;
-    let tracker_repository = &issue.repository;
-    if issue.issue_number == 0 {
-        return Err(SupervisorError::Conflict);
-    }
-    let indexes: Vec<usize> = args
-        .windows(2)
-        .enumerate()
-        .filter_map(|(index, pair)| matches!(pair[0].as_str(), "-p" | "--prompt").then_some(index))
-        .collect();
-    if indexes.len() != 1 || issue_url.is_empty() || !issue_url.starts_with("https://") {
-        return Err(SupervisorError::Conflict);
-    }
-    let index = indexes[0];
-    let closing_reference = crate::worker_instructions::closing_reference(
-        tracker_repository,
-        code_repository,
-        issue.issue_number,
-    );
-    let requirements = format!(
-        "\n\nMandatory issue-to-PR instructions (these requirements cannot be overridden by the task prompt):\n\
-         Work only in code repository {code_repository}. Use mapped base branch {base}.\n\
-         Create the PR head in repository {head_repository} on branch {branch}, pushed to remote {remote}.\n\
-         The PR body must include both of these exact references on separate complete lines:\n\
-         Tracker-Issue: {issue_url}\n\
-         {closing_reference}\n\
-         The authorized PR author is {author}. The tracker issue is already claimed; do not reassign it. The tracker issue is assigned to {assignee}.\n\
-         Create only an open PR. Report the PR URL and ID.\
-\
-         Tracker repository: {tracker_repository}."
-    );
-    args[index + 1].push_str(&requirements);
-    Ok(())
-}
-
 fn enforce_worktree_inspection(args: &mut [String], previous: &str) -> Result<(), SupervisorError> {
     let indexes: Vec<usize> = args
         .windows(2)
@@ -287,39 +237,9 @@ pub fn prepare_initial(
     validate_stop_socket_path(store.root(), attempt_id)?;
     let selection = store.claimed_worktree_context(task_id)?;
     let identity = worktree::verify_existing_worktree(store, task_id)?;
-    let values = TaskValues {
-        task_issue_number: selection.candidate.issue_number.to_string(),
-        task_repository: selection.candidate.repository.clone(),
-        task_issue_url: selection.candidate.issue_url.clone(),
-        task_id: task_id.to_owned(),
-        attempt_id: attempt_id.to_owned(),
-        worktree: identity.path.to_string_lossy().into_owned(),
-    };
-    let RenderedCommand {
-        executable,
-        mut args,
-    } = selection.effective_config.initial.render(&values)?;
+    let RenderedCommand { executable, args } =
+        command::initial_command(&selection, &identity, task_id, attempt_id)?;
     let worktree = identity.path.clone();
-    let cwd = worktree.to_str().ok_or(SupervisorError::Conflict)?;
-    if !requires_pair(&args, "--session", task_id)
-        || !requires_pair(&args, "--cwd", cwd)
-        || prompt(&args).is_none_or(str::is_empty)
-    {
-        return Err(SupervisorError::Conflict);
-    }
-    enforce_prompt(
-        &mut args,
-        PromptRequirements {
-            issue: &selection.candidate,
-            code_repository: &selection.candidate.mapping.code_repository,
-            base: &identity.base,
-            head_repository: &selection.candidate.mapping.allowed_pr_head_repository,
-            branch: &identity.branch,
-            remote: &identity.remote,
-            author: &selection.candidate.mapping.allowed_pr_author,
-            assignee: &selection.effective_config.assignment_login,
-        },
-    )?;
     let session_environment = SessionEnvironment::capture()?;
     let plan = LaunchPlan {
         task_id: task_id.to_owned(),
@@ -499,15 +419,22 @@ pub(crate) fn prepare_retry(
     Ok(plan)
 }
 
-fn private_file(path: &Path) -> Result<File, SupervisorError> {
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
+#[cfg(unix)]
+fn finish_receipt(
+    root: &Path,
+    plan: &LaunchPlan,
+    receipt: &ExitReceipt,
+    managed: bool,
+) -> Result<(), SupervisorError> {
+    if managed {
+        let state_root = root.parent().ok_or(SupervisorError::Conflict)?;
+        let db = Connection::open_with_flags(
+            state_root.join("state.sqlite3"),
+            OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?;
+        binding::verify_observed_plan(&db, state_root, plan)?;
     }
-    Ok(options.open(path)?)
+    write_receipt(root, &plan.attempt_id, receipt)
 }
 
 fn write_receipt(root: &Path, attempt: &str, receipt: &ExitReceipt) -> Result<(), SupervisorError> {
@@ -519,31 +446,6 @@ fn write_receipt(root: &Path, attempt: &str, receipt: &ExitReceipt) -> Result<()
     file.sync_all()?;
     fs::rename(&temp_path, &final_path)?;
     File::open(root)?.sync_all()?;
-    Ok(())
-}
-
-#[cfg(unix)]
-fn stop_socket(root: &Path, attempt: &str) -> PathBuf {
-    root.join(format!("{attempt}.stop.sock"))
-}
-
-#[cfg(unix)]
-pub fn validate_stop_socket_path(
-    state_root: &Path,
-    attempt_id: &str,
-) -> Result<(), SupervisorError> {
-    if !valid_attempt(attempt_id) {
-        return Err(SupervisorError::Conflict);
-    }
-    use std::os::unix::ffi::OsStrExt;
-    let path = stop_socket(&state_root.join("attempts"), attempt_id);
-    let usable = unsafe { std::mem::zeroed::<libc::sockaddr_un>() }
-        .sun_path
-        .len()
-        - 1;
-    if path.as_os_str().as_bytes().len() > usable {
-        return Err(SupervisorError::StopSocketPathTooLong);
-    }
     Ok(())
 }
 
@@ -608,9 +510,10 @@ fn stop_without_supervisor(
         .intent_payload(task_id, attempt_id, "gate_release")?
         .and_then(|payload| recorded_process(&payload))
         .ok_or(SupervisorError::StopUnavailable)?;
-    let dispatch = store.intent_payload(task_id, attempt_id, "supervisor_dispatch")?;
-    let launch = store.intent_payload(task_id, attempt_id, "launch")?;
-    if &release != supervisor || dispatch.is_none() || dispatch != launch {
+    if &release != supervisor
+        || binding::verify_attempt_artifact(&store.connection, store.root(), task_id, attempt_id)
+            .is_err()
+    {
         return Err(SupervisorError::StopUnavailable);
     }
     let registered = store
@@ -781,6 +684,12 @@ pub fn request_stop(
 }
 
 #[cfg(unix)]
+fn stop_child_matches(pid: i32, boot: &str, start: &str) -> bool {
+    identity(pid as u32).ok().as_ref() == Some(&(boot.to_owned(), start.to_owned()))
+        && unsafe { libc::getpgid(pid) } == pid
+}
+
+#[cfg(unix)]
 fn handle_stop(
     stream: &mut UnixStream,
     plan: &LaunchPlan,
@@ -809,11 +718,11 @@ fn handle_stop(
     let intended =
         serde_json::json!({"task_id":plan.task_id,"attempt_id":plan.attempt_id}).to_string();
     let pid = i32::try_from(child.id()).map_err(|_| SupervisorError::StopUnavailable)?;
-    if request[..size] != *expected.as_bytes()
+    if binding::verify_observed_plan(&connection, &store_root.join(".."), plan).is_err()
+        || request[..size] != *expected.as_bytes()
         || persisted != [intended]
         || child.try_wait()?.is_some()
-        || identity(child.id()).ok().as_ref() != Some(&(boot.to_owned(), start.to_owned()))
-        || unsafe { libc::getpgid(pid) } != pid
+        || !stop_child_matches(pid, boot, start)
     {
         stream.write_all(b"N")?;
         return Ok(());
@@ -824,9 +733,7 @@ fn handle_stop(
             stream.write_all(b"Y")?;
             return Ok(());
         }
-        if identity(child.id()).ok().as_ref() != Some(&(boot.to_owned(), start.to_owned()))
-            || unsafe { libc::getpgid(pid) } != pid
-        {
+        if !stop_child_matches(pid, boot, start) {
             stream.write_all(b"N")?;
             return Ok(());
         }
@@ -889,95 +796,6 @@ where
     E: Write + Send + 'static,
 {
     run_gated_child_control(plan, gate, store_root, None, binary, writers)
-}
-
-#[cfg(unix)]
-fn verify_launch_worktree(
-    connection: &Connection,
-    plan: &LaunchPlan,
-) -> Result<(), SupervisorError> {
-    let (selection, intent, identity): (String, String, String) = connection.query_row(
-        "SELECT (SELECT payload FROM evidence WHERE task_id=?1 AND kind='selection'),
-                (SELECT detail FROM intents WHERE task_id=?1 AND kind='worktree_create'),
-                (SELECT payload FROM evidence WHERE task_id=?1 AND kind='worktree_created')",
-        [plan.task_id.as_str()],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-    )?;
-    let selection: SelectionEvidence = serde_json::from_str(&selection)?;
-    let record = WorktreeRecord {
-        intent: serde_json::from_str::<WorktreeIntent>(&intent)?,
-        identity: Some(serde_json::from_str(&identity)?),
-    };
-    if crate::state::attempt_selection(connection, plan).is_err()
-        || plan.worktree != plan.expected_worktree.path
-        || !worktree::matches_snapshot(
-            &plan.expected_worktree,
-            &worktree::verify_record(
-                &record,
-                &selection.candidate.mapping,
-                &selection.effective_config.worktree_root,
-                &plan.task_id,
-            )?,
-        )?
-    {
-        return Err(SupervisorError::Conflict);
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
-pub fn worker_gate(plan_path: &Path) -> Result<(), SupervisorError> {
-    let plan: LaunchPlan = serde_json::from_slice(&fs::read(plan_path)?)?;
-    let mut byte = [0];
-    std::io::stdin()
-        .read_exact(&mut byte)
-        .map_err(|_| SupervisorError::GateClosed)?;
-    if byte != *b"R" {
-        return Err(SupervisorError::GateClosed);
-    }
-    worktree::verify_snapshot(&plan.expected_worktree)?;
-    let db = plan_path
-        .parent()
-        .ok_or(SupervisorError::Conflict)?
-        .parent()
-        .ok_or(SupervisorError::Conflict)?
-        .join("state.sqlite3");
-    if plan_path
-        .parent()
-        .is_some_and(|dir| dir.file_name() == Some(std::ffi::OsStr::new("attempts")))
-    {
-        let connection = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        let persisted: String = connection.query_row(
-            "SELECT detail FROM intents WHERE task_id=?1 AND attempt_id=?2 AND kind='launch'",
-            params![plan.task_id, plan.attempt_id],
-            |row| row.get(0),
-        )?;
-        if serde_json::from_str::<LaunchPlan>(&persisted)? != plan {
-            return Err(SupervisorError::Conflict);
-        }
-        verify_launch_worktree(&connection, &plan)?;
-    }
-    let mut command = Command::new(&plan.executable);
-    command.args(&plan.args).current_dir(&plan.worktree);
-    configure_session(&mut command, &plan.session_environment);
-    Err(command.exec().into())
-}
-
-#[cfg(unix)]
-fn configure_session(command: &mut Command, session: &SessionEnvironment) {
-    command.env("HOME", &session.home);
-    for (name, value) in [
-        ("XDG_CONFIG_HOME", &session.xdg_config_home),
-        ("XDG_DATA_HOME", &session.xdg_data_home),
-        ("XDG_STATE_HOME", &session.xdg_state_home),
-        ("LLXPRT_CONFIG_HOME", &session.llxprt_config_home),
-    ] {
-        if let Some(value) = value {
-            command.env(name, value);
-        } else {
-            command.env_remove(name);
-        }
-    }
 }
 
 #[cfg(unix)]
@@ -1282,26 +1100,7 @@ where
             return Err(SupervisorError::GateClosed);
         }
         if control.is_some() {
-            let connection = Connection::open_with_flags(
-                store_root
-                    .parent()
-                    .ok_or(SupervisorError::Conflict)?
-                    .join("state.sqlite3"),
-                OpenFlags::SQLITE_OPEN_READ_ONLY,
-            )?;
-            let registered: i64 = connection.query_row(
-                "SELECT COUNT(*) FROM evidence WHERE task_id=?1 AND attempt_id=?2 AND kind='child_registered' AND payload=?3",
-                params![plan.task_id, plan.attempt_id, serde_json::to_string(&identity)?],
-                |row| row.get(0),
-            )?;
-            let released: i64 = connection.query_row(
-                "SELECT COUNT(*) FROM intents WHERE task_id=?1 AND attempt_id=?2 AND kind='gate_release'",
-                params![plan.task_id, plan.attempt_id], |row| row.get(0),
-            )?;
-            if registered != 1 || released != 1 {
-                return Err(SupervisorError::Conflict);
-            }
-            verify_launch_worktree(&connection, plan)?;
+            worker::verify_gate_release(store_root, plan, &identity)?;
         }
         shim_gate.write_all(b"R")?;
         Ok(identity)
@@ -1409,7 +1208,7 @@ where
         stderr_bytes,
         stop_signals,
     };
-    write_receipt(store_root, &plan.attempt_id, &receipt)?;
+    finish_receipt(store_root, plan, &receipt, control.is_some())?;
     Ok(status)
 }
 
@@ -1421,49 +1220,6 @@ pub fn run_gated_child<R: Read>(
     _store_root: &Path,
 ) -> Result<ExitStatus, SupervisorError> {
     Err(SupervisorError::ExecutionUnavailable)
-}
-
-fn private_attempts(root: &Path) -> Result<PathBuf, SupervisorError> {
-    let path = root.join("attempts");
-    if !path.exists() {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::DirBuilderExt;
-            fs::DirBuilder::new().mode(0o700).create(&path)?;
-        }
-        #[cfg(not(unix))]
-        fs::create_dir(&path)?;
-        File::open(root)?.sync_all()?;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if fs::metadata(&path)?.permissions().mode() & 0o777 != 0o700 {
-            return Err(SupervisorError::Conflict);
-        }
-    }
-    Ok(path)
-}
-
-fn write_private_json<T: Serialize>(path: &Path, value: &T) -> Result<(), SupervisorError> {
-    let mut file = private_file(path)?;
-    serde_json::to_writer(&mut file, value)?;
-    file.write_all(b"\n")?;
-    file.sync_all()?;
-    File::open(path.parent().ok_or(SupervisorError::Conflict)?)?.sync_all()?;
-    Ok(())
-}
-
-#[cfg(unix)]
-fn write_private_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(), SupervisorError> {
-    let temp = path.with_extension("child.tmp");
-    let mut file = private_file(&temp)?;
-    serde_json::to_writer(&mut file, value)?;
-    file.write_all(b"\n")?;
-    file.sync_all()?;
-    fs::rename(&temp, path)?;
-    File::open(path.parent().ok_or(SupervisorError::Conflict)?)?.sync_all()?;
-    Ok(())
 }
 
 /// The child opens SQLite read-only, without taking the coordinator's process lock.
@@ -1497,10 +1253,8 @@ pub fn supervise(root: &Path, attempt: &str) -> Result<(), SupervisorError> {
                AND (SELECT COUNT(*) FROM evidence WHERE task_id=?2 AND kind='worktree_created')=1",
             params![attempt, plan.task_id], |row| Ok((row.get(0)?, row.get(1)?))
         ).optional()?;
-        let (persisted, worktree) = row.ok_or(SupervisorError::Conflict)?;
-        if serde_json::from_str::<LaunchPlan>(&persisted)? != plan {
-            return Err(SupervisorError::Conflict);
-        }
+        let (_, worktree) = row.ok_or(SupervisorError::Conflict)?;
+        binding::verify_worker_plan(&connection, root, &plan)?;
         let identity: WorktreeIdentity = serde_json::from_str(&worktree)?;
         verify_launch_worktree(&connection, &plan)?;
         if !worktree::matches_snapshot(&identity, &plan.expected_worktree)?
@@ -1545,146 +1299,6 @@ pub fn supervise(root: &Path, attempt: &str) -> Result<(), SupervisorError> {
         );
     }
     result
-}
-
-/// Production always starts this binary. The explicit binary variant permits an
-/// integration test process to dispatch the built CLI instead of its test harness.
-#[cfg(unix)]
-pub fn execute(store: &mut StateStore, plan: &LaunchPlan) -> Result<(), SupervisorError> {
-    execute_with_binary(store, plan, &env::current_exe()?)
-}
-
-#[cfg(unix)]
-pub fn execute_with_binary(
-    store: &mut StateStore,
-    plan: &LaunchPlan,
-    binary: &Path,
-) -> Result<(), SupervisorError> {
-    if !valid_attempt(&plan.attempt_id) {
-        return Err(SupervisorError::Conflict);
-    }
-    let root = store.root().to_path_buf();
-    let attempts = private_attempts(&root)?;
-    let serialized = serde_json::to_string(plan)?;
-    // A second dispatch cannot overwrite the plan or launch the worker.
-    write_private_json(
-        &attempts.join(format!("{}.plan.json", plan.attempt_id)),
-        plan,
-    )?;
-    store.begin_supervision(&plan.task_id, &plan.attempt_id, &serialized)?;
-    let stderr = private_file(&attempts.join(format!("{}.supervisor.log", plan.attempt_id)))?;
-    let mut command = Command::new(binary);
-    command
-        .arg("__supervise")
-        .arg(&root)
-        .arg(&plan.attempt_id)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(stderr);
-    use std::os::unix::process::CommandExt;
-    // This process must outlive the coordinator without inheriting its terminal/session.
-    unsafe {
-        command.pre_exec(|| {
-            if libc::setsid() == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
-    let mut child = command.spawn()?;
-    let mut gate = child.stdin.take().expect("piped stdin");
-    let supervisor_pid = child.id();
-    let stdout = child.stdout.take().expect("piped stdout");
-    std::thread::Builder::new()
-        .name(format!("supervisor-reaper-{supervisor_pid}"))
-        .spawn(move || {
-            let mut child = child;
-            let _ = child.wait();
-        })?;
-    use std::io::Read;
-    use std::os::fd::AsRawFd;
-    let mut reader = stdout;
-    let fd = reader.as_raw_fd();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    let mut ready = [0u8; 6];
-    for byte in &mut ready {
-        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        if remaining.is_zero() {
-            return Err(SupervisorError::ReadyTimeout);
-        }
-        let timeout_ms = i32::try_from(remaining.as_millis().max(1)).unwrap_or(i32::MAX);
-        let mut pollfd = libc::pollfd {
-            fd,
-            events: libc::POLLIN | libc::POLLHUP,
-            revents: 0,
-        };
-        let polled = unsafe { libc::poll(&mut pollfd, 1, timeout_ms) };
-        if polled == 0 {
-            return Err(SupervisorError::ReadyTimeout);
-        }
-        if polled < 0 {
-            return Err(std::io::Error::last_os_error().into());
-        }
-        if reader.read_exact(std::slice::from_mut(byte)).is_err() {
-            return Err(SupervisorError::ExecutionUnavailable);
-        }
-    }
-    if ready != *b"READY\n" {
-        return Err(SupervisorError::ExecutionUnavailable);
-    }
-    let (boot, start) = identity(supervisor_pid)?;
-    let process =
-        serde_json::json!({"pid":supervisor_pid,"boot_identity":boot,"start_identity":start});
-    let registered: ChildIdentity =
-        private_bytes(&attempts.join(format!("{}.child.json", plan.attempt_id)))
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .ok_or(SupervisorError::IdentityUnavailable)?;
-    let child_pid =
-        i32::try_from(registered.pid).map_err(|_| SupervisorError::IdentityUnavailable)?;
-    if registered.pid == supervisor_pid
-        || registered.pid != registered.group_id
-        || unsafe { libc::getpgid(child_pid) } != child_pid
-        || identity(registered.pid).ok().as_ref()
-            != Some(&(
-                registered.boot_identity.clone(),
-                registered.start_identity.clone(),
-            ))
-    {
-        return Err(SupervisorError::IdentityUnavailable);
-    }
-    store.record_evidence(
-        &plan.task_id,
-        Some(&plan.attempt_id),
-        "child_registered",
-        &serde_json::to_string(&registered)?,
-    )?;
-    store.record_evidence(
-        &plan.task_id,
-        Some(&plan.attempt_id),
-        "supervisor_ready",
-        &process.to_string(),
-    )?;
-    store.record_intent(
-        &format!("gate-{}", plan.attempt_id),
-        &plan.task_id,
-        Some(&plan.attempt_id),
-        "gate_release",
-        &process.to_string(),
-    )?;
-    gate.write_all(b"R")?;
-    gate.flush()?;
-    store.record_evidence(
-        &plan.task_id,
-        Some(&plan.attempt_id),
-        "gate_sent",
-        &process.to_string(),
-    )?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-pub fn execute(_store: &mut StateStore, _plan: &LaunchPlan) -> Result<(), SupervisorError> {
-    Err(SupervisorError::ExecutionUnavailable)
 }
 
 fn retry_command(

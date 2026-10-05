@@ -1,3 +1,6 @@
+mod amendment;
+use crate::cli_identifiers::valid_attempt;
+pub use amendment::run as amend_undispatched;
 mod observation_labels;
 use crate::github::pull_request::ErrorCategory;
 use crate::state::{PausePrEvidence, PausePrStatus};
@@ -844,14 +847,6 @@ fn show(conn: &Connection, root: &Path, task: &str) -> Result<Value, CliError> {
         OutputAge::LogOnly,
     );
     Ok(output)
-}
-
-fn valid_attempt(id: &str) -> bool {
-    !id.is_empty()
-        && id.len() <= 128
-        && id
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
 fn attempts_dir(root: &Path) -> Result<PathBuf, CliError> {

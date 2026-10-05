@@ -36,3 +36,32 @@ pub(crate) fn completion_claim_failure_reason(error: &ClaimError) -> &'static st
         _ => unreachable!("completion claim verification only returns source or changed errors"),
     }
 }
+
+pub(crate) fn dispatch_failure_reason(
+    error: &DispatchError,
+    launch_preflight_complete: bool,
+) -> &'static str {
+    // Keep the reason bounded to a stage/type: external error strings may carry credentials.
+    match error {
+        DispatchError::Claim(_) => "claim failed",
+        DispatchError::Worktree(_) => "worktree failed",
+        DispatchError::ChangedClaim => "prelaunch claim changed",
+        DispatchError::ExistingPr => "prelaunch PR present",
+        DispatchError::PullRequest(_) => "prelaunch PR read failed",
+        DispatchError::Supervisor(SupervisorError::Conflict) if !launch_preflight_complete => {
+            "launch preflight conflict"
+        }
+        #[cfg(unix)]
+        DispatchError::Supervisor(SupervisorError::StopSocketPathTooLong)
+            if !launch_preflight_complete =>
+        {
+            "launch preflight socket path too long"
+        }
+        DispatchError::Supervisor(SupervisorError::Io(_)) if !launch_preflight_complete => {
+            "launch preflight storage unavailable"
+        }
+        DispatchError::Supervisor(_) => "launch preparation or dispatch failed",
+        DispatchError::RetryHeld { .. } => "retry held before launch",
+        DispatchError::State(_) => "state transition failed",
+    }
+}

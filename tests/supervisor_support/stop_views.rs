@@ -1,4 +1,5 @@
 use super::*;
+mod continuation;
 
 #[cfg(unix)]
 pub(crate) fn assert_natural_stop_views_and_restart(

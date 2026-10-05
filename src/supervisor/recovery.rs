@@ -221,7 +221,8 @@ fn recovery_evidence_unchanged(
     else {
         return held("child identity changed during recovery inspection");
     };
-    if &current_plan != plan
+    if super::binding::verify_observed_plan(&store.connection, store.root(), plan).is_err()
+        || &current_plan != plan
         || &current_child != child_file
         || store
             .evidence_payload(task_id, Some(attempt_id), "gate_sent")?

@@ -1,4 +1,13 @@
+mod recovery_commit;
 use ports::completion_claim_failure_reason;
+mod continuation;
+pub use continuation::{
+    AmendedContinuationDependencies, AmendedSupervisorLauncher, ContinuationDependencies,
+    ContinuationLocalInspector, ContinuationProcessInspector, ContinuationRefusal,
+    ContinuationResult, NativeAmendedSupervisorLauncher, OsContinuationLocalInspector,
+    OsContinuationProcessInspector, ProcessInspectionError, amend_never_dispatched_initial_branch,
+    continue_never_dispatched,
+};
 mod ports;
 mod retry;
 use crate::state::OperatorRecoveryAudit;
@@ -46,12 +55,7 @@ pub struct SourceHold {
     pub kind: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RecoveryResult {
-    RecoveredHeld,
-    RecoveredPrComplete { pr_id: u64 },
-    Held(String),
-}
+pub use recovery_commit::RecoveryResult;
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct StartupReport {
@@ -343,14 +347,14 @@ pub fn operator_recover_missing_receipt<P: ProjectReader, Q: PullRequestReader>(
         repository: repository.clone(),
         status,
     };
-    if let Some(proof) = verified_pr {
-        let pr_id = proof.id;
-        store.commit_telemetry_lost_pr_completion(task_id, attempt_id, &audit, &lookup, &proof)?;
-        Ok(RecoveryResult::RecoveredPrComplete { pr_id })
-    } else {
-        store.commit_telemetry_lost_recovery(task_id, attempt_id, &audit, &lookup)?;
-        Ok(RecoveryResult::RecoveredHeld)
-    }
+    Ok(recovery_commit::commit(
+        &mut store.connection,
+        task_id,
+        attempt_id,
+        &audit,
+        &lookup,
+        verified_pr,
+    )?)
 }
 
 impl StartupReport {
@@ -593,20 +597,10 @@ fn finish_verified_natural_exit_with_pr<P: ProjectReader, Q: PullRequestReader>(
         .duration_since(UNIX_EPOCH)
         .map_err(|_| SupervisorError::IdentityUnavailable)?
         .as_secs();
-    let lookup_status = match &lookup_result {
-        Ok(LookupResult::Absent) => PausePrStatus::Absent,
-        Ok(LookupResult::OpenPreexisting(_)) => PausePrStatus::Open,
-        Ok(LookupResult::Ambiguous(_)) => PausePrStatus::Ambiguous,
-        Err(error) => PausePrStatus::Error {
-            category: error.category,
-            code: error.code.to_owned(),
-            http_status: error.status,
-        },
-    };
     let proof = ExitPrEvidence {
         observed_at_unix_secs,
         repository: repository.clone(),
-        status: lookup_status,
+        status: lookup_status(&lookup_result),
     };
     store.record_exit_pr_lookup(task_id, attempt_id, &proof)?;
     match lookup_result {
@@ -780,8 +774,11 @@ where
     } = dependencies;
     store.ensure_dispatch_capacity()?;
     store.create_task(task_id, candidate, config_revision, config)?;
+    let mut launch_preflight_complete = false;
     let result = (|| {
         supervisor::validate_stop_socket_path(&config.state_root, attempt_id)?;
+        supervisor::preflight_attempt_storage(&config.state_root)?;
+        launch_preflight_complete = true;
         worktree::preflight(task_id, &config.worktree_root, &candidate.mapping)?;
         claim::claim(
             store,
@@ -810,18 +807,10 @@ where
         Ok(plan)
     })();
     if let Err(error) = &result {
-        // Keep the reason bounded to a stage/type: external error strings may carry credentials.
-        let reason = match error {
-            DispatchError::Claim(_) => "claim failed",
-            DispatchError::Worktree(_) => "worktree failed",
-            DispatchError::ChangedClaim => "prelaunch claim changed",
-            DispatchError::ExistingPr => "prelaunch PR present",
-            DispatchError::PullRequest(_) => "prelaunch PR read failed",
-            DispatchError::Supervisor(_) => "launch preparation or dispatch failed",
-            DispatchError::RetryHeld { .. } => "retry held before launch",
-            DispatchError::State(_) => "state transition failed",
-        };
-        store.hold_task(task_id, reason)?;
+        store.hold_task(
+            task_id,
+            ports::dispatch_failure_reason(error, launch_preflight_complete),
+        )?;
     }
     result
 }

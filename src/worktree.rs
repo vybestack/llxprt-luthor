@@ -40,6 +40,29 @@ pub enum WorktreeInspection {
     IdentityMismatch,
 }
 
+/// A never-dispatched worker must start on its exact clean saved tip, rather
+/// than the descendant tip accepted when reconciling an already-run worker.
+pub fn verify_never_dispatched(
+    record: &WorktreeRecord,
+    mapping: &Mapping,
+    root: &Path,
+    task_id: &str,
+) -> Result<(), WorktreeError> {
+    let actual = verify_record(record, mapping, root, task_id)?;
+    if record.identity.as_ref() != Some(&actual)
+        || !read_git(
+            &actual.path,
+            &["status", "--porcelain=v1", "--untracked-files=all"],
+        )?
+        .is_empty()
+    {
+        return Err(WorktreeError::Conflict(
+            "saved worktree tip is changed or dirty",
+        ));
+    }
+    Ok(())
+}
+
 /// Read-only inspection of the persisted selection and Git worktree before reservation.
 pub fn verify_existing_worktree(
     store: &StateStore,
@@ -174,6 +197,7 @@ pub fn inspect_record(
 
 fn git(dir: &Path, args: &[&str]) -> Result<Output, WorktreeError> {
     Ok(Command::new("git")
+        .env("GIT_OPTIONAL_LOCKS", "0")
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_COMMON_DIR")

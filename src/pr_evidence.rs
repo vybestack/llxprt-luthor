@@ -132,27 +132,7 @@ pub fn verify(pr: PrIdentityEvidence, expected: &ExpectedPr, body: &str) -> Veri
     Verification::Matching(pr)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct VerifiedOpenPr {
-    pub(crate) id: u64,
-    pub(crate) number: u64,
-    pub(crate) url: String,
-    pub(crate) repository_id: u64,
-    pub(crate) repository: String,
-    pub(crate) head_repository_id: u64,
-    pub(crate) head_repository: String,
-    pub(crate) base_branch: String,
-    pub(crate) head_branch: String,
-    pub(crate) author: String,
-    pub(crate) active_login: String,
-    pub(crate) tracker_issue_url: String,
-    pub(crate) draft: bool,
-    pub(crate) checks: Option<Vec<String>>,
-    pub(crate) created_at: String,
-    pub(crate) head_commit_sha: String,
-    pub(crate) observed_at: u64,
-    pub(crate) attempt_id: String,
-}
+pub use crate::model::VerifiedOpenPr;
 
 impl VerifiedOpenPr {
     pub fn from_matching(

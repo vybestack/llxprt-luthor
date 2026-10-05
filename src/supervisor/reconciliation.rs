@@ -1,6 +1,7 @@
 use super::{error::SupervisorError, evidence::*, processes::*, terminal_exit};
 use crate::model::*;
 use crate::state::StateStore;
+use crate::state::exits::reconcile_verified_exit as commit_exit;
 use std::fs;
 
 /// Only an exact durable exit with a proven absent process group releases capacity.
@@ -73,15 +74,7 @@ fn reconcile_attempt_inner(
         Ok(receipt) => receipt,
         Err(reason) => return Ok(held(reason)),
     };
-    let evidence = serde_json::to_string(&receipt)?;
-    let outcome = format!(
-        "exit_code={:?};signal={:?}",
-        receipt.exit_code, receipt.signal
-    );
-    let completed = Reconciliation::Completed {
-        exit_code: receipt.exit_code,
-        signal: receipt.signal,
-    };
+    let (evidence, outcome, completed) = exit_record(&receipt)?;
     if store.reconciled_exit(task_id, attempt_id, &evidence, &outcome)? && !recheck_processes {
         return Ok(completed);
     }
@@ -108,7 +101,13 @@ fn reconcile_attempt_inner(
     if let Err(reason) = receipt_process_quiescence(&receipt, supervisor, tracked)? {
         return Ok(held(reason));
     }
-    store.reconcile_verified_exit(task_id, attempt_id, &evidence, &outcome)?;
+    commit_exit(
+        &mut store.connection,
+        task_id,
+        attempt_id,
+        &evidence,
+        &outcome,
+    )?;
     Ok(completed)
 }
 
@@ -270,4 +269,18 @@ fn tracked_process_quiescence(
         }
     }
     Ok(())
+}
+
+fn exit_record(receipt: &ExitReceipt) -> Result<(String, String, Reconciliation), SupervisorError> {
+    Ok((
+        serde_json::to_string(receipt)?,
+        format!(
+            "exit_code={:?};signal={:?}",
+            receipt.exit_code, receipt.signal
+        ),
+        Reconciliation::Completed {
+            exit_code: receipt.exit_code,
+            signal: receipt.signal,
+        },
+    ))
 }

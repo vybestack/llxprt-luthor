@@ -187,6 +187,7 @@ pub(crate) fn retry_context(
     task_id: &str,
     previous_attempt_id: &str,
 ) -> Result<(crate::model::LaunchPlan, crate::model::ExitReceipt), StateError> {
+    super::continuation_hold::require_unamended_task(connection, task_id)?;
     let context: Option<(String, String, String)> = connection.query_row(
         "SELECT i.detail,e.payload,a.outcome FROM attempts a
          JOIN tasks t ON t.id=a.task_id

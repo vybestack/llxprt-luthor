@@ -18,3 +18,6 @@ pub mod worktree;
 pub(crate) mod model;
 
 mod worker_instructions;
+
+mod cli_identifiers;
+mod launch_command;

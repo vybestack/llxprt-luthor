@@ -1,3 +1,27 @@
+#[cfg(unix)]
+fn verify_dispatch_binding(
+    store: &StateStore,
+    plan: &LaunchPlan,
+) -> Result<Result<(), &'static str>, SupervisorError> {
+    for (kind, missing) in [
+        ("launch", "missing launch intent"),
+        ("supervisor_dispatch", "missing dispatch intent"),
+    ] {
+        match store.intent_payload(&plan.task_id, &plan.attempt_id, kind) {
+            Ok(Some(_)) => {}
+            Ok(None) => return Ok(Err(missing)),
+            Err(StateError::LaunchBlocked) => {
+                return Ok(Err("launch or dispatch plan binding mismatch"));
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(
+        super::binding::verify_observed_plan(&store.connection, store.root(), plan)
+            .map_err(|_| "launch or dispatch plan binding mismatch"),
+    )
+}
+
 use super::{error::SupervisorError, processes::*};
 use crate::model::*;
 use crate::state::{StateStore, WorktreeIdentity};
@@ -188,17 +212,8 @@ pub(crate) fn recovery_dispatch_plan(
     {
         return held("plan identity mismatch");
     }
-    let Some(launch) = store.intent_payload(task_id, attempt_id, "launch")? else {
-        return held("missing launch intent");
-    };
-    if serde_json::from_str::<LaunchPlan>(&launch).ok().as_ref() != Some(&plan) {
-        return held("launch intent mismatch");
-    }
-    let Some(dispatch) = store.intent_payload(task_id, attempt_id, "supervisor_dispatch")? else {
-        return held("missing dispatch intent");
-    };
-    if serde_json::from_str::<LaunchPlan>(&dispatch).ok().as_ref() != Some(&plan) {
-        return held("dispatch plan mismatch");
+    if let Err(reason) = verify_dispatch_binding(store, &plan)? {
+        return held(reason);
     }
 
     Ok(Ok(plan))
@@ -224,17 +239,8 @@ pub(crate) fn reconciliation_dispatch_plan(
     {
         return Ok(Err("plan identity mismatch"));
     }
-    let Some(persisted) = store.intent_payload(task_id, attempt_id, "launch")? else {
-        return Ok(Err("missing launch intent"));
-    };
-    if serde_json::from_str::<LaunchPlan>(&persisted).ok().as_ref() != Some(&plan) {
-        return Ok(Err("launch intent mismatch"));
-    }
-    let Some(dispatch) = store.intent_payload(task_id, attempt_id, "supervisor_dispatch")? else {
-        return Ok(Err("missing dispatch intent"));
-    };
-    if serde_json::from_str::<LaunchPlan>(&dispatch).ok().as_ref() != Some(&plan) {
-        return Ok(Err("dispatch plan mismatch"));
+    if let Err(reason) = verify_dispatch_binding(store, &plan)? {
+        return Ok(Err(reason));
     }
     Ok(Ok(plan))
 }
