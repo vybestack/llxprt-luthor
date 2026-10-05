@@ -62,7 +62,10 @@ fn launch_with_lock_probe(f: &Fixture) -> std::process::Output {
         }
         thread::sleep(Duration::from_millis(50));
     }
-    panic!("production process inspector remained unavailable before lock probe");
+    panic!(
+        "production process inspector remained unavailable before lock probe: {}",
+        f.process_diagnostic()
+    );
 }
 
 #[test]

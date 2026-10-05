@@ -1,5 +1,6 @@
 use luthor::state::{journal, task_records};
 mod amendment;
+mod diagnostics;
 use luthor::{
     config::Config,
     eligibility::Candidate,
@@ -167,8 +168,18 @@ impl Fixture {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_luthor"));
         cmd.arg("continue-undispatched")
             .args(args)
-            .env("PATH", &self.path);
+            .env("PATH", &self.path)
+            .env(
+                "LUTHOR_PROCESS_DIAGNOSTIC_FILE",
+                self.dir.path().join("process-probe"),
+            );
         cmd
+    }
+
+    pub fn process_diagnostic(&self) -> String {
+        fs::read_to_string(self.dir.path().join("process-probe"))
+            .map(|record| record.chars().take(160).collect())
+            .unwrap_or_else(|_| "process_probe record=missing".into())
     }
 
     pub fn run(&self, args: &[String]) -> Output {
@@ -203,7 +214,8 @@ impl Fixture {
             );
             assert!(
                 retry < 20,
-                "production process inspector remained unavailable in isolated fixture"
+                "production process inspector remained unavailable in isolated fixture: {}",
+                self.process_diagnostic()
             );
             calls_start = fs::read_to_string(&self.calls).unwrap().len();
             thread::sleep(Duration::from_millis(50));

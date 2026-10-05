@@ -34,7 +34,8 @@ fn fresh_os_run(mut run: impl FnMut(&AmendmentFixture) -> Output) -> (AmendmentF
         }
         assert!(
             retry < 20,
-            "real OS inspector remained unavailable in fresh fixtures"
+            "real OS inspector remained unavailable in fresh fixtures: {}",
+            case.f.process_diagnostic()
         );
         thread::sleep(Duration::from_millis(50));
     }
@@ -68,7 +69,11 @@ impl AmendmentFixture {
         command
             .arg("amend-undispatched")
             .args(args)
-            .env("PATH", &self.f.path);
+            .env("PATH", &self.f.path)
+            .env(
+                "LUTHOR_PROCESS_DIAGNOSTIC_FILE",
+                self.f.dir.path().join("process-probe"),
+            );
         command
     }
 
@@ -91,7 +96,11 @@ impl AmendmentFixture {
             );
             assert_eq!(self.f.count("intents", "supervisor_dispatch"), 0);
             assert!(!self.f.marker.exists());
-            assert!(retry < 20, "real OS inspector remained unavailable");
+            assert!(
+                retry < 20,
+                "real OS inspector remained unavailable: {}",
+                self.f.process_diagnostic()
+            );
             thread::sleep(Duration::from_millis(50));
         }
         unreachable!()
