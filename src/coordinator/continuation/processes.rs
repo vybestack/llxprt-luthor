@@ -1,10 +1,12 @@
 #[cfg(test)]
+mod collector_tests;
+#[cfg(test)]
 mod conflict_tests;
 use super::ports::{ContinuationProcessInspector, ProcessInspectionError as Error};
 use crate::state::NeverDispatchedContext;
 use std::{
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
 };
 
 pub struct OsContinuationProcessInspector;
@@ -17,22 +19,21 @@ impl ContinuationProcessInspector for OsContinuationProcessInspector {
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn inspect_os(context: &NeverDispatchedContext) -> Result<(), Error> {
-    let output = Command::new("/bin/ps")
+    let child = Command::new("/bin/ps")
         .args(["-ww", "-axo", "pid=,uid=,stat=,args="])
         .env("LC_ALL", "C")
-        .output()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|_| Error::Unavailable)?;
+    let collector_pid = child.id();
+    let output = child.wait_with_output().map_err(|_| Error::Unavailable)?;
     if !output.status.success() {
         return Err(Error::Unavailable);
     }
     let listing = std::str::from_utf8(&output.stdout).map_err(|_| Error::Unavailable)?;
-    let rows = listing
-        .lines()
-        .map(parse_row)
-        .collect::<Result<Vec<_>, _>>()?;
-    if rows.is_empty() {
-        return Err(Error::Unavailable);
-    }
+    let rows = parse_listing(listing, collector_pid)?;
     let owner = unsafe { libc::geteuid() };
     for row in rows {
         assess(context, owner, row, current_directory)?;
@@ -50,6 +51,19 @@ struct ProcessRow<'a> {
     uid: u32,
     inert: bool,
     args: &'a str,
+}
+
+fn parse_listing(listing: &str, collector_pid: u32) -> Result<Vec<ProcessRow<'_>>, Error> {
+    let mut rows = listing
+        .lines()
+        .map(parse_row)
+        .collect::<Result<Vec<_>, _>>()?;
+    if rows.is_empty() {
+        return Err(Error::Unavailable);
+    }
+    // The owned collector has been reaped, so its cwd is no longer observable.
+    rows.retain(|row| row.pid != collector_pid);
+    Ok(rows)
 }
 
 fn parse_row(line: &str) -> Result<ProcessRow<'_>, Error> {
