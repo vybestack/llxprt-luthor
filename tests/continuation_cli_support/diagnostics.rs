@@ -48,9 +48,23 @@ fn child_probe_file_reaches_parent_panic_without_changing_cli_stderr() {
     assert!(record.contains(" errno="));
     assert!(!record.contains(&f.task));
     assert!(!record.contains('/'));
-    assert!(record.len() < 160);
+    assert!(record.len() < 1024);
     assert_eq!(record.lines().count(), 1);
     let panic = std::panic::catch_unwind(|| panic!("inspector unavailable: {record}"));
     let message = panic.unwrap_err().downcast::<String>().unwrap();
     assert!(message.contains(&record));
+}
+
+#[test]
+fn extended_linux_metadata_reaches_fixture_parent_failure_message() {
+    let f = Fixture::new();
+    let record = "process_probe stage=proc_cwd pid=1292 uid=1001 state=S errno=13 code=- comm=Runner.Worker starttime=123456 Uid=1001,1001,1001,1001 Gid=1001,1001,1001,1001 TracerPid=0 NoNewPrivs=0 Seccomp=2 exe=Runner.Worker stat_errno=0 comm_errno=0 status_errno=0 exe_errno=13 stat_after_errno=0 identity_errno=0\n";
+    assert!(record.len() > 160);
+    std::fs::write(f.dir.path().join("process-probe"), record).unwrap();
+    let transported = f.process_diagnostic();
+    assert_eq!(transported, record);
+    let panic = std::panic::catch_unwind(|| panic!("inspector unavailable: {transported}"));
+    let message = panic.unwrap_err().downcast::<String>().unwrap();
+    assert!(message.contains("exe_errno=13 stat_after_errno=0 identity_errno=0"));
+    assert!(message.contains(record));
 }

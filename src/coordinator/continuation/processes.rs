@@ -230,7 +230,7 @@ fn current_directory(pid: u32) -> Result<PathBuf, Error> {
 #[cfg(target_os = "linux")]
 fn current_directory_observed(pid: u32, probe: &Probe) -> Result<PathBuf, Error> {
     std::fs::read_link(format!("/proc/{pid}/cwd")).map_err(|error| {
-        probe.failed("proc_cwd", Some(pid), error.raw_os_error());
+        probe.cwd_failure(pid, error.raw_os_error());
         Error::Unavailable
     })
 }

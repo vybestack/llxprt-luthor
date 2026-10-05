@@ -178,7 +178,7 @@ impl Fixture {
 
     pub fn process_diagnostic(&self) -> String {
         fs::read_to_string(self.dir.path().join("process-probe"))
-            .map(|record| record.chars().take(160).collect())
+            .map(|record| record.chars().take(1024).collect())
             .unwrap_or_else(|_| "process_probe record=missing".into())
     }
 
