@@ -1,9 +1,6 @@
 use std::{fs, process::Command};
 use xtask::{
-    ledger::{Entry, Measurement, validate},
-    measurements::collect,
-    metrics::Limits,
-    scan::scan,
+    measurement::Measurement, measurements::collect, metrics::Limits, policy::validate, scan::scan,
 };
 
 fn fixture(source: &str) -> Result<Vec<Measurement>, String> {
@@ -51,33 +48,26 @@ fn cycle(import: &str, target: &str) -> String {
     )
 }
 
-fn debt(module: &str) -> Vec<Entry> {
-    [
-        format!("coupling::src/{module}::nested->src/b:cyclic_edge"),
-        format!("coupling::src/b->src/{module}::nested:feedback"),
-    ]
-    .into_iter()
-    .map(|key| Entry {
-        key,
-        ceiling: 1,
-        owner: "https://github.com/vybestack/llxprt-luthor/issues/6".into(),
-    })
-    .collect()
+fn assert_cycle_keys(findings: &[String], keys: &[&str]) {
+    assert_eq!(findings.len(), keys.len(), "{findings:?}");
+    for key in keys {
+        let metric = key.rsplit(':').next().unwrap();
+        assert!(
+            findings.contains(&format!("{key}: {metric}=1 limit=0")),
+            "{findings:?}"
+        );
+    }
 }
 
 fn assert_cycle(source: &str) {
     let measured = fixture(source).unwrap();
-    let findings = validate(&measured, &[]);
-    assert_eq!(findings.len(), 2, "{findings:?}");
-    for entry in debt("a") {
-        assert!(
-            findings
-                .iter()
-                .any(|f| f.starts_with(&format!("{}:", entry.key))),
-            "{findings:?}"
-        );
-    }
-    assert!(validate(&measured, &debt("a")).is_empty());
+    assert_cycle_keys(
+        &validate(&measured),
+        &[
+            "coupling::src/a::nested->src/b:cyclic_edge",
+            "coupling::src/b->src/a::nested:feedback",
+        ],
+    );
     assert!(
         measured
             .iter()
@@ -115,18 +105,15 @@ fn reexports_and_chained_parent_aliases_reach_the_defining_module() {
             "{source} pub mod bridge {{ pub use crate::a::nested::N; }}"
         ))
         .unwrap();
-        let mut entries = debt("a");
-        for key in [
-            "coupling::src/b->src/bridge:cyclic_edge",
-            "coupling::src/bridge->src/a::nested:feedback",
-        ] {
-            entries.push(Entry {
-                key: key.into(),
-                ..entries[0].clone()
-            });
-        }
-        assert_eq!(validate(&measured, &[]).len(), 4);
-        assert!(validate(&measured, &entries).is_empty());
+        assert_cycle_keys(
+            &validate(&measured),
+            &[
+                "coupling::src/a::nested->src/b:cyclic_edge",
+                "coupling::src/b->src/a::nested:feedback",
+                "coupling::src/b->src/bridge:cyclic_edge",
+                "coupling::src/bridge->src/a::nested:feedback",
+            ],
+        );
     }
 }
 
@@ -140,35 +127,21 @@ fn lexical_block_imports_are_hoisted_and_shadow_module_bindings() {
 }
 
 #[test]
-fn alias_cycle_replacement_and_removal_make_exact_debt_stale() {
+fn alias_cycle_replacement_is_rejected_and_breaking_the_cycle_passes() {
     let replaced = cycle("use crate::a as alias;", "alias::nested::N")
         .replace("mod a", "mod c")
         .replace("crate::a", "crate::c");
-    let findings = validate(&fixture(&replaced).unwrap(), &debt("a"));
-    assert_eq!(findings.len(), 4, "{findings:?}");
-    for entry in debt("a") {
-        assert!(findings.contains(&format!("{}: stale debt symbol/edge", entry.key)));
-    }
-    for key in [
-        "coupling::src/b->src/c::nested:cyclic_edge",
-        "coupling::src/c::nested->src/b:feedback",
-    ] {
-        assert!(
-            findings.iter().any(|f| f.starts_with(&format!("{key}:"))),
-            "{findings:?}"
-        );
-    }
+    assert_cycle_keys(
+        &validate(&fixture(&replaced).unwrap()),
+        &[
+            "coupling::src/b->src/c::nested:cyclic_edge",
+            "coupling::src/c::nested->src/b:feedback",
+        ],
+    );
     let acyclic = cycle("use crate::a as alias;", "alias::nested::N")
         .replace("pub b: Option<crate::b::B>", "pub value: usize");
     let measured = fixture(&acyclic).unwrap();
-    assert!(validate(&measured, &[]).is_empty());
-    let findings = validate(&measured, &debt("a"));
-    assert_eq!(findings.len(), 2, "{findings:?}");
-    assert!(
-        findings
-            .iter()
-            .all(|f| f.ends_with(": stale debt symbol/edge"))
-    );
+    assert!(validate(&measured).is_empty());
 }
 
 #[test]
@@ -182,7 +155,7 @@ fn external_and_nested_block_shadowing_do_not_invent_cycles() {
                 let _: Option<alias::nested::N> = None;
             }
         }";
-    assert!(validate(&fixture(source).unwrap(), &[]).is_empty());
+    assert!(validate(&fixture(source).unwrap()).is_empty());
 }
 
 #[test]
@@ -192,8 +165,14 @@ fn external_files_and_parent_scope_aliases_resolve_before_cycle_accounting() {
         ("src/a.rs", "pub mod nested { use super::super::b; pub struct N { pub b: Option<b::B> } }"),
         ("src/b.rs", "use crate::a as parent; use parent as alias; pub struct B { pub n: Option<Box<alias::nested::N>> }"),
     ]).unwrap();
-    assert_eq!(validate(&measured, &[]).len(), 2);
-    assert!(validate(&measured, &debt("a")).is_empty());
+    assert_eq!(validate(&measured).len(), 2);
+    assert_cycle_keys(
+        &validate(&measured),
+        &[
+            "coupling::src/a::nested->src/b:cyclic_edge",
+            "coupling::src/b->src/a::nested:feedback",
+        ],
+    );
 }
 
 #[test]
@@ -236,8 +215,14 @@ fn separate_binary_imports_do_not_shadow_library_module_names() {
         ),
     ])
     .unwrap();
-    assert_eq!(validate(&measured, &[]).len(), 2);
-    assert!(validate(&measured, &debt("a")).is_empty());
+    assert_eq!(validate(&measured).len(), 2);
+    assert_cycle_keys(
+        &validate(&measured),
+        &[
+            "coupling::src/a::nested->src/b:cyclic_edge",
+            "coupling::src/b->src/a::nested:feedback",
+        ],
+    );
 }
 
 #[test]

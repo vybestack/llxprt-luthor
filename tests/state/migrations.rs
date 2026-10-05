@@ -1,0 +1,147 @@
+use super::*;
+use luthor::state::{scheduling, task_records};
+
+pub(crate) fn migrates_v2_released_reservation_and_preserves_attempt_history() {
+    use rusqlite::Connection;
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("state.sqlite3");
+    let connection = Connection::open(&db).unwrap();
+    connection.execute_batch("CREATE TABLE tasks (id TEXT PRIMARY KEY, tracker_repo_id TEXT NOT NULL, issue_node_id TEXT NOT NULL, repository TEXT NOT NULL, issue_number INTEGER NOT NULL, state TEXT NOT NULL, config_revision TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(tracker_repo_id, issue_node_id)); CREATE TABLE attempts (id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id), lifecycle TEXT NOT NULL, outcome TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP); CREATE TABLE intents (sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, task_id TEXT NOT NULL REFERENCES tasks(id), attempt_id TEXT, kind TEXT NOT NULL, detail TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP); CREATE TABLE reservations (task_id TEXT PRIMARY KEY REFERENCES tasks(id), attempt_id TEXT NOT NULL UNIQUE, status TEXT NOT NULL CHECK(status IN ('reserved','released')), created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP); CREATE TABLE evidence (sequence INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL REFERENCES tasks(id), attempt_id TEXT, kind TEXT NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP); CREATE TABLE state_meta(key TEXT PRIMARY KEY, value INTEGER NOT NULL); INSERT INTO state_meta VALUES('capacity',1); INSERT INTO tasks(id,tracker_repo_id,issue_node_id,repository,issue_number,state,config_revision) VALUES('task','repo-id','issue-id','org/repo',7,'preparing','rev'); INSERT INTO attempts(id,task_id,lifecycle) VALUES('old-attempt','task','completed'); INSERT INTO evidence(task_id,attempt_id,kind,payload) VALUES('task','old-attempt','result','old evidence'); INSERT INTO reservations(task_id,attempt_id,status) VALUES('task','old-attempt','released'); PRAGMA user_version=2;").unwrap();
+    drop(connection);
+
+    let mut store = StateStore::open(dir.path(), 1).unwrap();
+    assert_eq!(task_records::task_count(&store).unwrap(), 1);
+    assert_eq!(scheduling::reservation_count(&store).unwrap(), 0);
+    scheduling::reserve(&mut store, "task", "new-attempt").unwrap();
+    assert_eq!(scheduling::reservation_count(&store).unwrap(), 1);
+    drop(store);
+
+    let connection = Connection::open(&db).unwrap();
+    let version: i32 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 3);
+    let rows: Vec<(String, String)> = connection
+        .prepare("SELECT attempt_id,status FROM reservations ORDER BY attempt_id")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            ("new-attempt".into(), "reserved".into()),
+            ("old-attempt".into(), "released".into()),
+        ]
+    );
+    let attempt_ids: Vec<String> = connection
+        .prepare("SELECT id FROM attempts ORDER BY id")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(attempt_ids, vec!["new-attempt", "old-attempt"]);
+    let evidence_attempt_ids: Vec<Option<String>> = connection
+        .prepare("SELECT attempt_id FROM evidence ORDER BY sequence")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(evidence_attempt_ids, vec![Some("old-attempt".into())]);
+    drop(connection);
+
+    let reopened = StateStore::open(dir.path(), 1).unwrap();
+    assert_eq!(scheduling::reservation_count(&reopened).unwrap(), 1);
+}
+
+pub(crate) fn migrates_v1_database_atomically_and_preserves_records_and_capacity() {
+    use rusqlite::Connection;
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("state.sqlite3");
+    let connection = Connection::open(&db).unwrap();
+    connection.execute_batch("CREATE TABLE tasks (id TEXT PRIMARY KEY, tracker_repo_id TEXT NOT NULL, issue_node_id TEXT NOT NULL, repository TEXT NOT NULL, issue_number INTEGER NOT NULL, state TEXT NOT NULL, config_revision TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(tracker_repo_id, issue_node_id)); CREATE TABLE attempts (id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id), lifecycle TEXT NOT NULL, outcome TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP); CREATE TABLE intents (sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, task_id TEXT NOT NULL REFERENCES tasks(id), attempt_id TEXT, kind TEXT NOT NULL, detail TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP); CREATE TABLE reservations (task_id TEXT PRIMARY KEY REFERENCES tasks(id), attempt_id TEXT NOT NULL UNIQUE, status TEXT NOT NULL CHECK(status IN ('reserved','released')), created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP); CREATE TABLE evidence (sequence INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL REFERENCES tasks(id), attempt_id TEXT, kind TEXT NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP); INSERT INTO tasks(id,tracker_repo_id,issue_node_id,repository,issue_number,state,config_revision) VALUES('task','repo-id','issue-id','org/repo',7,'preparing','rev'); INSERT INTO attempts(id,task_id,lifecycle) VALUES('attempt','task','launch_intended'); INSERT INTO intents(id,task_id,attempt_id,kind,detail) VALUES('intent','task','attempt','launch','detail'); INSERT INTO reservations(task_id,attempt_id,status) VALUES('task','attempt','reserved'); INSERT INTO evidence(task_id,attempt_id,kind,payload) VALUES('task','attempt','project','item'); PRAGMA user_version=1;").unwrap();
+    drop(connection);
+    drop(StateStore::open(dir.path(), 2).unwrap());
+    let connection = Connection::open(&db).unwrap();
+    let version: i32 = connection
+        .pragma_query_value(None, "user_version", |r| r.get(0))
+        .unwrap();
+    assert_eq!(version, 3);
+    for (table, expected) in [
+        ("tasks", 1),
+        ("attempts", 1),
+        ("intents", 1),
+        ("reservations", 1),
+        ("evidence", 1),
+    ] {
+        let count: i64 = connection
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, expected, "{table}");
+    }
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT value FROM state_meta WHERE key='capacity'",
+                [],
+                |r| r.get(0)
+            )
+            .unwrap(),
+        2
+    );
+    drop(connection);
+    drop(StateStore::open(dir.path(), 2).unwrap());
+    assert!(matches!(
+        StateStore::open(dir.path(), 3),
+        Err(StateError::CapacityMismatch { .. })
+    ));
+}
+
+pub(crate) fn failed_v1_migration_rolls_back_schema_and_version() {
+    use rusqlite::Connection;
+    let dir = tempfile::tempdir().unwrap();
+    let connection = Connection::open(dir.path().join("state.sqlite3")).unwrap();
+    connection.execute_batch("CREATE TABLE tasks (id TEXT PRIMARY KEY, tracker_repo_id TEXT NOT NULL, issue_node_id TEXT NOT NULL, repository TEXT NOT NULL, issue_number INTEGER NOT NULL, state TEXT NOT NULL, config_revision TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(tracker_repo_id, issue_node_id)); CREATE TABLE attempts (id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id), lifecycle TEXT NOT NULL, outcome TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP); CREATE TABLE intents (sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, task_id TEXT NOT NULL REFERENCES tasks(id), attempt_id TEXT, kind TEXT NOT NULL, detail TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP); CREATE TABLE reservations (task_id TEXT PRIMARY KEY REFERENCES tasks(id), attempt_id TEXT NOT NULL UNIQUE, status TEXT NOT NULL CHECK(status IN ('reserved','released')), created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP); CREATE TABLE evidence (sequence INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL REFERENCES tasks(id), attempt_id TEXT, kind TEXT NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP); CREATE TABLE state_meta(key TEXT PRIMARY KEY, value INTEGER NOT NULL); INSERT INTO state_meta VALUES('capacity',1); PRAGMA user_version=1;").unwrap();
+    drop(connection);
+    assert!(StateStore::open(dir.path(), 2).is_err());
+    let connection = Connection::open(dir.path().join("state.sqlite3")).unwrap();
+    let version: i32 = connection
+        .pragma_query_value(None, "user_version", |r| r.get(0))
+        .unwrap();
+    assert_eq!(version, 1);
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>("SELECT COUNT(*) FROM state_meta", [], |r| r.get(0))
+            .unwrap(),
+        1
+    );
+}
+
+pub(crate) fn persisted_capacity_is_authoritative_and_schema_version_is_checked() {
+    let dir = tempfile::tempdir().unwrap();
+    assert!(matches!(
+        StateStore::open(dir.path(), 0),
+        Err(StateError::InvalidCapacity)
+    ));
+    drop(StateStore::open(dir.path(), 1).unwrap());
+    let mismatch = match StateStore::open(dir.path(), 2) {
+        Ok(_) => panic!("capacity mismatch was accepted"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(mismatch, StateError::CapacityMismatch { .. }),
+        "unexpected reopen error: {mismatch:?}"
+    );
+    Connection::open(dir.path().join("state.sqlite3"))
+        .unwrap()
+        .pragma_update(None, "user_version", 99)
+        .unwrap();
+    assert!(matches!(
+        StateStore::open(dir.path(), 1),
+        Err(StateError::UnsupportedDatabaseVersion(99))
+    ));
+}

@@ -1,3 +1,4 @@
+use luthor::state::launches;
 pub(super) mod script;
 use super::super::{Lane, database, executable_lane};
 use luthor::{
@@ -44,16 +45,10 @@ pub(super) fn commit(lane: &mut Lane, amended: bool) -> LaunchPlan {
             .unwrap()
             .effective_plan
     } else {
-        let saved = lane
-            .f
-            .store
-            .launch_intent("attempt-task-a")
+        let saved = launches::launch_intent(&lane.f.store, "attempt-task-a")
             .unwrap()
             .unwrap();
-        lane.f
-            .store
-            .begin_supervision("task-a", "attempt-task-a", &saved)
-            .unwrap();
+        launches::begin_supervision(&mut lane.f.store, "task-a", "attempt-task-a", &saved).unwrap();
         lane.plan.clone()
     }
 }

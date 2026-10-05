@@ -1,8 +1,9 @@
 use std::{collections::BTreeSet, fs};
 use tempfile::tempdir;
 use xtask::{
-    coupling, ledger, measurements,
+    coupling, measurements,
     metrics::{self, Limits},
+    policy,
     scan::{self, Scan},
     suppression,
 };
@@ -16,7 +17,7 @@ fn scanned(source: &str) -> Result<Scan, String> {
 
 fn findings(source: &str) -> Vec<String> {
     let scan = scanned(source).unwrap();
-    ledger::validate(&measurements::collect(&scan, Limits::default()), &[])
+    policy::validate(&measurements::collect(&scan, Limits::default()))
 }
 
 fn costly_block() -> String {
@@ -24,7 +25,7 @@ fn costly_block() -> String {
 }
 
 #[test]
-fn macro_branches_reach_the_ledger_at_the_existing_limit() {
+fn macro_branches_reach_the_policy_at_the_existing_limit() {
     let block = costly_block();
     for invocation in [
         format!("vec![{block}]"),
@@ -69,7 +70,7 @@ fn macro_local_impls_survive_production_measurement_collection() {
                 && m.limit == 20)
     );
     assert!(
-        ledger::validate(&measurements, &[])
+        policy::validate(&measurements)
             .iter()
             .any(|e| e.contains("T:type_methods: type_methods=21") && e.contains("limit=20"))
     );
@@ -238,7 +239,7 @@ fn xtask_quote_inputs_are_token_data_not_executable_source() {
     let scan = scan::scan(root.path(), &["xtask/src"]).unwrap();
     assert!(scan.feedback.is_empty());
     assert!(scan.suppressions.is_empty());
-    assert!(ledger::validate(&measurements::collect(&scan, Limits::default()), &[]).is_empty());
+    assert!(policy::validate(&measurements::collect(&scan, Limits::default())).is_empty());
     assert!(metrics::analyze("src/a.rs", source).is_err());
 }
 
@@ -285,7 +286,7 @@ fn existing_repository_macro_forms_remain_scannable() {
 }
 
 #[test]
-fn macro_limits_remain_inclusive_without_debt_exceptions() {
+fn macro_limits_remain_inclusive_without_exceptions() {
     let operations = "operation()?; ".repeat(24);
     let methods = (0..20)
         .map(|i| format!("fn m{i}() {{}} "))
@@ -307,7 +308,7 @@ fn macro_limits_remain_inclusive_without_debt_exceptions() {
             .iter()
             .any(|m| m.key.ends_with("T:type_methods") && m.value == 20)
     );
-    assert!(ledger::validate(&measured, &[]).is_empty());
+    assert!(policy::validate(&measured).is_empty());
 }
 
 #[test]
@@ -333,7 +334,7 @@ fn executable_format_destinations_json_keys_and_nested_patterns_are_traversed() 
 }
 
 #[test]
-fn macro_function_and_type_lines_reach_ledger_validation() {
+fn macro_function_and_type_lines_reach_policy_validation() {
     let statements = "let value = 1;\n".repeat(81);
     let errors = findings(&format!(
         "fn run() {{ let _ = vec![{{\n{statements}0 }}]; }}"

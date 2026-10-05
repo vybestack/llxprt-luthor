@@ -1,3 +1,4 @@
+use luthor::state::{journal, task_records};
 mod amendment;
 use luthor::{
     config::Config,
@@ -50,16 +51,10 @@ fn seed_saved_attempt(config: &Config, task: &str, attempt: &str) -> LaunchPlan 
         source: config.sources[0].clone(),
     };
     let mut store = StateStore::open(&config.state_root, 1).unwrap();
-    store
-        .create_task(task, &candidate, "saved-revision", config)
-        .unwrap();
-    store
-        .record_claim_intent(task, "acoliver", "org/tracker", 7)
-        .unwrap();
-    store
-        .record_evidence(task, None, "claim_verified", "acoliver")
-        .unwrap();
-    store.set_task_phase(task, "claimed").unwrap();
+    task_records::create_task(&mut store, task, &candidate, "saved-revision", config).unwrap();
+    task_records::record_claim_intent(&mut store, task, "acoliver", "org/tracker", 7).unwrap();
+    journal::record_evidence(&mut store, task, None, "claim_verified", "acoliver").unwrap();
+    task_records::set_task_phase(&mut store, task, "claimed").unwrap();
     worktree::ensure_worktree(&mut store, task, &config.worktree_root, &candidate.mapping).unwrap();
     let plan = supervisor::prepare_initial(&mut store, task, attempt).unwrap();
     let saved = serde_json::to_string_pretty(&plan).unwrap();

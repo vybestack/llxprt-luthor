@@ -2,6 +2,7 @@ use super::{error::SupervisorError, evidence::*, processes::*, terminal_exit};
 use crate::model::*;
 use crate::state::StateStore;
 use crate::state::exits::reconcile_verified_exit as commit_exit;
+use crate::state::{exit_observation, journal, scheduling};
 use std::fs;
 
 /// Only an exact durable exit with a proven absent process group releases capacity.
@@ -75,14 +76,16 @@ fn reconcile_attempt_inner(
         Err(reason) => return Ok(held(reason)),
     };
     let (evidence, outcome, completed) = exit_record(&receipt)?;
-    if store.reconciled_exit(task_id, attempt_id, &evidence, &outcome)? && !recheck_processes {
+    if exit_observation::reconciled_exit(store, task_id, attempt_id, &evidence, &outcome)?
+        && !recheck_processes
+    {
         return Ok(completed);
     }
     if recheck_processes
         && revalidate_terminal_exit
         && child_file.boot_identity.starts_with("{ sec")
     {
-        if !store.reconciled_exit(task_id, attempt_id, &evidence, &outcome)? {
+        if !exit_observation::reconciled_exit(store, task_id, attempt_id, &evidence, &outcome)? {
             return Ok(held("terminal exit is not durably reconciled"));
         }
         match terminal_exit::prove(store, &plan, &receipt, child_file, supervisor, tracked) {
@@ -149,8 +152,8 @@ fn live_reconciliation(
         reason: reason.into(),
     };
     if sent.is_none()
-        || !store.active_attempt_reservation(task_id, attempt_id)?
-        || store.stop_intent(task_id, attempt_id)?.is_some()
+        || !scheduling::active_attempt_reservation(store, task_id, attempt_id)?
+        || journal::stop_intent(store, task_id, attempt_id)?.is_some()
         || attempts
             .join(format!("{attempt_id}.supervisor-error.json"))
             .exists()

@@ -1,4 +1,5 @@
 #![cfg(unix)]
+use luthor::state::{journal, launches, scheduling, task_records};
 mod continuation_cli_support;
 use continuation_cli_support::{Fixture, git, wait_for};
 use luthor::{state::StateStore, supervisor::ExitReceipt};
@@ -116,17 +117,20 @@ fn continuation_cli_launches_exact_saved_attempt_once_under_exclusive_lock() {
 fn assert_saved_launch(f: &Fixture) {
     let store = StateStore::open(&f.config.state_root, 1).unwrap();
     assert_eq!(
-        store.latest_attempt(&f.task).unwrap().as_deref(),
+        task_records::latest_attempt(&store, &f.task)
+            .unwrap()
+            .as_deref(),
         Some(f.attempt.as_str())
     );
-    assert_eq!(store.reservation_count().unwrap(), 1);
+    assert_eq!(scheduling::reservation_count(&store).unwrap(), 1);
     assert_eq!(
-        store.launch_intent(&f.attempt).unwrap().as_deref(),
+        launches::launch_intent(&store, &f.attempt)
+            .unwrap()
+            .as_deref(),
         Some(f.saved.as_str())
     );
     let audit: Value = serde_json::from_str(
-        &store
-            .evidence_payloads(&f.task, &f.attempt, "never_dispatched_authorized")
+        &journal::evidence_payloads(&store, &f.task, &f.attempt, "never_dispatched_authorized")
             .unwrap()[0],
     )
     .unwrap();

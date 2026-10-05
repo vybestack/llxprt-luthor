@@ -3,6 +3,7 @@ use luthor::github::{
     project::{Issue, Page, ProjectItem, ProjectReadError, ProjectReader},
     pull_request::{ErrorCategory, LookupError, PullRequestReader},
 };
+use luthor::state::task_records;
 use serde_json::{Value, json};
 
 pub(super) struct Projects<'a>(pub &'a mut FakeGithub, pub &'static str);
@@ -124,7 +125,9 @@ fn continuation_failed_source_reads_record_only_bounded_refusal() {
         let mut lane = Lane::new();
         lane.read_scenario = scenario;
         lane.held(Refusal::SourceUnavailable);
-        let reason = lane.f.store.held_reason("task-a").unwrap().unwrap();
+        let reason = task_records::held_reason(&lane.f.store, "task-a")
+            .unwrap()
+            .unwrap();
         assert_eq!(reason, "\"source_unavailable\"");
         assert!(!reason.contains("secret"));
     }

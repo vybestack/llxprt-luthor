@@ -1,8 +1,11 @@
+use luthor::state::{journal, launches, scheduling, task_records};
 #[test]
 fn never_dispatched_preserves_legacy_full_config_and_saved_argv_without_rerendering() {
     let (_dir, config, mut store, mut plan) = fixture();
     let db = database(&config);
-    let mut selection = store.selection_evidence("task").unwrap().unwrap();
+    let mut selection = task_records::selection_evidence(&store, "task")
+        .unwrap()
+        .unwrap();
     selection
         .effective_config
         .initial
@@ -31,12 +34,19 @@ fn never_dispatched_preserves_legacy_full_config_and_saved_argv_without_rerender
             NeverDispatchedReason::LegacyPreflightRecovery,
         )
         .unwrap();
-    assert_eq!(store.launch_intent("attempt-1").unwrap().unwrap(), saved);
     assert_eq!(
-        store.selection_evidence("task").unwrap().unwrap(),
+        launches::launch_intent(&store, "attempt-1")
+            .unwrap()
+            .unwrap(),
+        saved
+    );
+    assert_eq!(
+        task_records::selection_evidence(&store, "task")
+            .unwrap()
+            .unwrap(),
         selection
     );
-    assert_eq!(store.reservation_count().unwrap(), 1);
+    assert_eq!(scheduling::reservation_count(&store).unwrap(), 1);
     assert_private_plan_absent(&config);
 }
 
@@ -106,7 +116,7 @@ fn never_dispatched_authorization_audit_failure_rolls_back_without_consuming_con
             NeverDispatchedReason::LegacyPreflightRecovery,
         )
         .unwrap();
-    assert_eq!(store.reservation_count().unwrap(), 1);
+    assert_eq!(scheduling::reservation_count(&store).unwrap(), 1);
 }
 
 use super::super::*;
@@ -167,9 +177,9 @@ fn assert_private_plan_absent(config: &Config) {
 }
 
 fn assert_audit(store: &StateStore, context: &luthor::state::NeverDispatchedContext) {
-    let audit = store
-        .evidence_payloads("task", "attempt-1", "never_dispatched_authorized")
-        .unwrap();
+    let audit =
+        journal::evidence_payloads(store, "task", "attempt-1", "never_dispatched_authorized")
+            .unwrap();
     let audit: serde_json::Value = serde_json::from_str(&audit[0]).unwrap();
     assert_eq!(audit["actor"], "operator");
     assert_eq!(audit["reason_code"], "legacy_preflight_recovery");
@@ -190,7 +200,9 @@ fn saved_never_dispatched_context_authorizes_exact_attempt_without_rewriting_his
     assert_eq!(context.plan(), &plan);
     assert_eq!(
         context.saved_launch_plan(),
-        store.launch_intent("attempt-1").unwrap().unwrap()
+        launches::launch_intent(&store, "attempt-1")
+            .unwrap()
+            .unwrap()
     );
     assert_eq!(context.selection().effective_config, (&config).into());
     assert_eq!(context.claim().principal, config.assignment_login);
@@ -223,7 +235,7 @@ fn saved_never_dispatched_context_authorizes_exact_attempt_without_rewriting_his
     assert_eq!(&after[..before[4].len()], before[4]);
     assert_eq!(after.len(), before[4].len() + 1);
     assert_audit(&store, &context);
-    assert_eq!(store.reservation_count().unwrap(), 1);
+    assert_eq!(scheduling::reservation_count(&store).unwrap(), 1);
     assert_private_plan_absent(&config);
     assert!(store.never_dispatched_context("task", "attempt-1").is_err());
     assert!(
@@ -247,7 +259,7 @@ fn saved_never_dispatched_context_authorizes_exact_attempt_without_rewriting_his
             )
             .is_err()
     );
-    assert_eq!(store.reservation_count().unwrap(), 1);
+    assert_eq!(scheduling::reservation_count(&store).unwrap(), 1);
     assert_eq!(rows(&db, "evidence"), after);
 }
 
@@ -484,12 +496,11 @@ fn never_dispatched_authorization_bounds_actor_and_binds_state_store() {
             .is_err()
     );
     assert!(
-        other
-            .evidence_payloads("task", "attempt-1", "never_dispatched_authorized")
+        journal::evidence_payloads(&other, "task", "attempt-1", "never_dispatched_authorized")
             .unwrap()
             .is_empty()
     );
-    assert_eq!(other.reservation_count().unwrap(), 1);
+    assert_eq!(scheduling::reservation_count(&other).unwrap(), 1);
     assert!(other_config.state_root.exists());
     let value: serde_json::Value = serde_json::from_str(context.saved_launch_plan()).unwrap();
     db.execute(

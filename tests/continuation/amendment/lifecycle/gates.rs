@@ -1,4 +1,5 @@
 use super::{Lane, database, executable_lane};
+use luthor::state::{journal, scheduling};
 use luthor::supervisor;
 use std::{
     fs,
@@ -104,37 +105,34 @@ pub(super) fn ready_committed_supervisor(lane: &mut Lane) -> std::process::Child
             .join("attempts/attempt-task-a.child.json"),
     )
     .unwrap();
-    lane.f
-        .store
-        .record_evidence(
-            "task-a",
-            Some("attempt-task-a"),
-            "child_registered",
-            registration.trim(),
-        )
-        .unwrap();
+    journal::record_evidence(
+        &mut lane.f.store,
+        "task-a",
+        Some("attempt-task-a"),
+        "child_registered",
+        registration.trim(),
+    )
+    .unwrap();
     let (boot, start) = identity(child.id());
     let process = serde_json::json!({"pid":child.id(),"boot_identity":boot,"start_identity":start})
         .to_string();
-    lane.f
-        .store
-        .record_evidence(
-            "task-a",
-            Some("attempt-task-a"),
-            "supervisor_ready",
-            &process,
-        )
-        .unwrap();
-    lane.f
-        .store
-        .record_intent(
-            "gate-attempt-task-a",
-            "task-a",
-            Some("attempt-task-a"),
-            "gate_release",
-            &process,
-        )
-        .unwrap();
+    journal::record_evidence(
+        &mut lane.f.store,
+        "task-a",
+        Some("attempt-task-a"),
+        "supervisor_ready",
+        &process,
+    )
+    .unwrap();
+    journal::record_intent(
+        &mut lane.f.store,
+        "gate-attempt-task-a",
+        "task-a",
+        Some("attempt-task-a"),
+        "gate_release",
+        &process,
+    )
+    .unwrap();
     child
 }
 
@@ -174,7 +172,7 @@ fn amended_ready_gate_rechecks_audit_seal_dispatch_and_plan_before_worker_exec()
                 .join("attempts/attempt-task-a.receipt.json")
                 .exists()
         );
-        assert_eq!(lane.f.store.reservation_count().unwrap(), 1);
+        assert_eq!(scheduling::reservation_count(&lane.f.store).unwrap(), 1);
     }
 }
 
@@ -202,7 +200,7 @@ fn amended_ready_eof_leaves_dispatch_held_without_worker_or_receipt() {
             .join("attempts/attempt-task-a.receipt.json")
             .exists()
     );
-    assert_eq!(lane.f.store.reservation_count().unwrap(), 1);
+    assert_eq!(scheduling::reservation_count(&lane.f.store).unwrap(), 1);
     assert!(matches!(
         supervisor::reconcile_attempt(&mut lane.f.store, "task-a", "attempt-task-a").unwrap(),
         supervisor::Reconciliation::Held { .. }
@@ -243,7 +241,7 @@ fn amended_raw_worker_plan_and_dispatch_without_registration_cannot_exec() {
         let output = child.wait_with_output().unwrap();
         assert!(!output.status.success());
         assert!(output.stdout.is_empty());
-        assert_eq!(lane.f.store.reservation_count().unwrap(), 1);
+        assert_eq!(scheduling::reservation_count(&lane.f.store).unwrap(), 1);
     }
 }
 

@@ -191,7 +191,9 @@ for the proof and refusal boundaries.
 From the repository root, use **`cargo xtask ci`** for the same offline, locked
 policy enforced on Ubuntu and macOS. See [the xtask guide](xtask/README.md) for
 the compatible toolchain, deliberate dependency fetch, absolute workspace-local
-Cargo/fixture directories, measurements, debt ratchet and executed contracts.
+Cargo/fixture directories, strict measurements and executed contracts.
+All structural limits apply to existing and new code, with no exceptions;
+refactor code that exceeds them.
 Keep cwd stable for Unix stop-socket fixtures; do not use an external `/tmp`
 workaround or weaken production path validation.
 

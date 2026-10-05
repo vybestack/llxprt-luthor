@@ -1,5 +1,6 @@
 use super::{database, fixture, pr};
 use luthor::state::{BranchRemovalRequest, ProcessQuiescence};
+use luthor::state::{journal, task_records};
 
 #[test]
 fn amendment_refuses_every_single_or_other_adjacent_pair_deletion() {
@@ -38,11 +39,14 @@ fn amendment_refuses_every_single_or_other_adjacent_pair_deletion() {
         }
     }
     assert!(
-        lane.f
-            .store
-            .evidence_payloads("task-a", "attempt-task-a", "initial_branch_removed")
-            .unwrap()
-            .is_empty()
+        journal::evidence_payloads(
+            &lane.f.store,
+            "task-a",
+            "attempt-task-a",
+            "initial_branch_removed"
+        )
+        .unwrap()
+        .is_empty()
     );
 }
 
@@ -76,7 +80,9 @@ fn amendment_bounds_audit_and_rejects_foreign_store() {
             )
             .is_err()
     );
-    let mut selection = lane.f.store.selection_evidence("task-a").unwrap().unwrap();
+    let mut selection = task_records::selection_evidence(&lane.f.store, "task-a")
+        .unwrap()
+        .unwrap();
     let huge = "x".repeat(262_144);
     selection.effective_config.initial.args.push(huge.clone());
     lane.f.config.initial.args.push(huge.clone());
@@ -94,10 +100,13 @@ fn amendment_bounds_audit_and_rejects_foreign_store() {
     .unwrap();
     assert!(super::amend(&mut lane).is_err());
     assert!(
-        lane.f
-            .store
-            .evidence_payloads("task-a", "attempt-task-a", "initial_branch_removed")
-            .unwrap()
-            .is_empty()
+        journal::evidence_payloads(
+            &lane.f.store,
+            "task-a",
+            "attempt-task-a",
+            "initial_branch_removed"
+        )
+        .unwrap()
+        .is_empty()
     );
 }

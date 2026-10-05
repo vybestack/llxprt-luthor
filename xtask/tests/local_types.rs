@@ -1,8 +1,9 @@
 use std::{collections::BTreeMap, fs};
 use tempfile::tempdir;
 use xtask::{
-    ledger, measurements,
+    measurements,
     metrics::Limits,
+    policy,
     scan::{self, Scan},
 };
 
@@ -36,7 +37,7 @@ fn type_values(scan: &Scan, metric: &str) -> BTreeMap<String, usize> {
 }
 
 #[test]
-fn ordinary_local_methods_reach_collection_and_ledger_at_twenty_and_twenty_one() {
+fn ordinary_local_methods_reach_collection_and_policy_at_twenty_and_twenty_one() {
     for prefix in ["src", "xtask/src"] {
         for count in [20, 21] {
             let calls = (0..count)
@@ -56,7 +57,7 @@ fn ordinary_local_methods_reach_collection_and_ledger_at_twenty_and_twenty_one()
                     .iter()
                     .any(|m| m.key.ends_with("T:type_methods") && m.limit == 20)
             );
-            let errors = ledger::validate(&measured, &[]);
+            let errors = policy::validate(&measured);
             if count == 20 {
                 assert!(errors.is_empty(), "{errors:?}");
             } else {
@@ -94,7 +95,7 @@ fn local_type_effective_lines_are_inclusive_at_four_hundred() {
                 .iter()
                 .any(|m| m.key.ends_with("T:type_lines") && m.limit == 400)
         );
-        let errors = ledger::validate(&measured, &[]);
+        let errors = policy::validate(&measured);
         let type_errors: Vec<_> = errors
             .iter()
             .filter(|e| e.contains(":type_lines:"))
@@ -125,7 +126,7 @@ fn identical_names_in_functions_sibling_blocks_and_macros_are_distinct() {
         let values = type_values(&scan, ":type_methods");
         assert_eq!(values.len(), 2, "{values:?}");
         assert!(values.values().all(|v| *v == 20), "{values:?}");
-        assert!(ledger::validate(&measurements::collect(&scan, Limits::default()), &[]).is_empty());
+        assert!(policy::validate(&measurements::collect(&scan, Limits::default())).is_empty());
     }
 }
 
@@ -145,7 +146,7 @@ fn split_impls_nested_functions_and_macro_blocks_share_the_declared_local_type()
         assert_eq!(values.len(), 1, "{values:?}");
         assert_eq!(*values.values().next().unwrap(), 21);
         assert!(
-            ledger::validate(&measurements::collect(&scan, Limits::default()), &[])
+            policy::validate(&measurements::collect(&scan, Limits::default()))
                 .iter()
                 .any(|e| e.contains("type_methods=21 limit=20"))
         );
@@ -191,7 +192,7 @@ fn cross_file_global_aliases_used_inside_functions_keep_one_aggregate() {
         BTreeMap::from([("src/a.rs::a::T:type_methods".into(), 21)])
     );
     assert!(
-        ledger::validate(&measurements::collect(&scan, Limits::default()), &[])
+        policy::validate(&measurements::collect(&scan, Limits::default()))
             .iter()
             .any(|e| e.contains("type_methods=21 limit=20"))
     );
@@ -221,7 +222,7 @@ fn nested_types_do_not_count_as_methods_of_the_enclosing_type() {
     assert_eq!(values.len(), 2);
     assert_eq!(values["src/lib.rs::root::Outer:type_methods"], 1);
     assert!(values.values().any(|v| *v == 20));
-    assert!(ledger::validate(&measurements::collect(&scan, Limits::default()), &[]).is_empty());
+    assert!(policy::validate(&measurements::collect(&scan, Limits::default())).is_empty());
 }
 
 #[test]
@@ -330,7 +331,7 @@ fn split_local_type_lines_across_sibling_impl_blocks_cannot_evade_the_cap() {
         [401]
     );
     assert!(
-        ledger::validate(&measurements::collect(&scan, Limits::default()), &[])
+        policy::validate(&measurements::collect(&scan, Limits::default()))
             .iter()
             .any(|e| e.contains("T:type_lines: type_lines=401 limit=400"))
     );
@@ -350,7 +351,7 @@ fn unqualified_block_use_aliases_bind_to_the_local_type_and_its_declaration_scop
         assert_eq!(*values.values().next().unwrap(), 21, "{values:?}");
         assert!(values.keys().all(|key| key.contains("::local@")));
         assert!(
-            ledger::validate(&measurements::collect(&scan, Limits::default()), &[])
+            policy::validate(&measurements::collect(&scan, Limits::default()))
                 .iter()
                 .any(|e| e.contains("type_methods=21 limit=20"))
         );

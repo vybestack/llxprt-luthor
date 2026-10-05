@@ -1,10 +1,5 @@
 use std::{fs, path::PathBuf};
-use xtask::{
-    driver::Processes,
-    ledger::{self, Entry},
-    metrics::Limits,
-    scan,
-};
+use xtask::{driver::Processes, metrics::Limits, policy, scan};
 
 fn execute() -> Result<i32, String> {
     xtask::environment::validate(&std::env::vars().collect())?;
@@ -28,15 +23,7 @@ fn execute() -> Result<i32, String> {
         );
         return Ok(0);
     }
-    let entries: Vec<Entry> = serde_json::from_str(
-        &fs::read_to_string(root.join("xtask/debt.json")).map_err(|e| e.to_string())?,
-    )
-    .map_err(|e| format!("malformed debt ledger: {e}"))?;
-    xtask::ledger::validate_owners(
-        &entries,
-        &fs::read_to_string(root.join("xtask/owners.json")).map_err(|e| e.to_string())?,
-    )?;
-    let mut findings = ledger::validate(&measurements, &entries);
+    let mut findings = policy::validate(&measurements);
     findings.extend(scan.suppressions);
     findings.sort();
     for finding in &findings {

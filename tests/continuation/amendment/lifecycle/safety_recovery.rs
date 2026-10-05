@@ -1,4 +1,5 @@
 use super::{Lane, database, observation::exited_lane, pr_completion::PrReader};
+use luthor::state::{scheduling, task_records};
 use luthor::{
     coordinator::{self, AttemptReview},
     state::{StateError, verify_amended_observation_plan},
@@ -78,9 +79,11 @@ fn safety_amended_operator_missing_receipt_refuses_absent_and_matching_pr_withou
         );
         assert_eq!(history(&lane), before);
         verify_amended_observation_plan(&database(&lane), lane.f.store.root(), &plan).unwrap();
-        assert_eq!(lane.f.store.reservation_count().unwrap(), 1);
+        assert_eq!(scheduling::reservation_count(&lane.f.store).unwrap(), 1);
         assert_eq!(
-            lane.f.store.task_phase("task-a").unwrap().as_deref(),
+            task_records::task_phase(&lane.f.store, "task-a")
+                .unwrap()
+                .as_deref(),
             Some("held")
         );
         assert!(lane.github.assigned);

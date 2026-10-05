@@ -1,4 +1,5 @@
 use super::*;
+use luthor::state::scheduling;
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 
@@ -53,7 +54,7 @@ fn assert_held_after_restart(config: &Config, mut store: StateStore, reason: &st
             reason: reason.into()
         }
     );
-    assert_eq!(store.reservation_count().unwrap(), 1);
+    assert_eq!(scheduling::reservation_count(&store).unwrap(), 1);
     drop(store);
     let mut reopened = StateStore::open(&config.state_root, 1).unwrap();
     assert_eq!(
@@ -62,7 +63,7 @@ fn assert_held_after_restart(config: &Config, mut store: StateStore, reason: &st
             reason: reason.into()
         }
     );
-    assert_eq!(reopened.reservation_count().unwrap(), 1);
+    assert_eq!(scheduling::reservation_count(&reopened).unwrap(), 1);
 }
 
 #[test]

@@ -1,5 +1,6 @@
 use super::observation::exited_lane;
 use super::{Lane, database};
+use luthor::state::{journal, scheduling, task_records};
 use luthor::{
     coordinator::reconcile_with_pr,
     github::pull_request::{LookupError, PullRequestReader},
@@ -70,7 +71,9 @@ fn amended_natural_exit_matching_pr_remains_valid_on_reconciliation_and_status_r
     let (mut lane, plan, result) = complete("matching");
     assert!(matches!(result, Reconciliation::Completed { .. }));
     assert_eq!(
-        lane.f.store.task_phase("task-a").unwrap().as_deref(),
+        task_records::task_phase(&lane.f.store, "task-a")
+            .unwrap()
+            .as_deref(),
         Some("pr_complete")
     );
     verify_amended_observation_plan(&database(&lane), lane.f.store.root(), &plan).unwrap();
@@ -78,7 +81,7 @@ fn amended_natural_exit_matching_pr_remains_valid_on_reconciliation_and_status_r
         supervisor::reconcile_attempt(&mut lane.f.store, "task-a", "attempt-task-a").unwrap(),
         Reconciliation::Completed { .. }
     ));
-    assert_eq!(lane.f.store.reservation_count().unwrap(), 0);
+    assert_eq!(scheduling::reservation_count(&lane.f.store).unwrap(), 0);
     assert!(verify_amended_worker_plan(&database(&lane), lane.f.store.root(), &plan).is_err());
     assert!(
         lane.f
@@ -112,7 +115,9 @@ fn amended_pr_completion_rejects_wrong_authenticated_pr_and_keeps_held_terminal_
         let (mut lane, plan, result) = complete(mutation);
         assert!(matches!(result, Reconciliation::Held { .. }), "{mutation}");
         assert_eq!(
-            lane.f.store.task_phase("task-a").unwrap().as_deref(),
+            task_records::task_phase(&lane.f.store, "task-a")
+                .unwrap()
+                .as_deref(),
             Some("held")
         );
         verify_amended_observation_plan(&database(&lane), lane.f.store.root(), &plan).unwrap();
@@ -120,7 +125,7 @@ fn amended_pr_completion_rejects_wrong_authenticated_pr_and_keeps_held_terminal_
             supervisor::reconcile_attempt(&mut lane.f.store, "task-a", "attempt-task-a").unwrap(),
             Reconciliation::Completed { .. }
         ));
-        assert_eq!(lane.f.store.reservation_count().unwrap(), 0);
+        assert_eq!(scheduling::reservation_count(&lane.f.store).unwrap(), 0);
     }
 }
 
@@ -140,7 +145,9 @@ fn amended_natural_exit_without_pr_keeps_attention_and_no_completion_binding() {
         Reconciliation::Completed { .. }
     ));
     assert_eq!(
-        lane.f.store.task_phase("task-a").unwrap().as_deref(),
+        task_records::task_phase(&lane.f.store, "task-a")
+            .unwrap()
+            .as_deref(),
         Some("attention")
     );
     verify_amended_observation_plan(&database(&lane), lane.f.store.root(), &plan).unwrap();
@@ -153,13 +160,16 @@ fn amended_natural_exit_without_pr_keeps_attention_and_no_completion_binding() {
         .unwrap();
     assert_eq!(bindings, 0);
     assert!(
-        lane.f
-            .store
-            .evidence_payloads("task-a", "attempt-task-a", "verified_open_pr")
-            .unwrap()
-            .is_empty()
+        journal::evidence_payloads(
+            &lane.f.store,
+            "task-a",
+            "attempt-task-a",
+            "verified_open_pr"
+        )
+        .unwrap()
+        .is_empty()
     );
-    assert_eq!(lane.f.store.reservation_count().unwrap(), 0);
+    assert_eq!(scheduling::reservation_count(&lane.f.store).unwrap(), 0);
 }
 
 #[test]
@@ -223,10 +233,12 @@ fn amended_completion_preserves_held_lookup_retry_path() {
     ));
     verify_amended_observation_plan(&database(&lane), lane.f.store.root(), &plan).unwrap();
     assert_eq!(
-        lane.f.store.task_phase("task-a").unwrap().as_deref(),
+        task_records::task_phase(&lane.f.store, "task-a")
+            .unwrap()
+            .as_deref(),
         Some("held")
     );
-    assert_eq!(lane.f.store.reservation_count().unwrap(), 0);
+    assert_eq!(scheduling::reservation_count(&lane.f.store).unwrap(), 0);
     prs.inner.present_on = Some(2);
     assert!(matches!(
         reconcile_with_pr(
@@ -240,9 +252,11 @@ fn amended_completion_preserves_held_lookup_retry_path() {
         Reconciliation::Completed { .. }
     ));
     assert_eq!(
-        lane.f.store.task_phase("task-a").unwrap().as_deref(),
+        task_records::task_phase(&lane.f.store, "task-a")
+            .unwrap()
+            .as_deref(),
         Some("pr_complete")
     );
     verify_amended_observation_plan(&database(&lane), lane.f.store.root(), &plan).unwrap();
-    assert_eq!(lane.f.store.reservation_count().unwrap(), 0);
+    assert_eq!(scheduling::reservation_count(&lane.f.store).unwrap(), 0);
 }

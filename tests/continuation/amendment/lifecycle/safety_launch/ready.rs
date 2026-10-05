@@ -2,6 +2,7 @@ use super::{
     gates,
     setup::{commit, drift, lane, script},
 };
+use luthor::state::scheduling;
 use std::{fs, io::Write};
 
 #[test]
@@ -40,7 +41,7 @@ fn safety_real_supervisor_ready_release_refuses_drift_before_forwarding_worker_g
                     .join("attempts/attempt-task-a.receipt.json")
                     .exists()
             );
-            assert_eq!(lane.f.store.reservation_count().unwrap(), 1);
+            assert_eq!(scheduling::reservation_count(&lane.f.store).unwrap(), 1);
         }
     }
 }
@@ -64,6 +65,6 @@ fn safety_already_run_amended_observation_still_accepts_dirty_and_descendant_wor
                 signal: None
             }
         ));
-        assert_eq!(lane.f.store.reservation_count().unwrap(), 0);
+        assert_eq!(scheduling::reservation_count(&lane.f.store).unwrap(), 0);
     }
 }

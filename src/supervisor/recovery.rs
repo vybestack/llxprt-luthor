@@ -1,5 +1,6 @@
 use super::{error::SupervisorError, evidence::*, processes::*};
 use crate::model::*;
+use crate::state::{journal, scheduling, task_records, worktree_records};
 use crate::{
     state::{StateStore, WorktreeIdentity},
     worktree,
@@ -18,7 +19,7 @@ pub fn inspect_recovery_quiescence(
     if !valid_attempt(attempt_id) {
         return Err(SupervisorError::Conflict);
     }
-    if store.latest_attempt(task_id)?.as_deref() != Some(attempt_id) {
+    if task_records::latest_attempt(store, task_id)?.as_deref() != Some(attempt_id) {
         return Ok(RecoveryInspection::Held(
             "attempt is not the latest attempt",
         ));
@@ -36,15 +37,12 @@ pub fn inspect_recovery_quiescence(
             ));
         }
     }
-    if !store.active_attempt_reservation(task_id, attempt_id)? {
+    if !scheduling::active_attempt_reservation(store, task_id, attempt_id)? {
         return Ok(RecoveryInspection::Held(
             "attempt is not the active reserved attempt",
         ));
     }
-    if store
-        .evidence_payload(task_id, Some(attempt_id), "attempt_exit")?
-        .is_some()
-    {
+    if journal::evidence_payload(store, task_id, Some(attempt_id), "attempt_exit")?.is_some() {
         return Ok(RecoveryInspection::Held("attempt exit receipt exists"));
     }
 
@@ -57,10 +55,7 @@ pub fn inspect_recovery_quiescence(
         Ok(child) => child,
         Err(reason) => return held(reason),
     };
-    if store
-        .evidence_payload(task_id, Some(attempt_id), "log_failure")?
-        .is_some()
-    {
+    if journal::evidence_payload(store, task_id, Some(attempt_id), "log_failure")?.is_some() {
         return held("log drain failed");
     }
     if attempts
@@ -91,13 +86,14 @@ fn recovery_plan_evidence(
         Ok(plan) => plan,
         Err(reason) => return Ok(Err(reason)),
     };
-    let Some(worktree) = store.evidence_payload(task_id, None, "worktree_created")? else {
+    let Some(worktree) = journal::evidence_payload(store, task_id, None, "worktree_created")?
+    else {
         return held("missing worktree evidence");
     };
     let Some(worktree) = serde_json::from_str::<WorktreeIdentity>(&worktree).ok() else {
         return held("invalid worktree evidence");
     };
-    let record = store.worktree_record(task_id)?;
+    let record = worktree_records::worktree_record(store, task_id)?;
     if worktree.path != plan.worktree
         || record.as_ref().is_none_or(|r| {
             r.identity.as_ref() != Some(&worktree)
@@ -113,7 +109,7 @@ fn recovery_plan_evidence(
     if worktree::verify_snapshot(&plan.expected_worktree).is_err() {
         return held("worktree snapshot mismatch");
     }
-    let Some(selection) = store.selection_evidence(task_id)? else {
+    let Some(selection) = task_records::selection_evidence(store, task_id)? else {
         return held("missing selection");
     };
     if crate::state::selection_for_attempt(store, &plan).is_err()
@@ -121,7 +117,7 @@ fn recovery_plan_evidence(
     {
         return held("selection mismatch");
     }
-    let Some(claim) = store.evidence_payload(task_id, None, "claim_verified")? else {
+    let Some(claim) = journal::evidence_payload(store, task_id, None, "claim_verified")? else {
         return held("missing claim evidence");
     };
     if claim.trim().is_empty() || claim != selection.effective_config.assignment_login {
@@ -142,10 +138,12 @@ fn recovery_process_quiescence(
 ) -> Result<RecoveryInspection, SupervisorError> {
     let receipt_path = attempts.join(format!("{attempt_id}.receipt.json"));
     let held = |reason| Ok(RecoveryInspection::Held(reason));
-    let Some(release) = store.intent_payload(task_id, attempt_id, "gate_release")? else {
+    let Some(release) = journal::intent_payload(store, task_id, attempt_id, "gate_release")? else {
         return held("missing gate release decision");
     };
-    let Some(ready) = store.evidence_payload(task_id, Some(attempt_id), "supervisor_ready")? else {
+    let Some(ready) =
+        journal::evidence_payload(store, task_id, Some(attempt_id), "supervisor_ready")?
+    else {
         return held("missing or invalid supervisor identity");
     };
     let Some(supervisor) = recorded_process(&ready) else {
@@ -154,7 +152,8 @@ fn recovery_process_quiescence(
     if recorded_process(&release).as_ref() != Some(&supervisor) {
         return held("supervisor identity contradiction");
     }
-    let Some(sent) = store.evidence_payload(task_id, Some(attempt_id), "gate_sent")? else {
+    let Some(sent) = journal::evidence_payload(store, task_id, Some(attempt_id), "gate_sent")?
+    else {
         return held("missing gate sent evidence");
     };
     if recorded_process(&sent).as_ref() != Some(&supervisor) {
@@ -164,8 +163,7 @@ fn recovery_process_quiescence(
         return held("supervisor and child identity contradiction");
     }
 
-    let tracked = store
-        .evidence_payloads(task_id, attempt_id, "tracked_descendant")?
+    let tracked = journal::evidence_payloads(store, task_id, attempt_id, "tracked_descendant")?
         .into_iter()
         .map(|payload| recorded_process(&payload))
         .collect::<Option<Vec<_>>>();
@@ -224,28 +222,25 @@ fn recovery_evidence_unchanged(
     if super::binding::verify_observed_plan(&store.connection, store.root(), plan).is_err()
         || &current_plan != plan
         || &current_child != child_file
-        || store
-            .evidence_payload(task_id, Some(attempt_id), "gate_sent")?
-            .as_deref()
+        || journal::evidence_payload(store, task_id, Some(attempt_id), "gate_sent")?.as_deref()
             != Some(sent)
-        || store
-            .evidence_payload(task_id, Some(attempt_id), "supervisor_ready")?
+        || journal::evidence_payload(store, task_id, Some(attempt_id), "supervisor_ready")?
             .as_deref()
             != Some(ready)
         || !matches!(
             fs::symlink_metadata(receipt_path),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound
         )
-        || store.latest_attempt(task_id)?.as_deref() != Some(attempt_id)
-        || !store.active_attempt_reservation(task_id, attempt_id)?
+        || task_records::latest_attempt(store, task_id)?.as_deref() != Some(attempt_id)
+        || !scheduling::active_attempt_reservation(store, task_id, attempt_id)?
     {
         return held("recovery evidence changed during inspection");
     }
-    let current_tracked = store
-        .evidence_payloads(task_id, attempt_id, "tracked_descendant")?
-        .into_iter()
-        .map(|payload| recorded_process(&payload))
-        .collect::<Option<Vec<_>>>();
+    let current_tracked =
+        journal::evidence_payloads(store, task_id, attempt_id, "tracked_descendant")?
+            .into_iter()
+            .map(|payload| recorded_process(&payload))
+            .collect::<Option<Vec<_>>>();
     let Some(current_tracked) = current_tracked else {
         return held("tracked descendant evidence changed during inspection");
     };

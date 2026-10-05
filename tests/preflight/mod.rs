@@ -1,4 +1,10 @@
 use super::*;
+use luthor::state::launches::launch_intent;
+use luthor::state::scheduling::reservation_count;
+use luthor::state::task_records::{
+    existing_issue, held_reason, latest_attempt, source_claim_intent, task_count, task_phase,
+};
+use luthor::state::worktree_records::worktree_record;
 
 #[cfg(unix)]
 fn unsafe_attempt_storage(f: &Fixture, failure: &str) -> std::path::PathBuf {
@@ -45,14 +51,14 @@ fn long_stop_socket_path_blocks_dispatch_before_claim_or_reservation() {
     ));
     assert_eq!(writer.calls, 0);
     assert!(launcher.plans.is_empty());
-    assert_eq!(f.store.reservation_count().unwrap(), 0);
+    assert_eq!(reservation_count(&f.store).unwrap(), 0);
     assert!(!f.config.worktree_root.exists());
     assert_eq!(github.reads, 0);
     assert_eq!(github.prs.lookups, 0);
-    assert!(f.store.latest_attempt("task-a").unwrap().is_none());
-    assert!(f.store.source_claim_intent("task-a").unwrap().is_none());
+    assert!(latest_attempt(&f.store, "task-a").unwrap().is_none());
+    assert!(source_claim_intent(&f.store, "task-a").unwrap().is_none());
     assert_eq!(
-        f.store.held_reason("task-a").unwrap().as_deref(),
+        held_reason(&f.store, "task-a").unwrap().as_deref(),
         Some("launch preflight socket path too long")
     );
 }
@@ -115,20 +121,20 @@ fn unsafe_attempt_storage_fails_before_assignment_worktree_or_launch() {
         );
         assert_eq!(writer.calls, 0, "{failure}");
         assert!(launcher.plans.is_empty(), "{failure}");
-        assert_eq!(f.store.reservation_count().unwrap(), 0, "{failure}");
+        assert_eq!(reservation_count(&f.store).unwrap(), 0, "{failure}");
         assert!(
-            f.store.launch_intent("attempt-task-a").unwrap().is_none(),
+            launch_intent(&f.store, "attempt-task-a").unwrap().is_none(),
             "{failure}"
         );
-        assert!(f.store.latest_attempt("task-a").unwrap().is_none());
-        assert!(f.store.source_claim_intent("task-a").unwrap().is_none());
-        assert!(f.store.worktree_record("task-a").unwrap().is_none());
+        assert!(latest_attempt(&f.store, "task-a").unwrap().is_none());
+        assert!(source_claim_intent(&f.store, "task-a").unwrap().is_none());
+        assert!(worktree_record(&f.store, "task-a").unwrap().is_none());
         assert_eq!(
-            f.store.task_phase("task-a").unwrap().as_deref(),
+            task_phase(&f.store, "task-a").unwrap().as_deref(),
             Some("held")
         );
         assert_eq!(
-            f.store.held_reason("task-a").unwrap().as_deref(),
+            held_reason(&f.store, "task-a").unwrap().as_deref(),
             Some("launch preflight conflict")
         );
         assert!(!f.config.worktree_root.exists(), "{failure}");
@@ -201,25 +207,21 @@ fn unsafe_attempt_storage_stops_scheduler_before_second_candidate() {
         ))
     ));
     assert_eq!(ids.0, 2);
-    assert_eq!(f.store.task_count().unwrap(), 1);
+    assert_eq!(task_count(&f.store).unwrap(), 1);
     assert_eq!(
-        f.store.task_phase("task-1").unwrap().as_deref(),
+        task_phase(&f.store, "task-1").unwrap().as_deref(),
         Some("held")
     );
     assert_eq!(
-        f.store.held_reason("task-1").unwrap().as_deref(),
+        held_reason(&f.store, "task-1").unwrap().as_deref(),
         Some("launch preflight conflict")
     );
-    assert!(
-        !f.store
-            .existing_issue(&second.tracker_repo_id, &second.issue_node_id)
-            .unwrap()
-    );
-    assert!(f.store.latest_attempt("task-1").unwrap().is_none());
-    assert!(f.store.launch_intent("attempt-2").unwrap().is_none());
-    assert!(f.store.source_claim_intent("task-1").unwrap().is_none());
-    assert!(f.store.worktree_record("task-1").unwrap().is_none());
-    assert_eq!(f.store.reservation_count().unwrap(), 0);
+    assert!(!existing_issue(&f.store, &second.tracker_repo_id, &second.issue_node_id).unwrap());
+    assert!(latest_attempt(&f.store, "task-1").unwrap().is_none());
+    assert!(launch_intent(&f.store, "attempt-2").unwrap().is_none());
+    assert!(source_claim_intent(&f.store, "task-1").unwrap().is_none());
+    assert!(worktree_record(&f.store, "task-1").unwrap().is_none());
+    assert_eq!(reservation_count(&f.store).unwrap(), 0);
     assert_eq!(projects.reads, 0);
     assert_eq!(prs.lookups, 0);
     assert_eq!(assignments.calls, 0);
@@ -245,18 +247,18 @@ fn unavailable_attempt_storage_records_bounded_preflight_diagnostic() {
         Err(DispatchError::Supervisor(SupervisorError::Io(_)))
     ));
     assert_eq!(
-        f.store.held_reason("task-a").unwrap().as_deref(),
+        held_reason(&f.store, "task-a").unwrap().as_deref(),
         Some("launch preflight storage unavailable")
     );
     assert_eq!(
-        f.store.task_phase("task-a").unwrap().as_deref(),
+        task_phase(&f.store, "task-a").unwrap().as_deref(),
         Some("held")
     );
-    assert!(f.store.latest_attempt("task-a").unwrap().is_none());
-    assert!(f.store.source_claim_intent("task-a").unwrap().is_none());
-    assert!(f.store.worktree_record("task-a").unwrap().is_none());
-    assert!(f.store.launch_intent("attempt-task-a").unwrap().is_none());
-    assert_eq!(f.store.reservation_count().unwrap(), 0);
+    assert!(latest_attempt(&f.store, "task-a").unwrap().is_none());
+    assert!(source_claim_intent(&f.store, "task-a").unwrap().is_none());
+    assert!(worktree_record(&f.store, "task-a").unwrap().is_none());
+    assert!(launch_intent(&f.store, "attempt-task-a").unwrap().is_none());
+    assert_eq!(reservation_count(&f.store).unwrap(), 0);
     assert_eq!(github.reads, 0);
     assert_eq!(github.prs.lookups, 0);
     assert_eq!(writer.calls, 0);
@@ -284,13 +286,13 @@ fn supervisor_launch_errors_do_not_record_preflight_diagnostics() {
             Err(DispatchError::Supervisor(_))
         ));
         assert_eq!(
-            f.store.held_reason("task-a").unwrap().as_deref(),
+            held_reason(&f.store, "task-a").unwrap().as_deref(),
             Some("launch preparation or dispatch failed")
         );
         assert_eq!(writer.calls, 1);
         assert_eq!(launcher.plans.len(), 1);
-        assert!(f.store.launch_intent("attempt-task-a").unwrap().is_some());
-        assert_eq!(f.store.reservation_count().unwrap(), 1);
+        assert!(launch_intent(&f.store, "attempt-task-a").unwrap().is_some());
+        assert_eq!(reservation_count(&f.store).unwrap(), 1);
     }
 }
 
@@ -315,6 +317,6 @@ fn missing_attempt_storage_is_created_private_before_normal_dispatch() {
     assert_eq!(metadata.uid(), unsafe { libc::geteuid() });
     assert_eq!(writer.calls, 1);
     assert_eq!(launcher.plans, [plan]);
-    assert!(f.store.launch_intent("attempt-task-a").unwrap().is_some());
-    assert_eq!(f.store.reservation_count().unwrap(), 1);
+    assert!(launch_intent(&f.store, "attempt-task-a").unwrap().is_some());
+    assert_eq!(reservation_count(&f.store).unwrap(), 1);
 }

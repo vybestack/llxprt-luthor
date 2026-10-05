@@ -1,4 +1,5 @@
 use super::{amend, database, fixture};
+use luthor::state::{journal, launches};
 
 fn historical_lane() -> super::Lane {
     let mut lane = fixture();
@@ -20,10 +21,7 @@ fn historical_lane() -> super::Lane {
 #[test]
 fn historical_prompt_exact_suffix_preserved_through_amendment_and_dispatch_proof() {
     let mut lane = historical_lane();
-    let saved = lane
-        .f
-        .store
-        .launch_intent("attempt-task-a")
+    let saved = launches::launch_intent(&lane.f.store, "attempt-task-a")
         .unwrap()
         .unwrap();
     amend(&mut lane).unwrap();
@@ -37,9 +35,7 @@ fn historical_prompt_exact_suffix_preserved_through_amendment_and_dispatch_proof
     assert_eq!(context.effective_plan(), &expected);
     assert_eq!(context.saved_launch_plan(), saved);
     assert_eq!(
-        lane.f
-            .store
-            .launch_intent("attempt-task-a")
+        launches::launch_intent(&lane.f.store, "attempt-task-a")
             .unwrap()
             .unwrap(),
         saved
@@ -79,11 +75,14 @@ fn historical_prompt_other_suffix_template_and_argv_changes_refuse_without_audit
             .unwrap();
         assert!(amend(&mut lane).is_err(), "{mutation}");
         assert!(
-            lane.f
-                .store
-                .evidence_payloads("task-a", "attempt-task-a", "initial_branch_removed")
-                .unwrap()
-                .is_empty()
+            journal::evidence_payloads(
+                &lane.f.store,
+                "task-a",
+                "attempt-task-a",
+                "initial_branch_removed"
+            )
+            .unwrap()
+            .is_empty()
         );
     }
 }

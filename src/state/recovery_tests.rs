@@ -1,4 +1,7 @@
 use super::*;
+use crate::model::VerifiedOpenPr;
+use crate::state::journal;
+use rusqlite::params;
 use serde_json::{Value, json};
 
 #[test]
@@ -207,8 +210,7 @@ fn malformed_recovery_audits_preserve_every_persisted_transition() {
         assert_eq!(completed[2], "released");
         assert_eq!(completed[3], if matching { "pr_complete" } else { "held" });
         assert!(
-            !store
-                .evidence_kinds("task")
+            !journal::evidence_kinds(&store, "task")
                 .unwrap()
                 .contains(&"attempt_exit".into())
         );

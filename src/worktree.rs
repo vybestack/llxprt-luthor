@@ -1,3 +1,4 @@
+use crate::state::{task_records, worktree_records};
 use crate::{
     config::Mapping,
     state::{StateError, StateStore, WorktreeIdentity, WorktreeIntent, WorktreeRecord},
@@ -68,11 +69,9 @@ pub fn verify_existing_worktree(
     store: &StateStore,
     task_id: &str,
 ) -> Result<WorktreeIdentity, WorktreeError> {
-    let selection = store
-        .selection_evidence(task_id)?
+    let selection = task_records::selection_evidence(store, task_id)?
         .ok_or(WorktreeError::Conflict("missing selection"))?;
-    let record = store
-        .worktree_record(task_id)?
+    let record = worktree_records::worktree_record(store, task_id)?
         .ok_or(WorktreeError::Conflict("missing worktree intent"))?;
     verify_record(
         &record,
@@ -457,20 +456,7 @@ pub fn ensure_worktree_with_hooks(
     after_root_created: impl FnOnce(),
 ) -> Result<WorktreeResult, WorktreeError> {
     validate_task_id(task_id)?;
-    let selection = store
-        .claimed_worktree_context(task_id)
-        .map_err(|error| match error {
-            StateError::InvalidSelection => WorktreeError::NotClaimed,
-            other => WorktreeError::State(other),
-        })?;
-    if &selection.candidate.mapping != mapping
-        || selection.effective_config.worktree_root != worktree_root
-        || !selection.effective_config.mappings.contains(mapping)
-    {
-        return Err(WorktreeError::Conflict(
-            "mapping or root differs from selected task",
-        ));
-    }
+    verify_selected_mapping(store, task_id, worktree_root, mapping)?;
     let root = check_root(worktree_root)?;
     let intent = WorktreeIntent {
         path: root.join(task_id),
@@ -479,69 +465,117 @@ pub fn ensure_worktree_with_hooks(
         repository: mapping.code_repository.clone(),
     };
     let (checkout, git_dir, remote) = validate_checkout(mapping)?;
-    if let Some(record) = store.worktree_record(task_id)? {
-        if record.intent != intent {
-            return Err(WorktreeError::Conflict(
-                "worktree intent differs from mapping",
-            ));
-        }
-        let Some(expected) = record.identity else {
-            store.set_task_phase(task_id, "held")?;
-            return Err(WorktreeError::Conflict(
-                "unfinished worktree intent requires inspection",
-            ));
-        };
-        let result = identity(&intent.path, &intent, &git_dir, &remote);
-        return match result {
-            Ok(actual) if matches_snapshot(&expected, &actual)? => {
-                Ok(WorktreeResult::Existing(expected))
-            }
-            _ => Err(WorktreeError::Conflict(
-                "persisted worktree identity differs from disk",
-            )),
-        };
+    if let Some(record) = worktree_records::worktree_record(store, task_id)? {
+        return reuse_worktree(store, task_id, record, &intent, &git_dir, &remote);
     }
     check_new_worktree(&checkout, &intent)?;
     before_intent(store);
-    store.begin_worktree(task_id, &intent)?;
+    worktree_records::begin_worktree(store, task_id, &intent)?;
     let outcome = (|| {
-        if check_root(worktree_root)? != root {
-            return Err(WorktreeError::Conflict("worktree root changed"));
-        }
-        fs::create_dir_all(worktree_root)?;
-        after_root_created();
-        if check_root(worktree_root)? != root || fs::canonicalize(worktree_root)? != root {
-            return Err(WorktreeError::Conflict("worktree root changed"));
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&root, fs::Permissions::from_mode(0o700))?;
-        }
+        create_worktree_root(worktree_root, &root, after_root_created)?;
         check_new_worktree(&checkout, &intent)?;
-        let output = git(
-            &checkout,
-            &[
-                "worktree",
-                "add",
-                "-b",
-                &intent.branch,
-                intent
-                    .path
-                    .to_str()
-                    .ok_or(WorktreeError::Conflict("non-UTF8 worktree path"))?,
-                &intent.base,
-            ],
-        )?;
-        if !output.status.success() {
-            return Err(WorktreeError::Git("worktree add failed"));
-        }
+        add_worktree(&checkout, &intent)?;
         let created = identity(&intent.path, &intent, &git_dir, &remote)?;
-        store.finish_worktree(task_id, &created)?;
+        worktree_records::finish_worktree(store, task_id, &created)?;
         Ok(WorktreeResult::Created(created))
     })();
     if outcome.is_err() {
-        store.set_task_phase(task_id, "held")?;
+        task_records::set_task_phase(store, task_id, "held")?;
     }
     outcome
+}
+
+fn verify_selected_mapping(
+    store: &StateStore,
+    task_id: &str,
+    worktree_root: &Path,
+    mapping: &Mapping,
+) -> Result<(), WorktreeError> {
+    let selection = worktree_records::claimed_worktree_context(store, task_id).map_err(
+        |error| match error {
+            StateError::InvalidSelection => WorktreeError::NotClaimed,
+            other => WorktreeError::State(other),
+        },
+    )?;
+    if &selection.candidate.mapping != mapping
+        || selection.effective_config.worktree_root != worktree_root
+        || !selection.effective_config.mappings.contains(mapping)
+    {
+        return Err(WorktreeError::Conflict(
+            "mapping or root differs from selected task",
+        ));
+    }
+    Ok(())
+}
+
+fn reuse_worktree(
+    store: &mut StateStore,
+    task_id: &str,
+    record: WorktreeRecord,
+    intent: &WorktreeIntent,
+    git_dir: &Path,
+    remote: &str,
+) -> Result<WorktreeResult, WorktreeError> {
+    if record.intent != *intent {
+        return Err(WorktreeError::Conflict(
+            "worktree intent differs from mapping",
+        ));
+    }
+    let Some(expected) = record.identity else {
+        task_records::set_task_phase(store, task_id, "held")?;
+        return Err(WorktreeError::Conflict(
+            "unfinished worktree intent requires inspection",
+        ));
+    };
+    let result = identity(&intent.path, intent, git_dir, remote);
+    match result {
+        Ok(actual) if matches_snapshot(&expected, &actual)? => {
+            Ok(WorktreeResult::Existing(expected))
+        }
+        _ => Err(WorktreeError::Conflict(
+            "persisted worktree identity differs from disk",
+        )),
+    }
+}
+
+fn create_worktree_root(
+    worktree_root: &Path,
+    root: &Path,
+    after_root_created: impl FnOnce(),
+) -> Result<(), WorktreeError> {
+    if check_root(worktree_root)? != root {
+        return Err(WorktreeError::Conflict("worktree root changed"));
+    }
+    fs::create_dir_all(worktree_root)?;
+    after_root_created();
+    if check_root(worktree_root)? != root || fs::canonicalize(worktree_root)? != root {
+        return Err(WorktreeError::Conflict("worktree root changed"));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(root, fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+fn add_worktree(checkout: &Path, intent: &WorktreeIntent) -> Result<(), WorktreeError> {
+    let output = git(
+        checkout,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            &intent.branch,
+            intent
+                .path
+                .to_str()
+                .ok_or(WorktreeError::Conflict("non-UTF8 worktree path"))?,
+            &intent.base,
+        ],
+    )?;
+    if !output.status.success() {
+        return Err(WorktreeError::Git("worktree add failed"));
+    }
+    Ok(())
 }

@@ -1,3 +1,4 @@
+use crate::state::{task_records, worktree_records};
 use crate::{
     github::pull_request::PullRequestEvidence,
     github::pull_request::{LookupError, PullRequestReader},
@@ -55,11 +56,9 @@ pub fn expected_for_task<Q: PullRequestReader>(
     reader: &mut Q,
     current_identity: &str,
 ) -> Result<ExpectedPr, ExpectedPrError> {
-    let selection = store
-        .selection_evidence(task_id)?
+    let selection = task_records::selection_evidence(store, task_id)?
         .ok_or(ExpectedPrError::MissingEvidence)?;
-    let worktree = store
-        .worktree_record(task_id)?
+    let worktree = worktree_records::worktree_record(store, task_id)?
         .ok_or(ExpectedPrError::MissingEvidence)?;
     let identity = worktree.identity.ok_or(ExpectedPrError::MissingEvidence)?;
     let mapping = &selection.candidate.mapping;
@@ -74,7 +73,7 @@ pub fn expected_for_task<Q: PullRequestReader>(
     {
         return Err(ExpectedPrError::WorktreeMismatch);
     }
-    if store.latest_attempt(task_id)?.is_none() {
+    if task_records::latest_attempt(store, task_id)?.is_none() {
         return Err(ExpectedPrError::MissingEvidence);
     }
     if current_identity != mapping.allowed_pr_author || current_identity.is_empty() {

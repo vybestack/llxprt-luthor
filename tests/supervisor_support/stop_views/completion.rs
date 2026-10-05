@@ -1,4 +1,5 @@
 use super::*;
+use luthor::state::{journal, scheduling, task_records, worktree_records};
 
 // Receipt publication precedes supervisor exit/reaping. Completion-claim tests
 // need a quiescent fixture, not merely a receipt-ready one. Do not retry Held:
@@ -30,11 +31,10 @@ pub(crate) fn completion_fixture() -> (tempfile::TempDir, Config, StateStore) {
         thread::sleep(Duration::from_millis(10));
     }
     wait_for_fixture_exit(&config, &store);
-    assert_eq!(store.reservation_count().unwrap(), 1);
-    assert!(store.held_reason("task").unwrap().is_none());
+    assert_eq!(scheduling::reservation_count(&store).unwrap(), 1);
+    assert!(task_records::held_reason(&store, "task").unwrap().is_none());
     assert!(
-        !store
-            .evidence_kinds("task")
+        !journal::evidence_kinds(&store, "task")
             .unwrap()
             .iter()
             .any(|k| k == "attempt_exit")
@@ -47,9 +47,8 @@ pub(crate) fn wait_for_fixture_exit(config: &Config, store: &StateStore) {
         receipt_path(config).exists(),
         "fixture exit receipt missing"
     );
-    let ready = store
-        .evidence_payloads("task", "attempt-real", "supervisor_ready")
-        .unwrap();
+    let ready =
+        journal::evidence_payloads(store, "task", "attempt-real", "supervisor_ready").unwrap();
     assert_eq!(ready.len(), 1);
     let ready = &ready[0];
     let supervisor: serde_json::Value = serde_json::from_str(ready).unwrap();
@@ -61,9 +60,10 @@ pub(crate) fn wait_for_fixture_exit(config: &Config, store: &StateStore) {
 }
 
 fn matching_readers(store: &StateStore) -> (OtherProject, ExitPr) {
-    let selection = store.selection_evidence("task").unwrap().unwrap();
-    let identity = store
-        .worktree_record("task")
+    let selection = task_records::selection_evidence(store, "task")
+        .unwrap()
+        .unwrap();
+    let identity = worktree_records::worktree_record(store, "task")
         .unwrap()
         .unwrap()
         .identity
@@ -90,11 +90,14 @@ fn assert_recorded_claim_hold(
     prs: &ExitPr,
 ) {
     assert_eq!(
-        store.held_reason("task").unwrap().as_deref(),
+        task_records::held_reason(store, "task").unwrap().as_deref(),
         Some("completion claim changed")
     );
-    assert_eq!(store.task_phase("task").unwrap().as_deref(), Some("held"));
-    let kinds = store.evidence_kinds("task").unwrap();
+    assert_eq!(
+        task_records::task_phase(store, "task").unwrap().as_deref(),
+        Some("held")
+    );
+    let kinds = journal::evidence_kinds(store, "task").unwrap();
     assert!(!kinds.iter().any(|kind| kind == "verified_open_pr"));
     assert!(kinds.iter().any(|kind| kind == "attempt_exit"));
     let connection = rusqlite::Connection::open(config.state_root.join("state.sqlite3")).unwrap();
@@ -106,8 +109,8 @@ fn assert_recorded_claim_hold(
         )
         .unwrap();
     assert_eq!(outcome.as_deref(), Some("exit_code=Some(7);signal=None"));
-    assert_eq!(store.reservation_count().unwrap(), 0);
-    assert!(store.ensure_dispatch_capacity().is_err());
+    assert_eq!(scheduling::reservation_count(store).unwrap(), 0);
+    assert!(scheduling::ensure_dispatch_capacity(store).is_err());
     assert_eq!(prs.reads, 1);
     assert_eq!(projects.1, 1);
 }
@@ -136,10 +139,10 @@ fn assert_early_hold(
     );
     // Early process/evidence holds deliberately do not pretend a completion
     // claim was checked. They must retain capacity and never accept the PR.
-    assert!(store.held_reason("task").unwrap().is_none());
-    assert_eq!(store.reservation_count().unwrap(), 1);
-    assert!(store.ensure_dispatch_capacity().is_err());
-    let kinds = store.evidence_kinds("task").unwrap();
+    assert!(task_records::held_reason(store, "task").unwrap().is_none());
+    assert_eq!(scheduling::reservation_count(store).unwrap(), 1);
+    assert!(scheduling::ensure_dispatch_capacity(store).is_err());
+    let kinds = journal::evidence_kinds(store, "task").unwrap();
     assert!(
         !kinds
             .iter()
@@ -165,14 +168,14 @@ fn live_descendant_hold_precedes_and_then_records_stale_assignee_hold() {
     let tracked = serde_json::json!({
         "pid": child.0.id(), "boot_identity": boot_identity, "start_identity": start_identity,
     });
-    store
-        .record_evidence(
-            "task",
-            Some("attempt-real"),
-            "tracked_descendant",
-            &tracked.to_string(),
-        )
-        .unwrap();
+    journal::record_evidence(
+        &mut store,
+        "task",
+        Some("attempt-real"),
+        "tracked_descendant",
+        &tracked.to_string(),
+    )
+    .unwrap();
     let (mut projects, mut prs) = matching_readers(&store);
     let result = reconcile_claim(&mut store, &mut projects, &mut prs);
     assert_early_hold(
@@ -213,14 +216,14 @@ fn invalid_receipt_hold_does_not_claim_completion_was_checked() {
 #[test]
 fn log_failure_hold_does_not_claim_completion_was_checked() {
     let (_dir, _config, mut store) = completion_fixture();
-    store
-        .record_evidence(
-            "task",
-            Some("attempt-real"),
-            "log_failure",
-            "fixture drain failure",
-        )
-        .unwrap();
+    journal::record_evidence(
+        &mut store,
+        "task",
+        Some("attempt-real"),
+        "log_failure",
+        "fixture drain failure",
+    )
+    .unwrap();
     let (mut projects, mut prs) = matching_readers(&store);
     let result = reconcile_claim(&mut store, &mut projects, &mut prs);
     assert_early_hold(&store, result, "log drain failed", &projects, &prs);
@@ -229,19 +232,18 @@ fn log_failure_hold_does_not_claim_completion_was_checked() {
 #[test]
 fn duplicate_supervisor_evidence_fails_closed() {
     let (_dir, _config, mut store) = completion_fixture();
-    let ready = store
-        .evidence_payloads("task", "attempt-real", "supervisor_ready")
-        .unwrap();
+    let ready =
+        journal::evidence_payloads(&store, "task", "attempt-real", "supervisor_ready").unwrap();
     let mut identity: serde_json::Value = serde_json::from_str(&ready[0]).unwrap();
     identity["start_identity"] = serde_json::json!("contradictory fixture identity");
-    store
-        .record_evidence(
-            "task",
-            Some("attempt-real"),
-            "supervisor_ready",
-            &identity.to_string(),
-        )
-        .unwrap();
+    journal::record_evidence(
+        &mut store,
+        "task",
+        Some("attempt-real"),
+        "supervisor_ready",
+        &identity.to_string(),
+    )
+    .unwrap();
     let (mut projects, mut prs) = matching_readers(&store);
     let result = luthor::coordinator::reconcile_with_pr(
         &mut store,
@@ -256,9 +258,9 @@ fn duplicate_supervisor_evidence_fails_closed() {
             luthor::state::StateError::LaunchBlocked
         ))
     ));
-    assert!(store.held_reason("task").unwrap().is_none());
-    assert_eq!(store.reservation_count().unwrap(), 1);
-    let kinds = store.evidence_kinds("task").unwrap();
+    assert!(task_records::held_reason(&store, "task").unwrap().is_none());
+    assert_eq!(scheduling::reservation_count(&store).unwrap(), 1);
+    let kinds = journal::evidence_kinds(&store, "task").unwrap();
     assert!(
         !kinds
             .iter()

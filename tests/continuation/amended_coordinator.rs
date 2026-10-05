@@ -1,3 +1,4 @@
+use luthor::state::{launches, scheduling, task_records};
 #[cfg(unix)]
 mod gated;
 #[cfg(unix)]
@@ -29,7 +30,7 @@ impl AmendedSupervisorLauncher for Launcher {
         config: &luthor::config::Config,
         revision: &str,
     ) -> Result<(), SupervisorError> {
-        assert_eq!(store.reservation_count().unwrap(), 1);
+        assert_eq!(scheduling::reservation_count(store).unwrap(), 1);
         assert_eq!(
             context.amendment().unwrap().current_config_revision,
             revision
@@ -138,12 +139,19 @@ impl Case {
     }
     fn assert_held(&self, audits: usize, dispatches: usize) {
         let store = &self.lane.f.store;
-        assert_eq!(store.reservation_count().unwrap(), 1);
+        assert_eq!(scheduling::reservation_count(store).unwrap(), 1);
         assert_eq!(
-            store.latest_attempt("task-a").unwrap().as_deref(),
+            task_records::latest_attempt(store, "task-a")
+                .unwrap()
+                .as_deref(),
             Some("attempt-task-a")
         );
-        assert_eq!(store.task_phase("task-a").unwrap().as_deref(), Some("held"));
+        assert_eq!(
+            task_records::task_phase(store, "task-a")
+                .unwrap()
+                .as_deref(),
+            Some("held")
+        );
         assert_eq!(count(store, "evidence", "initial_branch_removed"), audits);
         assert_eq!(
             count(store, "intents", "initial_branch_removal_seal"),
@@ -172,11 +180,7 @@ fn count(store: &StateStore, table: &str, kind: &str) -> usize {
 #[test]
 fn amended_coordinator_audits_and_dispatches_exact_effective_plan_once() {
     let mut case = Case::new();
-    let original = case
-        .lane
-        .f
-        .store
-        .launch_intent("attempt-task-a")
+    let original = launches::launch_intent(&case.lane.f.store, "attempt-task-a")
         .unwrap()
         .unwrap();
     let config = case.lane.f.config.clone();
@@ -198,10 +202,7 @@ fn amended_coordinator_audits_and_dispatches_exact_effective_plan_once() {
         luthor::state::EffectiveConfigSnapshot::from(&config)
     );
     assert_eq!(
-        case.lane
-            .f
-            .store
-            .launch_intent("attempt-task-a")
+        launches::launch_intent(&case.lane.f.store, "attempt-task-a")
             .unwrap()
             .unwrap(),
         original

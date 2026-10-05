@@ -1,6 +1,8 @@
+use luthor::state::{journal, launches, scheduling, task_records};
 mod future_templates;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod gates;
+mod live_cli;
 mod observation;
 mod pr_completion;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -40,7 +42,9 @@ fn executable_lane_from(mut lane: Lane) -> Lane {
     lane.plan.executable = executable.clone();
     lane.f.config.initial.executable = executable.clone();
     let db = database(&lane);
-    let mut selection = lane.f.store.selection_evidence("task-a").unwrap().unwrap();
+    let mut selection = task_records::selection_evidence(&lane.f.store, "task-a")
+        .unwrap()
+        .unwrap();
     selection.effective_config.initial.executable = executable;
     db.execute(
         "UPDATE evidence SET payload=?1 WHERE kind='selection'",
@@ -96,10 +100,7 @@ fn await_receipt(lane: &Lane) {
 #[test]
 fn amended_real_worker_uses_exact_effective_argv_and_reconciles_without_rewriting_history() {
     let mut lane = executable_lane();
-    let original = lane
-        .f
-        .store
-        .launch_intent("attempt-task-a")
+    let original = launches::launch_intent(&lane.f.store, "attempt-task-a")
         .unwrap()
         .unwrap();
     launch(&mut lane, Path::new(env!("CARGO_BIN_EXE_luthor"))).unwrap();
@@ -135,11 +136,9 @@ fn amended_real_worker_uses_exact_effective_argv_and_reconciles_without_rewritin
             signal: None
         }
     );
-    assert_eq!(lane.f.store.reservation_count().unwrap(), 0);
+    assert_eq!(scheduling::reservation_count(&lane.f.store).unwrap(), 0);
     assert_eq!(
-        lane.f
-            .store
-            .launch_intent("attempt-task-a")
+        launches::launch_intent(&lane.f.store, "attempt-task-a")
             .unwrap()
             .unwrap(),
         original
@@ -173,7 +172,7 @@ fn amended_missing_supervisor_keeps_committed_dispatch_and_reservation_without_e
     let mut lane = executable_lane();
     assert!(launch(&mut lane, Path::new("missing-supervisor")).is_err());
     assert_eq!(dispatch_count(&lane), 1);
-    assert_eq!(lane.f.store.reservation_count().unwrap(), 1);
+    assert_eq!(scheduling::reservation_count(&lane.f.store).unwrap(), 1);
     assert!(matches!(
         supervisor::reconcile_attempt(&mut lane.f.store, "task-a", "attempt-task-a").unwrap(),
         Reconciliation::Held { .. }
@@ -183,9 +182,7 @@ fn amended_missing_supervisor_keeps_committed_dispatch_and_reservation_without_e
         RecoveryInspection::Held(_)
     ));
     assert!(
-        lane.f
-            .store
-            .evidence_payloads("task-a", "attempt-task-a", "attempt_exit")
+        journal::evidence_payloads(&lane.f.store, "task-a", "attempt-task-a", "attempt_exit")
             .unwrap()
             .is_empty()
     );
@@ -235,6 +232,6 @@ fn amended_launch_rechecks_config_revision_and_audit_before_artifacts_or_spawn()
                 .join("attempts/attempt-task-a.plan.json")
                 .exists()
         );
-        assert_eq!(lane.f.store.reservation_count().unwrap(), 1);
+        assert_eq!(scheduling::reservation_count(&lane.f.store).unwrap(), 1);
     }
 }

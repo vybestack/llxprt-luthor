@@ -1,4 +1,5 @@
 use super::{amend, audit_json, database, dual_fixture};
+use luthor::state::{journal, task_records};
 use serde_json::Value;
 
 #[test]
@@ -57,11 +58,14 @@ fn future_template_dual_rejects_every_unrelated_config_change() {
         }
         assert!(amend(&mut lane).is_err(), "{mutation}");
         assert!(
-            lane.f
-                .store
-                .evidence_payloads("task-a", "attempt-task-a", "initial_branch_removed")
-                .unwrap()
-                .is_empty()
+            journal::evidence_payloads(
+                &lane.f.store,
+                "task-a",
+                "attempt-task-a",
+                "initial_branch_removed"
+            )
+            .unwrap()
+            .is_empty()
         );
     }
 }
@@ -77,7 +81,9 @@ fn future_template_dual_requires_exact_unique_adjacent_resume_pair() {
         "not_native",
     ] {
         let mut lane = dual_fixture();
-        let mut selection = lane.f.store.selection_evidence("task-a").unwrap().unwrap();
+        let mut selection = task_records::selection_evidence(&lane.f.store, "task-a")
+            .unwrap()
+            .unwrap();
         let resume = &mut selection.effective_config.resume;
         match mutation {
             "duplicate" => resume

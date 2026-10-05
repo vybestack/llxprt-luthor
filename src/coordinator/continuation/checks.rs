@@ -2,6 +2,7 @@ use super::ports::{
     ContinuationLocalInspector, ContinuationProcessInspector, ContinuationRefusal,
     ContinuationResult, ProcessInspectionError,
 };
+use crate::state::journal;
 use crate::{
     claim,
     github::{
@@ -75,7 +76,8 @@ pub(crate) fn refuse(
 ) -> Result<ContinuationResult, StateError> {
     // A fixed enum, never external output, actor text, or credentials. This
     // task-scoped annotation does not replace history or release its slot.
-    store.record_evidence(
+    journal::record_evidence(
+        store,
         context.task_id(),
         None,
         "held_reason",

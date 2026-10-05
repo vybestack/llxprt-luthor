@@ -1,3 +1,4 @@
+use luthor::state::{launches, scheduling, task_records};
 mod arguments;
 mod refusals;
 mod success;
@@ -114,13 +115,17 @@ impl AmendmentFixture {
 
     fn assert_reserved_original(&self) {
         let store = StateStore::open(&self.f.config.state_root, 1).unwrap();
-        assert_eq!(store.reservation_count().unwrap(), 1);
+        assert_eq!(scheduling::reservation_count(&store).unwrap(), 1);
         assert_eq!(
-            store.latest_attempt(&self.f.task).unwrap().as_deref(),
+            task_records::latest_attempt(&store, &self.f.task)
+                .unwrap()
+                .as_deref(),
             Some(self.f.attempt.as_str())
         );
         assert_eq!(
-            store.launch_intent(&self.f.attempt).unwrap().as_deref(),
+            launches::launch_intent(&store, &self.f.attempt)
+                .unwrap()
+                .as_deref(),
             Some(self.f.saved.as_str())
         );
         for table in ["tasks", "attempts", "reservations"] {

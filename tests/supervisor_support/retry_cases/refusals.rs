@@ -1,4 +1,10 @@
 use super::*;
+use luthor::state::journal::{evidence_payloads, record_evidence, record_intent};
+use luthor::state::launches::launch_intent;
+use luthor::state::scheduling::{reservation_count, reserve};
+use luthor::state::task_records::{
+    create_task, latest_attempt, selection_evidence, set_task_phase,
+};
 
 #[cfg(unix)]
 pub(crate) fn retry_refusals_with_history(historical: bool) {
@@ -34,8 +40,8 @@ pub(crate) fn retry_refusals_with_history(historical: bool) {
         } else {
             retry_fixture()
         };
-        let original = store.selection_evidence("task").unwrap().unwrap();
-        let old_plan = store.launch_intent("attempt-real").unwrap().unwrap();
+        let original = selection_evidence(&store, "task").unwrap().unwrap();
+        let old_plan = launch_intent(&store, "attempt-real").unwrap().unwrap();
         let mut projects = OtherProject(original.candidate.clone(), 1);
         let mut prs = ExitPr::default();
         let db = rusqlite::Connection::open(config.state_root.join("state.sqlite3")).unwrap();
@@ -70,6 +76,36 @@ fn apply_refusal(
     db: &rusqlite::Connection,
 ) {
     match refusal {
+        "receipt" | "plan" | "outcome" | "stop" | "active" | "reserved" | "incomplete"
+        | "receipt_corrupt" | "task_identity" | "claim_intent" => {
+            apply_saved_attempt_refusal(refusal, config, store, db)
+        }
+        "source" | "mapping" | "identity" | "worktree" | "capacity" | "pr_error" | "pr_present"
+        | "pr_ambiguous" | "pr_identity" => {
+            apply_source_refusal(refusal, config, store, original, projects, prs)
+        }
+        "tracked_live"
+        | "tracked_reused"
+        | "supervisor_contradiction"
+        | "receipt_contradiction"
+        | "supervisor_error" => apply_process_refusal(refusal, config, store, db),
+        "invalid_config" => {
+            config
+                .resume
+                .args
+                .extend(["--max-tool-calls".into(), "1024".into()]);
+        }
+        _ => unreachable!(),
+    }
+}
+
+fn apply_saved_attempt_refusal(
+    refusal: &str,
+    config: &Config,
+    store: &mut StateStore,
+    db: &rusqlite::Connection,
+) {
+    match refusal {
         "receipt" => {
             fs::remove_file(receipt_path(config)).unwrap();
         }
@@ -88,12 +124,18 @@ fn apply_refusal(
             .unwrap();
         }
         "stop" => {
-            store
-                .record_intent("late-stop", "task", Some("attempt-real"), "stop", "{}")
-                .unwrap();
+            record_intent(
+                store,
+                "late-stop",
+                "task",
+                Some("attempt-real"),
+                "stop",
+                "{}",
+            )
+            .unwrap();
         }
         "active" => {
-            store.set_task_phase("task", "held").unwrap();
+            set_task_phase(store, "task", "held").unwrap();
         }
         "reserved" => {
             db.execute(
@@ -108,10 +150,6 @@ fn apply_refusal(
         "receipt_corrupt" => {
             fs::write(receipt_path(config), "{").unwrap();
         }
-        "source" | "mapping" | "identity" | "worktree" | "capacity" | "pr_error" | "pr_present"
-        | "pr_ambiguous" | "pr_identity" => {
-            apply_source_refusal(refusal, config, store, original, projects, prs)
-        }
         "task_identity" => {
             db.execute(
                 "UPDATE tasks SET tracker_repo_id='different' WHERE id='task'",
@@ -125,17 +163,6 @@ fn apply_refusal(
                 [],
             )
             .unwrap();
-        }
-        "tracked_live"
-        | "tracked_reused"
-        | "supervisor_contradiction"
-        | "receipt_contradiction"
-        | "supervisor_error" => apply_process_refusal(refusal, config, store, db),
-        "invalid_config" => {
-            config
-                .resume
-                .args
-                .extend(["--max-tool-calls".into(), "1024".into()]);
         }
         _ => unreachable!(),
     }
@@ -171,8 +198,8 @@ fn apply_source_refusal(
             other.item_id = "other".into();
             other.issue_number = 8;
             other.issue_url = "https://github.com/org/tracker/issues/8".into();
-            store.create_task("other", &other, "rev", config).unwrap();
-            store.reserve("other", "other-attempt").unwrap();
+            create_task(store, "other", &other, "rev", config).unwrap();
+            reserve(store, "other", "other-attempt").unwrap();
         }
         "pr_error" => {
             prs.fail = true;
@@ -201,7 +228,7 @@ fn assert_refused_retry(
     prs: &mut ExitPr,
 ) {
     let (original, old_plan) = history;
-    let reservations = store.reservation_count().unwrap();
+    let reservations = reservation_count(store).unwrap();
     let rows = old_retry_rows(config);
     let mut launcher = OtherLauncher::default();
     assert!(
@@ -220,34 +247,29 @@ fn assert_refused_retry(
         "refusal changed old history: {refusal}, historical={historical}"
     );
     assert!(
-        store
-            .evidence_payloads("task", "attempt-retry", "retry_authorized")
+        evidence_payloads(store, "task", "attempt-retry", "retry_authorized")
             .unwrap()
             .is_empty(),
         "{refusal}"
     );
+    assert_eq!(reservation_count(store).unwrap(), reservations, "{refusal}");
     assert_eq!(
-        store.reservation_count().unwrap(),
-        reservations,
-        "{refusal}"
-    );
-    assert_eq!(
-        store.latest_attempt("task").unwrap().as_deref(),
+        latest_attempt(store, "task").unwrap().as_deref(),
         Some("attempt-real"),
         "{refusal}"
     );
     assert_eq!(
-        store.selection_evidence("task").unwrap().unwrap(),
+        selection_evidence(store, "task").unwrap().unwrap(),
         *original,
         "{refusal}"
     );
     assert_eq!(
-        store.launch_intent("attempt-real").unwrap().unwrap(),
+        launch_intent(store, "attempt-real").unwrap().unwrap(),
         old_plan,
         "{refusal}"
     );
     assert!(
-        store.launch_intent("attempt-retry").unwrap().is_none(),
+        launch_intent(store, "attempt-retry").unwrap().is_none(),
         "{refusal}"
     );
 }
@@ -264,7 +286,7 @@ fn apply_process_refusal(
             if refusal == "tracked_reused" {
                 start = "different historical start".into();
             }
-            store.record_evidence("task", Some("attempt-real"), "tracked_descendant", &serde_json::json!({"pid":std::process::id(), "boot_identity":boot,"start_identity":start}).to_string()).unwrap();
+            record_evidence(store, "task", Some("attempt-real"), "tracked_descendant", &serde_json::json!({"pid":std::process::id(), "boot_identity":boot,"start_identity":start}).to_string()).unwrap();
         }
         "supervisor_contradiction" => {
             db.execute("UPDATE evidence SET payload=json_set(payload,'$.boot_identity','contradiction') WHERE attempt_id='attempt-real' AND kind='supervisor_ready'", []).unwrap();

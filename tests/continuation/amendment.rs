@@ -1,3 +1,4 @@
+use luthor::state::{journal, launches, scheduling, task_records};
 mod deletions;
 mod dispatch;
 mod future_templates;
@@ -24,7 +25,9 @@ pub(super) fn fixture() -> Lane {
     lane.plan
         .args
         .splice(2..2, ["--branch".into(), "luthor/task-a".into()]);
-    let mut selection = lane.f.store.selection_evidence("task-a").unwrap().unwrap();
+    let mut selection = task_records::selection_evidence(&lane.f.store, "task-a")
+        .unwrap()
+        .unwrap();
     selection.effective_config = EffectiveConfigSnapshot::from(&lane.f.config);
     let db = database(&lane);
     db.execute(
@@ -75,10 +78,7 @@ pub(super) fn amend(lane: &mut Lane) -> Result<i64, luthor::state::StateError> {
 #[test]
 fn amendment_exact_deletion_is_append_only_durable_and_single_use() {
     let mut lane = fixture();
-    let original = lane
-        .f
-        .store
-        .launch_intent("attempt-task-a")
+    let original = launches::launch_intent(&lane.f.store, "attempt-task-a")
         .unwrap()
         .unwrap();
     let db = database(&lane);
@@ -86,14 +86,12 @@ fn amendment_exact_deletion_is_append_only_durable_and_single_use() {
     let seq = amend(&mut lane).unwrap();
     assert!(seq > 0);
     assert_eq!(
-        lane.f
-            .store
-            .launch_intent("attempt-task-a")
+        launches::launch_intent(&lane.f.store, "attempt-task-a")
             .unwrap()
             .unwrap(),
         original
     );
-    assert_eq!(lane.f.store.reservation_count().unwrap(), 1);
+    assert_eq!(scheduling::reservation_count(&lane.f.store).unwrap(), 1);
     let after = evidence_rows(&db);
     assert_eq!(&after[..before.len()], &before);
     assert_eq!(after.len(), before.len() + 1);
@@ -125,14 +123,13 @@ fn amendment_exact_deletion_is_append_only_durable_and_single_use() {
     );
     assert!(amend(&mut lane).is_err());
     assert!(
-        lane.f
-            .store
-            .begin_supervision(
-                "task-a",
-                "attempt-task-a",
-                &serde_json::to_string(&effective).unwrap()
-            )
-            .is_err()
+        launches::begin_supervision(
+            &mut lane.f.store,
+            "task-a",
+            "attempt-task-a",
+            &serde_json::to_string(&effective).unwrap()
+        )
+        .is_err()
     );
     drop(lane.f.store);
     lane.f.store = luthor::state::StateStore::open(&lane.f.config.state_root, 1).unwrap();
@@ -215,11 +212,14 @@ fn amendment_refuses_every_other_plan_change_without_audit() {
             "{mutation}"
         );
         assert!(
-            lane.f
-                .store
-                .evidence_payloads("task-a", "attempt-task-a", "initial_branch_removed")
-                .unwrap()
-                .is_empty()
+            journal::evidence_payloads(
+                &lane.f.store,
+                "task-a",
+                "attempt-task-a",
+                "initial_branch_removed"
+            )
+            .unwrap()
+            .is_empty()
         );
     }
 }

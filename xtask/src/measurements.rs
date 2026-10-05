@@ -1,5 +1,5 @@
 //! Normalize scan measurements into one deterministic policy inventory.
-use crate::{ledger::Measurement, metrics::Limits, scan::Scan};
+use crate::{measurement::Measurement, metrics::Limits, scan::Scan};
 
 pub fn collect(scan: &Scan, limits: Limits) -> Vec<Measurement> {
     let mut measurements: Vec<_> = scan

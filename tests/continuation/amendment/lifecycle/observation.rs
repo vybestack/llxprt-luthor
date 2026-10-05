@@ -1,4 +1,5 @@
 use super::{Lane, await_receipt, database, executable_lane, launch};
+use luthor::state::{exit_observation, journal, scheduling, task_records};
 use luthor::{
     state::{verify_amended_observation_plan, verify_amended_worker_plan},
     supervisor::{self, LaunchPlan, Reconciliation, RecoveryInspection},
@@ -73,14 +74,19 @@ fn amended_terminal_binding_rejects_missing_duplicate_tampered_and_replayed_hist
 fn amended_attention_and_blocked_observation_remain_bound_without_becoming_launch_authorization() {
     let (mut lane, plan) = exited_lane();
     supervisor::reconcile_attempt(&mut lane.f.store, "task-a", "attempt-task-a").unwrap();
-    lane.f
-        .store
-        .record_exit_pr_lookup("task-a", "attempt-task-a", &super::super::pr())
-        .unwrap();
+    exit_observation::record_exit_pr_lookup(
+        &mut lane.f.store,
+        "task-a",
+        "attempt-task-a",
+        &super::super::pr(),
+    )
+    .unwrap();
     verify_amended_observation_plan(&database(&lane), lane.f.store.root(), &plan).unwrap();
     assert!(verify_amended_worker_plan(&database(&lane), lane.f.store.root(), &plan).is_err());
     assert_eq!(
-        lane.f.store.task_phase("task-a").unwrap().as_deref(),
+        task_records::task_phase(&lane.f.store, "task-a")
+            .unwrap()
+            .as_deref(),
         Some("attention")
     );
     assert!(matches!(
@@ -118,11 +124,9 @@ fn amended_missing_receipt_requires_registered_absence_and_never_invents_exit() 
         supervisor::reconcile_attempt(&mut lane.f.store, "task-a", "attempt-task-a").unwrap(),
         Reconciliation::Held { .. }
     ));
-    assert_eq!(lane.f.store.reservation_count().unwrap(), 1);
+    assert_eq!(scheduling::reservation_count(&lane.f.store).unwrap(), 1);
     assert!(
-        lane.f
-            .store
-            .evidence_payloads("task-a", "attempt-task-a", "attempt_exit")
+        journal::evidence_payloads(&lane.f.store, "task-a", "attempt-task-a", "attempt_exit")
             .unwrap()
             .is_empty()
     );

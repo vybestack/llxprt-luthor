@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
 };
-use xtask::{ledger, measurements, metrics, scan};
+use xtask::{measurements, metrics, policy, scan};
 
 pub struct Fixture {
     _directory: tempfile::TempDir,
@@ -96,9 +96,6 @@ impl Fixture {
         }
         let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
         fs::copy(workspace.join("clippy.toml"), root.join("clippy.toml")).unwrap();
-        for file in ["xtask/debt.json", "xtask/owners.json"] {
-            fs::write(root.join(file), "[]\n").unwrap();
-        }
         fs::write(root.join("Cargo.toml"), "[package]\nname = \"luthor\"\nversion = \"0.1.0\"\nedition = \"2024\"\n[workspace]\nmembers = [\"xtask\"]\nexclude = [\"tmp/macro\", \"tmp/serde\", \"tmp/thiserror\", \"tmp/core\", \"tmp/serde_derive\"]\nresolver = \"3\"\n[dependencies]\nserde = { version = \"1\", features = [\"derive\"] }\nthiserror = \"2\"\nfixture_macro = { path = \"tmp/macro\" }\n").unwrap();
         fs::write(
             root.join("xtask/Cargo.toml"),
@@ -165,11 +162,7 @@ impl Fixture {
             "{label}"
         );
         assert!(
-            ledger::validate(
-                &measurements::collect(&scan, metrics::Limits::default()),
-                &[]
-            )
-            .is_empty()
+            policy::validate(&measurements::collect(&scan, metrics::Limits::default())).is_empty()
         );
         let output = Command::new(&self.gate)
             .arg("policy")
@@ -204,7 +197,7 @@ impl Fixture {
             let scan = scan.unwrap();
             assert!(scan.suppressions.is_empty());
             let measured = measurements::collect(&scan, metrics::Limits::default());
-            assert!(ledger::validate(&measured, &[]).is_empty(), "{label}");
+            assert!(policy::validate(&measured).is_empty(), "{label}");
             eprintln!(
                 "{label}: file_lines={}",
                 scan.reports

@@ -2,6 +2,7 @@ use super::super::future_templates::{audit_json, dual_fixture, reseal};
 use super::{
     database, executable_lane_from, observation::exited_lane_from, pr_completion::complete_from,
 };
+use luthor::state::{launches, scheduling, task_records};
 use luthor::{
     state::{verify_amended_observation_plan, verify_amended_worker_plan},
     supervisor::{self, Reconciliation},
@@ -11,34 +12,35 @@ use luthor::{
 fn future_template_dual_pr_completion_observation_validates_version_without_continuation_authority()
 {
     let lane = executable_lane_from(dual_fixture());
-    let selection = lane.f.store.selection_evidence("task-a").unwrap().unwrap();
-    let saved = lane
-        .f
-        .store
-        .launch_intent("attempt-task-a")
+    let selection = task_records::selection_evidence(&lane.f.store, "task-a")
+        .unwrap()
+        .unwrap();
+    let saved = launches::launch_intent(&lane.f.store, "attempt-task-a")
         .unwrap()
         .unwrap();
     let (mut lane, plan, result) = complete_from(exited_lane_from(lane), "matching");
     assert!(matches!(result, Reconciliation::Completed { .. }));
     assert_eq!(
-        lane.f.store.task_phase("task-a").unwrap().as_deref(),
+        task_records::task_phase(&lane.f.store, "task-a")
+            .unwrap()
+            .as_deref(),
         Some("pr_complete")
     );
     assert_eq!(audit_json(&lane)["schema_version"], 3);
     verify_amended_observation_plan(&database(&lane), lane.f.store.root(), &plan).unwrap();
     assert!(verify_amended_worker_plan(&database(&lane), lane.f.store.root(), &plan).is_err());
-    assert!(lane.f.store.resume_context("task-a").is_err());
+    assert!(launches::resume_context(&lane.f.store, "task-a").is_err());
     assert!(
         luthor::state::retry_context_for_task(&lane.f.store, "task-a", "attempt-task-a").is_err()
     );
     assert_eq!(
-        lane.f.store.selection_evidence("task-a").unwrap().unwrap(),
+        task_records::selection_evidence(&lane.f.store, "task-a")
+            .unwrap()
+            .unwrap(),
         selection
     );
     assert_eq!(
-        lane.f
-            .store
-            .launch_intent("attempt-task-a")
+        launches::launch_intent(&lane.f.store, "attempt-task-a")
             .unwrap()
             .unwrap(),
         saved
@@ -85,6 +87,6 @@ fn future_template_dual_ready_gate_rejects_resealed_policy_drift_and_missing_sea
             .unwrap()
             .is_empty()
         );
-        assert_eq!(lane.f.store.reservation_count().unwrap(), 1);
+        assert_eq!(scheduling::reservation_count(&lane.f.store).unwrap(), 1);
     }
 }

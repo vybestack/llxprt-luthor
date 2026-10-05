@@ -1,4 +1,5 @@
 use super::{Lane, amend, database, dual_fixture, fixture};
+use luthor::state::{exit_observation, journal, launches, scheduling, task_records};
 use luthor::{state, supervisor};
 use serde_json::json;
 
@@ -35,10 +36,7 @@ fn assert_retry_held(lane: &mut Lane) {
 
 fn terminalize(lane: &mut Lane, stopped: bool) {
     if stopped {
-        lane.f
-            .store
-            .record_stop_intent("task-a", "attempt-task-a")
-            .unwrap();
+        journal::record_stop_intent(&mut lane.f.store, "task-a", "attempt-task-a").unwrap();
     }
     let receipt = json!({
         "attempt_id":"attempt-task-a", "child_pid":123, "boot_identity":"boot",
@@ -62,29 +60,27 @@ fn terminalize(lane: &mut Lane, stopped: bool) {
     db.execute("UPDATE reservations SET status='released'", [])
         .unwrap();
     if stopped {
-        lane.f
-            .store
-            .record_pause_pr_lookup(
-                "task-a",
-                "attempt-task-a",
-                &state::PausePrEvidence {
-                    observed_at_unix_secs: 2,
-                    repository: "org/code".into(),
-                    status: state::PausePrStatus::Absent,
-                },
-            )
-            .unwrap();
+        exit_observation::record_pause_pr_lookup(
+            &mut lane.f.store,
+            "task-a",
+            "attempt-task-a",
+            &state::PausePrEvidence {
+                observed_at_unix_secs: 2,
+                repository: "org/code".into(),
+                status: state::PausePrStatus::Absent,
+            },
+        )
+        .unwrap();
     } else {
-        lane.f
-            .store
-            .record_evidence(
-                "task-a",
-                Some("attempt-task-a"),
-                "exit_pr_lookup",
-                &serde_json::to_string(&super::super::pr()).unwrap(),
-            )
-            .unwrap();
-        lane.f.store.set_task_phase("task-a", "attention").unwrap();
+        journal::record_evidence(
+            &mut lane.f.store,
+            "task-a",
+            Some("attempt-task-a"),
+            "exit_pr_lookup",
+            &serde_json::to_string(&super::super::pr()).unwrap(),
+        )
+        .unwrap();
+        task_records::set_task_phase(&mut lane.f.store, "task-a", "attention").unwrap();
     }
 }
 
@@ -104,7 +100,7 @@ fn future_template_versions_cannot_supply_same_task_resume_or_retry_lineage() {
                 .unwrap();
             if stopped {
                 assert!(
-                    lane.f.store.resume_context("task-a").is_err(),
+                    launches::resume_context(&lane.f.store, "task-a").is_err(),
                     "dual={dual}"
                 );
                 assert!(
@@ -119,7 +115,7 @@ fn future_template_versions_cannot_supply_same_task_resume_or_retry_lineage() {
                 );
                 assert_retry_held(&mut lane);
             }
-            assert_eq!(lane.f.store.reservation_count().unwrap(), 0);
+            assert_eq!(scheduling::reservation_count(&lane.f.store).unwrap(), 0);
             assert_eq!(
                 database(&lane)
                     .query_row::<usize, _, _>(
@@ -150,14 +146,20 @@ fn future_template_issue331_new_selection_uses_corrected_templates_without_worke
     f.candidate.issue_number = 331;
     f.candidate.issue_url = "https://github.com/org/tracker/issues/331".into();
     f.pause();
-    let selection = f.store.selection_evidence("task-a").unwrap().unwrap();
+    let selection = task_records::selection_evidence(&f.store, "task-a")
+        .unwrap()
+        .unwrap();
     assert_eq!(
         selection.effective_config,
         state::EffectiveConfigSnapshot::from(&f.config)
     );
     assert_eq!(selection.candidate.issue_number, 331);
-    let saved: supervisor::LaunchPlan =
-        serde_json::from_str(&f.store.launch_intent("attempt-task-a").unwrap().unwrap()).unwrap();
+    let saved: supervisor::LaunchPlan = serde_json::from_str(
+        &launches::launch_intent(&f.store, "attempt-task-a")
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
     assert!(
         !saved
             .args

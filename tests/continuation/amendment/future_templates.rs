@@ -1,3 +1,4 @@
+use luthor::state::{journal, launches, task_records};
 mod continuation;
 mod refusals;
 use super::{Lane, amend, database, fixture};
@@ -8,7 +9,9 @@ use serde_json::{Value, json};
 pub(super) fn dual_fixture() -> Lane {
     let mut lane = fixture();
     lane.f.config.resume.executable = lane.f.config.initial.executable.clone();
-    let mut selection = lane.f.store.selection_evidence("task-a").unwrap().unwrap();
+    let mut selection = task_records::selection_evidence(&lane.f.store, "task-a")
+        .unwrap()
+        .unwrap();
     selection.effective_config.resume = lane.f.config.resume.clone();
     selection
         .effective_config
@@ -25,11 +28,13 @@ pub(super) fn dual_fixture() -> Lane {
 }
 
 pub(super) fn audit_json(lane: &Lane) -> Value {
-    let payload = lane
-        .f
-        .store
-        .evidence_payloads("task-a", "attempt-task-a", "initial_branch_removed")
-        .unwrap();
+    let payload = journal::evidence_payloads(
+        &lane.f.store,
+        "task-a",
+        "attempt-task-a",
+        "initial_branch_removed",
+    )
+    .unwrap();
     assert_eq!(payload.len(), 1);
     serde_json::from_str(&payload[0]).unwrap()
 }
@@ -58,11 +63,10 @@ fn original_rows(lane: &Lane) -> Vec<String> {
 fn future_template_dual_correction_has_distinct_version_and_preserves_original_evidence() {
     let mut lane = dual_fixture();
     let before = original_rows(&lane);
-    let original_selection = lane.f.store.selection_evidence("task-a").unwrap().unwrap();
-    let original = lane
-        .f
-        .store
-        .launch_intent("attempt-task-a")
+    let original_selection = task_records::selection_evidence(&lane.f.store, "task-a")
+        .unwrap()
+        .unwrap();
+    let original = launches::launch_intent(&lane.f.store, "attempt-task-a")
         .unwrap()
         .unwrap();
     amend(&mut lane).unwrap();
@@ -86,13 +90,13 @@ fn future_template_dual_correction_has_distinct_version_and_preserves_original_e
         serde_json::to_value(EffectiveConfigSnapshot::from(&lane.f.config)).unwrap()
     );
     assert_eq!(
-        lane.f.store.selection_evidence("task-a").unwrap().unwrap(),
+        task_records::selection_evidence(&lane.f.store, "task-a")
+            .unwrap()
+            .unwrap(),
         original_selection
     );
     assert_eq!(
-        lane.f
-            .store
-            .launch_intent("attempt-task-a")
+        launches::launch_intent(&lane.f.store, "attempt-task-a")
             .unwrap()
             .unwrap(),
         original
@@ -113,7 +117,7 @@ fn future_template_dual_correction_has_distinct_version_and_preserves_original_e
         lane.plan.config_revision
     );
     assert_eq!(context.effective_plan().args.last(), lane.plan.args.last());
-    assert!(lane.f.store.resume_context("task-a").is_err());
+    assert!(launches::resume_context(&lane.f.store, "task-a").is_err());
     assert!(
         luthor::state::retry_context_for_task(&lane.f.store, "task-a", "attempt-task-a").is_err()
     );
@@ -143,7 +147,9 @@ fn future_template_initial_only_remains_schema_two_with_resume_unchanged() {
     let audit = audit_json(&lane);
     assert_eq!(audit["schema_version"], 2);
     assert!(audit.get("future_template_correction").is_none());
-    let saved = lane.f.store.selection_evidence("task-a").unwrap().unwrap();
+    let saved = task_records::selection_evidence(&lane.f.store, "task-a")
+        .unwrap()
+        .unwrap();
     assert_eq!(
         audit["current_config"]["resume"],
         serde_json::to_value(saved.effective_config.resume).unwrap()

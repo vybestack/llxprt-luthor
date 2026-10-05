@@ -1,4 +1,5 @@
 use super::{amend, database, fixture};
+use luthor::state::scheduling;
 
 #[test]
 fn amended_dispatch_requires_audit_current_config_and_atomic_marker() {
@@ -65,5 +66,5 @@ fn amended_dispatch_requires_audit_current_config_and_atomic_marker() {
         )
         .unwrap();
     assert_eq!(dispatches, 0);
-    assert_eq!(lane.f.store.reservation_count().unwrap(), 1);
+    assert_eq!(scheduling::reservation_count(&lane.f.store).unwrap(), 1);
 }

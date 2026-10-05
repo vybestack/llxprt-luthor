@@ -1,5 +1,6 @@
 use super::processes::*;
 use crate::model::*;
+use crate::state::journal;
 
 #[cfg(unix)]
 pub(crate) fn prove(
@@ -17,8 +18,7 @@ pub(crate) fn prove(
         return Err("startup rejection contradicts tracked descendant evidence");
     }
     let evidence = |kind: &str| {
-        store
-            .evidence_payload(&plan.task_id, Some(&plan.attempt_id), kind)
+        journal::evidence_payload(store, &plan.task_id, Some(&plan.attempt_id), kind)
             .ok()
             .flatten()
             .ok_or("terminal exit registration is missing or unreadable")
@@ -32,11 +32,15 @@ pub(crate) fn prove(
         child_registration: evidence("child_registered")?,
         supervisor_registration: evidence("supervisor_ready")?,
         gate_sent: evidence("gate_sent")?,
-        gate_release: store
-            .intent_payload(&plan.task_id, &plan.attempt_id, "gate_release")
-            .ok()
-            .flatten()
-            .ok_or("terminal exit gate release is missing or unreadable")?,
+        gate_release: journal::intent_payload(
+            store,
+            &plan.task_id,
+            &plan.attempt_id,
+            "gate_release",
+        )
+        .ok()
+        .flatten()
+        .ok_or("terminal exit gate release is missing or unreadable")?,
         current_boot_identity: identity(std::process::id())
             .map_err(|_| "current boot identity is unavailable")?
             .0,

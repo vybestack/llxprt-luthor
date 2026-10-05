@@ -1,3 +1,4 @@
+use luthor::state::{journal, launches, scheduling, task_records};
 mod amended_coordinator;
 mod amendment;
 mod authorization;
@@ -79,15 +80,21 @@ struct Launcher {
 }
 impl SupervisorLauncher for Launcher {
     fn launch(&mut self, store: &mut StateStore, plan: &LaunchPlan) -> Result<(), SupervisorError> {
-        let audits = store
-            .evidence_payloads("task-a", "attempt-task-a", "never_dispatched_authorized")
-            .unwrap();
+        let audits = journal::evidence_payloads(
+            store,
+            "task-a",
+            "attempt-task-a",
+            "never_dispatched_authorized",
+        )
+        .unwrap();
         assert_eq!(audits.len(), 1, "audit must be durable before launch");
-        assert_eq!(store.reservation_count().unwrap(), 1);
+        assert_eq!(scheduling::reservation_count(store).unwrap(), 1);
         assert_eq!(
             *plan,
             serde_json::from_str::<LaunchPlan>(
-                &store.launch_intent("attempt-task-a").unwrap().unwrap()
+                &launches::launch_intent(store, "attempt-task-a")
+                    .unwrap()
+                    .unwrap()
             )
             .unwrap()
         );
@@ -165,21 +172,28 @@ impl Lane {
     fn held(&mut self, reason: Refusal) {
         assert_eq!(self.run(), ContinuationResult::Held(reason));
         assert!(self.launcher.plans.is_empty());
-        assert_eq!(self.f.store.reservation_count().unwrap(), 1);
+        assert_eq!(scheduling::reservation_count(&self.f.store).unwrap(), 1);
         assert_eq!(
-            self.f.store.latest_attempt("task-a").unwrap().as_deref(),
+            task_records::latest_attempt(&self.f.store, "task-a")
+                .unwrap()
+                .as_deref(),
             Some("attempt-task-a")
         );
         assert_eq!(
-            self.f.store.task_phase("task-a").unwrap().as_deref(),
+            task_records::task_phase(&self.f.store, "task-a")
+                .unwrap()
+                .as_deref(),
             Some("held")
         );
         assert!(
-            self.f
-                .store
-                .evidence_payloads("task-a", "attempt-task-a", "never_dispatched_authorized")
-                .unwrap()
-                .is_empty()
+            journal::evidence_payloads(
+                &self.f.store,
+                "task-a",
+                "attempt-task-a",
+                "never_dispatched_authorized"
+            )
+            .unwrap()
+            .is_empty()
         );
     }
 }
@@ -187,10 +201,7 @@ impl Lane {
 #[test]
 fn continuation_audits_then_launches_exact_saved_plan_once_with_same_reservation() {
     let mut lane = Lane::new();
-    let saved = lane
-        .f
-        .store
-        .launch_intent("attempt-task-a")
+    let saved = launches::launch_intent(&lane.f.store, "attempt-task-a")
         .unwrap()
         .unwrap();
     assert_eq!(
@@ -199,9 +210,7 @@ fn continuation_audits_then_launches_exact_saved_plan_once_with_same_reservation
     );
     assert_eq!(lane.launcher.plans, [lane.plan.clone()]);
     assert_eq!(
-        lane.f
-            .store
-            .launch_intent("attempt-task-a")
+        launches::launch_intent(&lane.f.store, "attempt-task-a")
             .unwrap()
             .unwrap(),
         saved
@@ -210,12 +219,10 @@ fn continuation_audits_then_launches_exact_saved_plan_once_with_same_reservation
     assert_eq!(lane.processes.calls, 2);
     assert_eq!(lane.run(), ContinuationResult::Held(Refusal::Ineligible));
     assert_eq!(lane.launcher.plans.len(), 1);
-    assert_eq!(lane.f.store.reservation_count().unwrap(), 1);
+    assert_eq!(scheduling::reservation_count(&lane.f.store).unwrap(), 1);
     for kind in ["exit_pr_lookup", "child_registered", "supervisor_ready"] {
         assert!(
-            lane.f
-                .store
-                .evidence_payloads("task-a", "attempt-task-a", kind)
+            journal::evidence_payloads(&lane.f.store, "task-a", "attempt-task-a", kind)
                 .unwrap()
                 .is_empty()
         );
@@ -360,19 +367,18 @@ fn continuation_entire_attempt_artifact_namespace_including_broken_symlinks_refu
 #[test]
 fn continuation_dispatch_marker_and_launch_failure_cannot_reauthorize() {
     let mut lane = Lane::new();
-    lane.f
-        .store
-        .begin_supervision(
-            "task-a",
-            "attempt-task-a",
-            &serde_json::to_string(&lane.plan).unwrap(),
-        )
-        .unwrap();
+    launches::begin_supervision(
+        &mut lane.f.store,
+        "task-a",
+        "attempt-task-a",
+        &serde_json::to_string(&lane.plan).unwrap(),
+    )
+    .unwrap();
     lane.held(Refusal::Ineligible);
     let mut lane = Lane::new();
     lane.launcher.fail = true;
     assert_eq!(lane.run(), ContinuationResult::Held(Refusal::LaunchFailed));
-    assert_eq!(lane.f.store.reservation_count().unwrap(), 1);
+    assert_eq!(scheduling::reservation_count(&lane.f.store).unwrap(), 1);
     assert_eq!(lane.run(), ContinuationResult::Held(Refusal::Ineligible));
     assert_eq!(lane.launcher.plans.len(), 1);
 }

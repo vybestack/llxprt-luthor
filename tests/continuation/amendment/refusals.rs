@@ -1,5 +1,6 @@
 use super::{amend, database, fixture, pr};
 use luthor::state::{BranchRemovalRequest, PausePrStatus, ProcessQuiescence};
+use luthor::state::{journal, launches, scheduling};
 
 #[test]
 fn amendment_binds_config_provenance_and_external_inspections() {
@@ -60,11 +61,14 @@ fn amendment_binds_config_provenance_and_external_inspections() {
             "{mutation}"
         );
         assert!(
-            lane.f
-                .store
-                .evidence_payloads("task-a", "attempt-task-a", "initial_branch_removed")
-                .unwrap()
-                .is_empty()
+            journal::evidence_payloads(
+                &lane.f.store,
+                "task-a",
+                "attempt-task-a",
+                "initial_branch_removed"
+            )
+            .unwrap()
+            .is_empty()
         );
     }
 }
@@ -182,10 +186,13 @@ fn amendment_missing_altered_or_duplicate_seal_fails_closed() {
             "{sql}"
         );
         assert!(
-            lane.f
-                .store
-                .begin_supervision("task-a", "attempt-task-a", context.saved_launch_plan())
-                .is_err(),
+            launches::begin_supervision(
+                &mut lane.f.store,
+                "task-a",
+                "attempt-task-a",
+                context.saved_launch_plan()
+            )
+            .is_err(),
             "{sql}"
         );
     }
@@ -242,11 +249,9 @@ fn amendment_stale_snapshot_and_audit_or_seal_write_failure_are_atomic() {
             )
             .unwrap();
         assert_eq!(count, 0);
-        assert_eq!(lane.f.store.reservation_count().unwrap(), 1);
+        assert_eq!(scheduling::reservation_count(&lane.f.store).unwrap(), 1);
         assert_eq!(
-            lane.f
-                .store
-                .launch_intent("attempt-task-a")
+            launches::launch_intent(&lane.f.store, "attempt-task-a")
                 .unwrap()
                 .unwrap(),
             context.saved_launch_plan()
@@ -257,38 +262,26 @@ fn amendment_stale_snapshot_and_audit_or_seal_write_failure_are_atomic() {
 #[test]
 fn amendment_cannot_weaken_normal_dispatch_plan_equality() {
     let mut lane = super::super::Lane::new();
-    let saved = lane
-        .f
-        .store
-        .launch_intent("attempt-task-a")
+    let saved = launches::launch_intent(&lane.f.store, "attempt-task-a")
         .unwrap()
         .unwrap();
     let mut altered = lane.plan.clone();
     altered.args.push("extra".into());
     assert!(
-        lane.f
-            .store
-            .begin_supervision(
-                "task-a",
-                "attempt-task-a",
-                &serde_json::to_string(&altered).unwrap()
-            )
-            .is_err()
+        launches::begin_supervision(
+            &mut lane.f.store,
+            "task-a",
+            "attempt-task-a",
+            &serde_json::to_string(&altered).unwrap()
+        )
+        .is_err()
     );
-    lane.f
-        .store
-        .begin_supervision("task-a", "attempt-task-a", &saved)
-        .unwrap();
+    launches::begin_supervision(&mut lane.f.store, "task-a", "attempt-task-a", &saved).unwrap();
     assert!(
-        lane.f
-            .store
-            .begin_supervision("task-a", "attempt-task-a", &saved)
-            .is_err()
+        launches::begin_supervision(&mut lane.f.store, "task-a", "attempt-task-a", &saved).is_err()
     );
     assert_eq!(
-        lane.f
-            .store
-            .launch_intent("attempt-task-a")
+        launches::launch_intent(&lane.f.store, "attempt-task-a")
             .unwrap()
             .unwrap(),
         saved

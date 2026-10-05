@@ -1,4 +1,5 @@
 use super::{Case, amendment};
+use luthor::state::{launches, scheduling, task_records};
 use luthor::{
     coordinator::{AmendedSupervisorLauncher, ContinuationResult},
     state::{NeverDispatchedContext, StateStore},
@@ -39,7 +40,9 @@ fn executable_case() -> Case {
     fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
     lane.plan.executable = executable.clone();
     lane.f.config.initial.executable = executable.clone();
-    let mut selection = lane.f.store.selection_evidence("task-a").unwrap().unwrap();
+    let mut selection = task_records::selection_evidence(&lane.f.store, "task-a")
+        .unwrap()
+        .unwrap();
     selection.effective_config.initial.executable = executable;
     let db = amendment::database(lane);
     db.execute(
@@ -72,11 +75,7 @@ fn await_receipt(case: &Case) {
 #[test]
 fn amended_coordinator_real_gated_worker_gets_only_audited_effective_argv() {
     let mut case = executable_case();
-    let original = case
-        .lane
-        .f
-        .store
-        .launch_intent("attempt-task-a")
+    let original = launches::launch_intent(&case.lane.f.store, "attempt-task-a")
         .unwrap()
         .unwrap();
     let mut effective = case.lane.plan.clone();
@@ -107,12 +106,12 @@ fn amended_coordinator_real_gated_worker_gets_only_audited_effective_argv() {
             signal: None
         }
     );
-    assert_eq!(case.lane.f.store.reservation_count().unwrap(), 0);
     assert_eq!(
-        case.lane
-            .f
-            .store
-            .launch_intent("attempt-task-a")
+        scheduling::reservation_count(&case.lane.f.store).unwrap(),
+        0
+    );
+    assert_eq!(
+        launches::launch_intent(&case.lane.f.store, "attempt-task-a")
             .unwrap()
             .unwrap(),
         original

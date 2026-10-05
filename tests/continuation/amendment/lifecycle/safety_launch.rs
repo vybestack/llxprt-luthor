@@ -1,3 +1,4 @@
+use luthor::state::{journal, scheduling};
 mod ready;
 mod setup;
 use super::{Lane, database, gates};
@@ -40,7 +41,7 @@ fn safety_first_attempt_startup_refuses_late_tracked_untracked_and_descendant_dr
                     .join("attempts/attempt-task-a.child.json")
                     .exists()
             );
-            assert_eq!(lane.f.store.reservation_count().unwrap(), 1);
+            assert_eq!(scheduling::reservation_count(&lane.f.store).unwrap(), 1);
         }
     }
 }
@@ -77,7 +78,7 @@ fn safety_parent_ready_release_refuses_late_worktree_drift_without_sending_gate(
                 .unwrap()
                 .is_empty()
             );
-            assert_eq!(lane.f.store.reservation_count().unwrap(), 1);
+            assert_eq!(scheduling::reservation_count(&lane.f.store).unwrap(), 1);
         }
     }
 }
@@ -97,23 +98,24 @@ impl Read for RegisterGate<'_> {
             ("supervisor_ready", &process),
             ("gate_sent", &process),
         ] {
-            self.lane
-                .f
-                .store
-                .record_evidence("task-a", Some("attempt-task-a"), kind, payload)
-                .unwrap();
-        }
-        self.lane
-            .f
-            .store
-            .record_intent(
-                "gate-attempt-task-a",
+            journal::record_evidence(
+                &mut self.lane.f.store,
                 "task-a",
                 Some("attempt-task-a"),
-                "gate_release",
-                &process,
+                kind,
+                payload,
             )
             .unwrap();
+        }
+        journal::record_intent(
+            &mut self.lane.f.store,
+            "gate-attempt-task-a",
+            "task-a",
+            Some("attempt-task-a"),
+            "gate_release",
+            &process,
+        )
+        .unwrap();
         bytes[0] = b'R';
         Ok(1)
     }
@@ -149,7 +151,7 @@ fn safety_real_worker_preexec_rechecks_late_drift_after_registered_gate_release(
                     "worker executable never ran: {amended}: {change}"
                 );
             }
-            assert_eq!(lane.f.store.reservation_count().unwrap(), 1);
+            assert_eq!(scheduling::reservation_count(&lane.f.store).unwrap(), 1);
             assert_eq!(
                 database(&lane)
                     .query_row("SELECT lifecycle FROM attempts", [], |r| r

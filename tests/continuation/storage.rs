@@ -2,6 +2,7 @@ use super::{ContinuationResult, Lane, Refusal};
 use luthor::coordinator::{
     ContinuationDependencies, OsContinuationLocalInspector, continue_never_dispatched,
 };
+use luthor::state::{journal, scheduling, task_records};
 use rusqlite::Connection;
 use std::fs;
 
@@ -51,7 +52,9 @@ fn continuation_unexecutable_saved_worker_holds_before_authorization() {
     let mut lane = Lane::new();
     lane.plan.executable = lane.f.dir.path().join("missing-worker");
     lane.f.config.initial.executable = lane.plan.executable.clone();
-    let mut selection = lane.f.store.selection_evidence("task-a").unwrap().unwrap();
+    let mut selection = task_records::selection_evidence(&lane.f.store, "task-a")
+        .unwrap()
+        .unwrap();
     selection.effective_config.initial.executable = lane.plan.executable.clone();
     let db = Connection::open(lane.f.store.root().join("state.sqlite3")).unwrap();
     db.execute(
@@ -87,13 +90,16 @@ fn continuation_unexecutable_saved_worker_holds_before_authorization() {
     );
     assert!(lane.launcher.plans.is_empty());
     assert!(
-        lane.f
-            .store
-            .evidence_payloads("task-a", "attempt-task-a", "never_dispatched_authorized")
-            .unwrap()
-            .is_empty()
+        journal::evidence_payloads(
+            &lane.f.store,
+            "task-a",
+            "attempt-task-a",
+            "never_dispatched_authorized"
+        )
+        .unwrap()
+        .is_empty()
     );
-    assert_eq!(lane.f.store.reservation_count().unwrap(), 1);
+    assert_eq!(scheduling::reservation_count(&lane.f.store).unwrap(), 1);
 }
 
 #[test]

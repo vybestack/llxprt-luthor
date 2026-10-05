@@ -1,4 +1,5 @@
 use super::{ContinuationResult, Lane, Refusal};
+use luthor::state::{launches, task_records};
 use luthor::{state::EffectiveConfigSnapshot, supervisor::LaunchPlan};
 use rusqlite::{Connection, params};
 
@@ -32,9 +33,7 @@ fn continuation_invalid_saved_argv_holds_without_amending_intent() {
         .unwrap();
     lane.held(Refusal::PlanInvalid);
     assert_eq!(
-        lane.f
-            .store
-            .launch_intent("attempt-task-a")
+        launches::launch_intent(&lane.f.store, "attempt-task-a")
             .unwrap()
             .unwrap(),
         saved
@@ -52,7 +51,9 @@ fn continuation_preserves_full_legacy_template_and_exact_saved_argv() {
     lane.plan
         .args
         .extend(["--max-tool-calls".into(), "1024".into()]);
-    let mut selection = lane.f.store.selection_evidence("task-a").unwrap().unwrap();
+    let mut selection = task_records::selection_evidence(&lane.f.store, "task-a")
+        .unwrap()
+        .unwrap();
     selection.effective_config = EffectiveConfigSnapshot::from(&lane.f.config);
     let saved = serde_json::to_string_pretty(&lane.plan).unwrap();
     let db = Connection::open(lane.f.store.root().join("state.sqlite3")).unwrap();
@@ -69,19 +70,14 @@ fn continuation_preserves_full_legacy_template_and_exact_saved_argv() {
     );
     assert_eq!(lane.launcher.plans, [lane.plan.clone()]);
     let persisted: LaunchPlan = serde_json::from_str(
-        &lane
-            .f
-            .store
-            .launch_intent("attempt-task-a")
+        &launches::launch_intent(&lane.f.store, "attempt-task-a")
             .unwrap()
             .unwrap(),
     )
     .unwrap();
     assert_eq!(persisted, lane.plan);
     assert_eq!(
-        lane.f
-            .store
-            .launch_intent("attempt-task-a")
+        launches::launch_intent(&lane.f.store, "attempt-task-a")
             .unwrap()
             .unwrap(),
         saved

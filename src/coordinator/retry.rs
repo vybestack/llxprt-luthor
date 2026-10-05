@@ -1,4 +1,5 @@
 use super::ports::{DispatchError, SupervisorLauncher};
+use crate::state::{scheduling, task_records};
 use crate::{
     claim,
     config::Config,
@@ -56,16 +57,15 @@ pub fn retry_one<P: ProjectReader, Q: PullRequestReader, L: SupervisorLauncher>(
         reason,
     )?;
     supervisor::validate_stop_socket_path(store.root(), attempt_id)?;
-    store.ensure_dispatch_capacity()?;
+    scheduling::ensure_dispatch_capacity(store)?;
     let terminal_exit = verified_retry_exit(
         store,
         task_id,
         previous_attempt_id,
         revalidate_terminal_exit,
     )?;
-    let claim = store
-        .source_claim_intent(task_id)?
-        .ok_or(DispatchError::ChangedClaim)?;
+    let claim =
+        task_records::source_claim_intent(store, task_id)?.ok_or(DispatchError::ChangedClaim)?;
     let expected = serde_json::json!({"principal": config.assignment_login,
         "repository": selection.candidate.repository, "number": selection.candidate.issue_number});
     if serde_json::from_str::<serde_json::Value>(&claim).ok() != Some(expected) {

@@ -6,6 +6,7 @@ use super::{
     worker::verify_launch_worktree,
 };
 use crate::model::{ChildIdentity, LaunchPlan};
+use crate::state::{journal, launches};
 use crate::{
     config::Config,
     state::{NeverDispatchedContext, StateStore},
@@ -33,9 +34,8 @@ pub fn execute_with_binary(
     if !valid_attempt(&plan.attempt_id) {
         return Err(SupervisorError::Conflict);
     }
-    let serialized = store
-        .launch_intent(&plan.attempt_id)?
-        .ok_or(SupervisorError::Conflict)?;
+    let serialized =
+        launches::launch_intent(store, &plan.attempt_id)?.ok_or(SupervisorError::Conflict)?;
     if serde_json::from_str::<LaunchPlan>(&serialized)? != *plan {
         return Err(SupervisorError::Conflict);
     }
@@ -46,7 +46,7 @@ pub fn execute_with_binary(
         &attempts.join(format!("{}.plan.json", plan.attempt_id)),
         plan,
     )?;
-    store.begin_supervision(&plan.task_id, &plan.attempt_id, &serialized)?;
+    launches::begin_supervision(store, &plan.task_id, &plan.attempt_id, &serialized)?;
     launch_dispatched(store, plan, binary)
 }
 
@@ -160,19 +160,22 @@ fn release_ready_worker(
     {
         return Err(SupervisorError::IdentityUnavailable);
     }
-    store.record_evidence(
+    journal::record_evidence(
+        store,
         &plan.task_id,
         Some(&plan.attempt_id),
         "child_registered",
         &serde_json::to_string(&registered)?,
     )?;
-    store.record_evidence(
+    journal::record_evidence(
+        store,
         &plan.task_id,
         Some(&plan.attempt_id),
         "supervisor_ready",
         &process.to_string(),
     )?;
-    store.record_intent(
+    journal::record_intent(
+        store,
         &format!("gate-{}", plan.attempt_id),
         &plan.task_id,
         Some(&plan.attempt_id),
@@ -181,7 +184,8 @@ fn release_ready_worker(
     )?;
     gate.write_all(b"R")?;
     gate.flush()?;
-    store.record_evidence(
+    journal::record_evidence(
+        store,
         &plan.task_id,
         Some(&plan.attempt_id),
         "gate_sent",

@@ -1,4 +1,5 @@
 use super::{ContinuationResult, Lane, Refusal};
+use luthor::state::{journal, launches, scheduling};
 use luthor::{
     coordinator::{ContinuationDependencies, SupervisorLauncher, continue_never_dispatched},
     state::StateStore,
@@ -13,10 +14,14 @@ struct ProductionProbe {
 impl SupervisorLauncher for ProductionProbe {
     fn launch(&mut self, store: &mut StateStore, plan: &LaunchPlan) -> Result<(), SupervisorError> {
         assert_eq!(
-            store
-                .evidence_payloads("task-a", "attempt-task-a", "never_dispatched_authorized")
-                .unwrap()
-                .len(),
+            journal::evidence_payloads(
+                store,
+                "task-a",
+                "attempt-task-a",
+                "never_dispatched_authorized"
+            )
+            .unwrap()
+            .len(),
             1
         );
         let result = supervisor::execute_with_binary(store, plan, &self.missing_binary);
@@ -64,9 +69,7 @@ fn continuation_production_dispatch_uses_original_sqlite_plan_bytes_and_holds_sp
         .unwrap();
     assert_eq!(dispatched, saved);
     assert_eq!(
-        lane.f
-            .store
-            .launch_intent("attempt-task-a")
+        launches::launch_intent(&lane.f.store, "attempt-task-a")
             .unwrap()
             .unwrap(),
         saved
@@ -82,7 +85,7 @@ fn continuation_production_dispatch_uses_original_sqlite_plan_bytes_and_holds_sp
     )
     .unwrap();
     assert_eq!(private, lane.plan);
-    assert_eq!(lane.f.store.reservation_count().unwrap(), 1);
+    assert_eq!(scheduling::reservation_count(&lane.f.store).unwrap(), 1);
     assert!(
         lane.f
             .store
