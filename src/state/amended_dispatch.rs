@@ -5,6 +5,7 @@ use super::{
 use crate::{
     config::Config,
     model::{EffectiveConfigSnapshot, LaunchPlan, StateError},
+    ownership::WorktreeOwnerProtocolInternal,
 };
 use rusqlite::{Connection, TransactionBehavior, params};
 use std::path::Path;
@@ -76,14 +77,35 @@ pub(crate) fn begin_amended_supervision(
     context: &NeverDispatchedContext,
     config: &Config,
     revision: &str,
+    owner_protocol: &crate::ownership::WorktreeOwnerProtocol,
 ) -> Result<AmendedDispatchProof, StateError> {
+    if !owner_protocol.matches_attempt(context.task_id(), context.attempt_id()) {
+        return Err(StateError::LaunchBlocked);
+    }
     let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let proof = prepare_proof(&tx, root, context, config, revision)?;
+    let owner_count: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM evidence WHERE task_id=?1 AND attempt_id=?2 AND kind='worktree_owner_protocol'",
+        params![context.task_id(), context.attempt_id()],
+        |row| row.get(0),
+    )?;
+    let previous: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM intents WHERE task_id=?1 AND attempt_id=?2 AND kind='supervisor_dispatch'",
+        params![context.task_id(), context.attempt_id()],
+        |row| row.get(0),
+    )?;
+    if owner_count != 0 || previous != 0 {
+        return Err(StateError::LaunchBlocked);
+    }
     tx.execute(
             "INSERT INTO intents(id,task_id,attempt_id,kind,detail) VALUES(?1,?2,?3,'supervisor_dispatch',?4)",
             params![format!("supervisor-{}", context.attempt_id()), context.task_id(),
                 context.attempt_id(), serde_json::to_string(&proof)?],
         )?;
+    tx.execute(
+        "INSERT INTO evidence(task_id,attempt_id,kind,payload) VALUES(?1,?2,'worktree_owner_protocol',?3)",
+        params![context.task_id(), context.attempt_id(), serde_json::to_string(owner_protocol)?],
+    )?;
     tx.commit()?;
     Ok(proof)
 }

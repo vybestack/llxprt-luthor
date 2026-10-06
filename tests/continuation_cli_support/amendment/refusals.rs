@@ -151,11 +151,9 @@ fn amendment_cli_wrong_actor_or_uncertain_remote_refuses_before_authorization() 
             "identity" => {
                 let gh = root.join("gh");
                 let original = fs::read_to_string(&gh).unwrap();
-                fs::write(
-                    gh,
-                    original.replace("printf 'acoliver\\n'", "printf 'other\\n'"),
-                )
-                .unwrap();
+                let target = " user) printf 'acoliver\\n' ;;";
+                assert!(original.contains(target), "fake gh identity branch changed");
+                fs::write(gh, original.replace(target, " user) exit 1 ;;")).unwrap();
                 "identity_unavailable"
             }
             "pr" => {
@@ -176,6 +174,9 @@ fn amendment_cli_wrong_actor_or_uncertain_remote_refuses_before_authorization() 
         assert!(!String::from_utf8_lossy(&out.stderr).contains("private-error"));
         assert_eq!(case.f.count("evidence", "initial_branch_removed"), 0);
         assert_eq!(case.f.count("intents", "supervisor_dispatch"), 0);
+        if failure == "identity" {
+            assert!(case.f.dir.path().join("gh").exists());
+        }
         case.assert_reserved_original();
     }
 }
@@ -257,4 +258,45 @@ fn amendment_cli_database_error_has_structured_bounded_attempt_result() {
         before
     );
     case.assert_reserved_original();
+}
+
+#[test]
+fn amendment_cli_refuses_missing_or_busy_worktree_owner_before_remote_reads() {
+    for hold_owner_fd in [false, true] {
+        let case = AmendmentFixture::new();
+        let owner_path = case
+            .f
+            .config
+            .state_root
+            .join(format!("worktree-{}.lock", case.f.task));
+        let owner = if hold_owner_fd {
+            Some(
+                luthor::WorktreeOwner::acquire_existing(&case.f.config.state_root, &case.f.task)
+                    .unwrap(),
+            )
+        } else {
+            fs::remove_file(&owner_path).unwrap();
+            None
+        };
+        let before = case
+            .f
+            .rows(&["tasks", "attempts", "reservations", "intents"]);
+        case.held("launch_failed");
+        assert_eq!(
+            case.f
+                .rows(&["tasks", "attempts", "reservations", "intents"]),
+            before
+        );
+        assert!(fs::read(&case.f.calls).unwrap().is_empty());
+        assert_eq!(case.f.count("evidence", "initial_branch_removed"), 0);
+        assert_eq!(case.f.count("intents", "supervisor_dispatch"), 0);
+        assert!(!case.f.marker.exists());
+        if hold_owner_fd {
+            assert!(owner_path.exists());
+        } else {
+            assert!(!owner_path.exists());
+        }
+        case.assert_reserved_original();
+        drop(owner);
+    }
 }

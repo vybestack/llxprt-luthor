@@ -62,6 +62,7 @@ impl SupervisorLauncher for OtherLauncher {
         &mut self,
         _: &mut StateStore,
         _: &luthor::supervisor::LaunchPlan,
+        _: &luthor::WorktreeOwner,
     ) -> Result<(), SupervisorError> {
         self.0 += 1;
         Ok(())

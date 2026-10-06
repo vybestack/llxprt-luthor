@@ -1,4 +1,4 @@
-use super::{amend, database, fixture};
+use super::{amend, database, fixture, owner_protocol};
 use luthor::state::scheduling;
 
 #[test]
@@ -12,7 +12,12 @@ fn amended_dispatch_requires_audit_current_config_and_atomic_marker() {
     assert!(
         lane.f
             .store
-            .begin_amended_supervision(&context, &lane.f.config, "corrected-revision")
+            .begin_amended_supervision(
+                &context,
+                &lane.f.config,
+                "corrected-revision",
+                &owner_protocol(&lane, &context)
+            )
             .is_err()
     );
     amend(&mut lane).unwrap();
@@ -24,7 +29,12 @@ fn amended_dispatch_requires_audit_current_config_and_atomic_marker() {
     assert!(
         lane.f
             .store
-            .begin_amended_supervision(&context, &lane.f.config, "wrong-revision")
+            .begin_amended_supervision(
+                &context,
+                &lane.f.config,
+                "wrong-revision",
+                &owner_protocol(&lane, &context)
+            )
             .is_err()
     );
     let db = database(&lane);
@@ -32,7 +42,12 @@ fn amended_dispatch_requires_audit_current_config_and_atomic_marker() {
     assert!(
         lane.f
             .store
-            .begin_amended_supervision(&context, &lane.f.config, "corrected-revision")
+            .begin_amended_supervision(
+                &context,
+                &lane.f.config,
+                "corrected-revision",
+                &owner_protocol(&lane, &context)
+            )
             .is_err()
     );
     assert_eq!(
@@ -42,22 +57,25 @@ fn amended_dispatch_requires_audit_current_config_and_atomic_marker() {
             .unwrap(),
         context
     );
-    let dispatches: i64 = db
-        .query_row(
-            "SELECT COUNT(*) FROM intents WHERE kind='supervisor_dispatch'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(dispatches, 0);
+    assert_no_dispatch_or_owner_proof(&db);
     db.execute_batch("DROP TRIGGER dispatch_failure;").unwrap();
     db.execute("INSERT INTO evidence(task_id,kind,payload) VALUES('task-a','held_reason','changed after inspection')", []).unwrap();
     assert!(
         lane.f
             .store
-            .begin_amended_supervision(&context, &lane.f.config, "corrected-revision")
+            .begin_amended_supervision(
+                &context,
+                &lane.f.config,
+                "corrected-revision",
+                &owner_protocol(&lane, &context)
+            )
             .is_err()
     );
+    assert_no_dispatch_or_owner_proof(&db);
+    assert_eq!(scheduling::reservation_count(&lane.f.store).unwrap(), 1);
+}
+
+fn assert_no_dispatch_or_owner_proof(db: &rusqlite::Connection) {
     let dispatches: i64 = db
         .query_row(
             "SELECT COUNT(*) FROM intents WHERE kind='supervisor_dispatch'",
@@ -66,5 +84,12 @@ fn amended_dispatch_requires_audit_current_config_and_atomic_marker() {
         )
         .unwrap();
     assert_eq!(dispatches, 0);
-    assert_eq!(scheduling::reservation_count(&lane.f.store).unwrap(), 1);
+    let owner_proofs: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM evidence WHERE kind='worktree_owner_protocol'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(owner_proofs, 0);
 }

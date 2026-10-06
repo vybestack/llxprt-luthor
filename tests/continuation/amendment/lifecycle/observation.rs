@@ -1,6 +1,7 @@
 use super::{Lane, await_receipt, database, executable_lane, launch};
 use luthor::state::{exit_observation, journal, scheduling, task_records};
 use luthor::{
+    OwnershipError, WorktreeOwner,
     state::{verify_amended_observation_plan, verify_amended_worker_plan},
     supervisor::{self, LaunchPlan, Reconciliation, RecoveryInspection},
 };
@@ -11,6 +12,26 @@ use std::{
     time::{Duration, Instant},
 };
 
+pub(super) fn await_worktree_owner_release(lane: &Lane) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        match WorktreeOwner::acquire_existing(lane.f.store.root(), "task-a") {
+            Ok(owner) => {
+                drop(owner);
+                return;
+            }
+            Err(OwnershipError::Busy) => {
+                assert!(
+                    Instant::now() < deadline,
+                    "worktree owner remained busy past deadline"
+                );
+                thread::sleep(Duration::from_millis(20));
+            }
+            Err(OwnershipError::Unavailable) => panic!("worktree owner is unavailable"),
+        }
+    }
+}
+
 pub(super) fn exited_lane() -> (Lane, LaunchPlan) {
     exited_lane_from(executable_lane())
 }
@@ -18,6 +39,7 @@ pub(super) fn exited_lane() -> (Lane, LaunchPlan) {
 pub(super) fn exited_lane_from(mut lane: Lane) -> (Lane, LaunchPlan) {
     launch(&mut lane, Path::new(env!("CARGO_BIN_EXE_luthor"))).unwrap();
     await_receipt(&lane);
+    await_worktree_owner_release(&lane);
     let plan = serde_json::from_slice(
         &fs::read(
             lane.f

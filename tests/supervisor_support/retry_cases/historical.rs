@@ -1,4 +1,5 @@
 use super::*;
+use luthor::WorktreeOwner;
 use luthor::state::{journal, launches, scheduling, task_records};
 
 #[cfg(unix)]
@@ -13,15 +14,7 @@ pub(crate) fn historical_startup_exit_revalidation_launches_once_preserving_all_
             .unwrap()
             .unwrap();
         let rows = old_retry_rows(&config);
-        let files: Vec<_> = fs::read_dir(config.state_root.join("attempts"))
-            .unwrap()
-            .map(|e| e.unwrap().path())
-            .filter(|p| p.is_file())
-            .map(|p| {
-                let bytes = fs::read(&p).unwrap();
-                (p, bytes)
-            })
-            .collect();
+        let files = snapshot_attempt_files(&config);
         let mut projects = OtherProject(original.candidate, 1);
         let mut prs = ExitPr::default();
         let mut launcher = OtherLauncher::default();
@@ -32,9 +25,7 @@ pub(crate) fn historical_startup_exit_revalidation_launches_once_preserving_all_
         assert_eq!(prs.reads, 1);
         assert_eq!(plan.session_id, "task");
         assert_eq!(old_retry_rows(&config), rows);
-        for (path, bytes) in files {
-            assert_eq!(fs::read(path).unwrap(), bytes);
-        }
+        assert_attempt_files_unchanged(files);
         let audit: serde_json::Value = serde_json::from_str(
             &journal::evidence_payloads(&store, "task", "attempt-retry", "retry_authorized")
                 .unwrap()[0],
@@ -60,7 +51,15 @@ pub(crate) fn historical_startup_exit_revalidation_launches_once_preserving_all_
         assert!(
             historical_retry(&mut store, &config, &mut projects, &mut prs, &mut launcher).is_err()
         );
-        execute_with_binary(&mut store, &plan, Path::new(env!("CARGO_BIN_EXE_luthor"))).unwrap();
+        let owner = WorktreeOwner::acquire(store.root(), &plan.task_id).unwrap();
+        execute_with_binary(
+            &mut store,
+            &plan,
+            Path::new(env!("CARGO_BIN_EXE_luthor")),
+            &owner,
+        )
+        .unwrap();
+        drop(owner);
         let path = config
             .state_root
             .join("attempts/attempt-retry.receipt.json");
@@ -77,6 +76,23 @@ pub(crate) fn historical_startup_exit_revalidation_launches_once_preserving_all_
             }
         ));
         assert_eq!(old_retry_rows(&config), rows);
+    }
+}
+
+#[cfg(unix)]
+fn snapshot_attempt_files(config: &Config) -> Vec<(std::path::PathBuf, Vec<u8>)> {
+    fs::read_dir(config.state_root.join("attempts"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.is_file())
+        .map(|path| (path.clone(), fs::read(path).unwrap()))
+        .collect()
+}
+
+#[cfg(unix)]
+fn assert_attempt_files_unchanged(files: Vec<(std::path::PathBuf, Vec<u8>)>) {
+    for (path, bytes) in files {
+        assert_eq!(fs::read(path).unwrap(), bytes);
     }
 }
 

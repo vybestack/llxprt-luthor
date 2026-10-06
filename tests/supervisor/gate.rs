@@ -29,12 +29,15 @@ pub(crate) fn gate_eof_never_spawns_and_does_not_write_receipt() {
             llxprt_config_home: None,
         },
     };
+    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let owner = luthor::WorktreeOwner::acquire(dir.path(), &plan.task_id).unwrap();
     assert!(matches!(
         run_gated_child_with_binary(
             &plan,
             Cursor::new(Vec::<u8>::new()),
             dir.path(),
-            Path::new(env!("CARGO_BIN_EXE_luthor"))
+            Path::new(env!("CARGO_BIN_EXE_luthor")),
+            &owner
         ),
         Err(SupervisorError::GateClosed)
     ));
@@ -48,11 +51,15 @@ pub(crate) fn released_gate_captures_durable_logs_and_receipts_real_exit() {
         let dir = tempfile::tempdir().unwrap();
         let attempt = format!("exit-{code}");
         let plan = fake_plan(dir.path(), &attempt, code);
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let owner = luthor::WorktreeOwner::acquire(dir.path(), &plan.task_id).unwrap();
         let status = run_gated_child_with_binary(
             &plan,
             Cursor::new(b"R"),
             dir.path(),
             Path::new(env!("CARGO_BIN_EXE_luthor")),
+            &owner,
         )
         .unwrap();
         assert_eq!(

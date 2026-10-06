@@ -37,7 +37,14 @@ pub fn operator_recover_missing_receipt<P: ProjectReader, Q: PullRequestReader>(
     if reason.trim().is_empty() {
         return Ok(held("operator recovery reason is blank"));
     }
-    if !recovery_quiescent(store, task_id, attempt_id)? {
+    let owner = match crate::ownership::WorktreeOwner::acquire_existing(store.root(), task_id) {
+        Ok(owner) => owner,
+        Err(crate::ownership::OwnershipError::Busy) => return Ok(held("worktree owner is live")),
+        Err(crate::ownership::OwnershipError::Unavailable) => {
+            return Ok(held("worktree ownership cannot be proved"));
+        }
+    };
+    if !recovery_quiescent(store, task_id, attempt_id, &owner)? {
         return Ok(held("worker is not proven quiescent"));
     }
     let Some(selection) = task_records::selection_evidence(store, task_id)? else {
@@ -64,7 +71,7 @@ pub fn operator_recover_missing_receipt<P: ProjectReader, Q: PullRequestReader>(
     if let Err(error) = verify_completion_claim(projects, &selection) {
         return Ok(held(completion_claim_failure_reason(&error)));
     }
-    if !recovery_quiescent(store, task_id, attempt_id)? {
+    if !recovery_quiescent(store, task_id, attempt_id, &owner)? {
         return Ok(held("worker quiescence changed during recovery"));
     }
     recovery_commit::audited_commit(store, task_id, attempt_id, actor, reason, repository, pr)
@@ -74,9 +81,10 @@ fn recovery_quiescent(
     store: &StateStore,
     task_id: &str,
     attempt_id: &str,
+    owner: &crate::ownership::WorktreeOwner,
 ) -> Result<bool, SupervisorError> {
     Ok(matches!(
-        supervisor::inspect_recovery_quiescence(store, task_id, attempt_id)?,
+        supervisor::inspect_recovery_quiescence_with_owner(store, task_id, attempt_id, owner)?,
         supervisor::RecoveryInspection::Quiescent
     ))
 }

@@ -7,6 +7,8 @@ use super::{
 use super::{
     runner::run_gated_child_control, storage::stop_socket, worker::verify_launch_worktree,
 };
+#[cfg(unix)]
+use crate::ownership::{WorktreeOwner, WorktreeOwnerInternal};
 use crate::{model::LaunchPlan, state::WorktreeIdentity, worktree};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 #[cfg(unix)]
@@ -30,6 +32,19 @@ pub fn supervise(root: &Path, attempt: &str) -> Result<(), SupervisorError> {
         }
         verify_supervision_plan(root, attempt, &plan)?;
         #[cfg(unix)]
+        let _ownership =
+            WorktreeOwner::inherited(root, &plan.task_id).map_err(|_| SupervisorError::Conflict)?;
+        #[cfg(unix)]
+        {
+            let db = Connection::open_with_flags(
+                root.join("state.sqlite3"),
+                OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )?;
+            _ownership
+                .verify_protocol(&db, root, &plan.task_id, attempt)
+                .map_err(|_| SupervisorError::Conflict)?;
+        }
+        #[cfg(unix)]
         let listener = {
             let socket = stop_socket(&attempts, attempt);
             let listener = UnixListener::bind(socket)?;
@@ -44,6 +59,7 @@ pub fn supervise(root: &Path, attempt: &str) -> Result<(), SupervisorError> {
             Some(&listener),
             &env::current_exe()?,
             |out, err| (out, err),
+            &_ownership,
         )?;
         #[cfg(not(unix))]
         run_gated_child(&plan, std::io::stdin(), &attempts)?;

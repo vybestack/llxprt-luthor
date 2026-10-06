@@ -1,4 +1,5 @@
 use super::*;
+use luthor::WorktreeOwner;
 use luthor::state::{exit_observation, journal, launches, scheduling, task_records};
 
 pub(super) fn configured_mapping(root: &Path, same_repository: bool) -> (Config, Candidate) {
@@ -150,7 +151,15 @@ fn paused_fixture_for_mapping(
 ) {
     let dir = tempfile::tempdir().unwrap();
     let (config, mut store, plan, _) = prepared_for_mapping(&dir, resume_prompt, same_repository);
-    execute_with_binary(&mut store, &plan, Path::new(env!("CARGO_BIN_EXE_luthor"))).unwrap();
+    let owner = WorktreeOwner::acquire(store.root(), &plan.task_id).unwrap();
+    execute_with_binary(
+        &mut store,
+        &plan,
+        Path::new(env!("CARGO_BIN_EXE_luthor")),
+        &owner,
+    )
+    .unwrap();
+    drop(owner);
     let receipt = config.state_root.join("attempts/attempt-real.receipt.json");
     for _ in 0..200 {
         if receipt.exists() {

@@ -46,9 +46,12 @@ pub(crate) fn registered_shim_stays_gated_and_survives_supervisor_crash_after_re
     #[cfg(target_os = "linux")]
     let reaper = start_worker_reaper(pid);
     assert!(!marker.exists());
+    let other_owner = luthor::WorktreeOwner::acquire(&config.state_root, "other-task").unwrap();
     authorize_registered_gate(&mut store, &identity_path, &supervisor, &marker);
     release_then_crash_supervisor(&mut supervisor, &marker, pid);
     assert_worker_identity_after_crash(&identity, &identity_path, pid);
+    assert_owner_busy(&config.state_root, "supervisor reaped while worker lives");
+    drop(other_owner);
     assert!(matches!(
         reconcile_attempt(&mut store, "task", "attempt-real").unwrap(),
         Reconciliation::Held { .. }
@@ -65,6 +68,7 @@ pub(crate) fn registered_shim_stays_gated_and_survives_supervisor_crash_after_re
         reaper.join().unwrap(),
         "adopted worker was not reaped within the bound"
     );
+    assert_owner_acquirable(&config.state_root);
     assert!(!attempts.join("attempt-real.receipt.json").exists());
     assert!(
         stop_intent(&store, "task", "attempt-real")
@@ -78,6 +82,24 @@ pub(crate) fn registered_shim_stays_gated_and_survives_supervisor_crash_after_re
     );
     assert!(!attempts.join("attempt-real.receipt.json").exists());
     assert_crashed_supervisor_reservation(&config, store);
+}
+
+#[cfg(unix)]
+fn assert_owner_busy(root: &Path, context: &str) {
+    assert!(
+        matches!(
+            luthor::WorktreeOwner::acquire_existing(root, "task"),
+            Err(luthor::OwnershipError::Busy)
+        ),
+        "production worker owner lock was not Busy: {context}"
+    );
+}
+
+#[cfg(unix)]
+fn assert_owner_acquirable(root: &Path) {
+    let owner = luthor::WorktreeOwner::acquire_existing(root, "task")
+        .expect("production worker owner lock remained Busy after worker reaping");
+    drop(owner);
 }
 
 #[cfg(unix)]
@@ -113,17 +135,24 @@ fn install_gate_plan(
     serde_json::to_writer(&mut file, plan).unwrap();
     file.sync_all().unwrap();
     fs::File::open(attempts).unwrap().sync_all().unwrap();
+    let owner = luthor::WorktreeOwner::acquire(store.root(), "task").unwrap();
     begin_supervision(
         store,
         "task",
         "attempt-real",
         &serde_json::to_string(&plan).unwrap(),
+        &owner
+            .protocol_evidence(store.root(), "task", "attempt-real")
+            .unwrap(),
     )
     .unwrap();
+    drop(owner);
 }
 #[cfg(unix)]
 fn start_gated_supervisor(config: &Config) -> std::process::Child {
-    let mut supervisor = Command::new(env!("CARGO_BIN_EXE_luthor"))
+    let owner = luthor::WorktreeOwner::acquire(&config.state_root, "task").unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_luthor"));
+    command
         .args([
             "__supervise",
             config.state_root.to_str().unwrap(),
@@ -131,9 +160,10 @@ fn start_gated_supervisor(config: &Config) -> std::process::Child {
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+        .stderr(Stdio::null());
+    owner.inherit_into(&mut command);
+    let mut supervisor = command.spawn().unwrap();
+    drop(owner);
     let mut ready = String::new();
     std::io::BufReader::new(supervisor.stdout.take().unwrap())
         .read_line(&mut ready)

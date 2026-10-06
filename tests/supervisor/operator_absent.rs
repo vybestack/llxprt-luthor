@@ -2,6 +2,48 @@ use super::*;
 use luthor::state::{journal, scheduling, task_records};
 
 #[cfg(unix)]
+pub(crate) fn operator_recovery_missing_owner_proof_holds_before_github() {
+    let (_dir, config, mut store) = dispatched_fixture(7);
+    let payload = journal::evidence_payloads(&store, "task", "attempt-real", "supervisor_ready")
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    let pid = serde_json::from_str::<serde_json::Value>(&payload).unwrap()["pid"]
+        .as_u64()
+        .unwrap() as libc::pid_t;
+    wait_for_process_and_group_absence(pid);
+    fs::remove_file(receipt_path(&config)).unwrap();
+    rusqlite::Connection::open(config.state_root.join("state.sqlite3"))
+        .unwrap()
+        .execute(
+            "DELETE FROM evidence WHERE task_id='task' AND attempt_id='attempt-real' AND kind='worktree_owner_protocol'",
+            [],
+        )
+        .unwrap();
+    let selection = task_records::selection_evidence(&store, "task")
+        .unwrap()
+        .unwrap();
+    let mut projects = OtherProject(selection.candidate, 1);
+    let mut prs = ExitPr::default();
+    assert!(matches!(
+        operator_recover_missing_receipt(
+            &mut store,
+            "task",
+            "attempt-real",
+            "operator",
+            "receipt lost",
+            &mut projects,
+            &mut prs
+        )
+        .unwrap(),
+        luthor::coordinator::RecoveryResult::Held(_)
+    ));
+    assert_eq!(prs.reads, 0);
+    assert_eq!(scheduling::reservation_count(&store).unwrap(), 1);
+}
+
+#[cfg(unix)]
 pub(crate) fn operator_recovery_pr_lookup_failure_keeps_slot_reserved() {
     let (_dir, config, mut store) = dispatched_fixture(7);
     let payload = journal::evidence_payloads(&store, "task", "attempt-real", "supervisor_ready")

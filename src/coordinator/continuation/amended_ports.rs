@@ -17,6 +17,7 @@ pub trait AmendedSupervisorLauncher {
         context: &NeverDispatchedContext,
         config: &Config,
         revision: &str,
+        owner: &crate::ownership::WorktreeOwner,
     ) -> Result<(), SupervisorError>;
 }
 
@@ -30,8 +31,9 @@ impl AmendedSupervisorLauncher for NativeAmendedSupervisorLauncher {
         context: &NeverDispatchedContext,
         config: &Config,
         revision: &str,
+        owner: &crate::ownership::WorktreeOwner,
     ) -> Result<(), SupervisorError> {
-        crate::supervisor::execute_amended(store, context, config, revision)
+        crate::supervisor::execute_amended(store, context, config, revision, owner)
     }
 
     #[cfg(not(unix))]
@@ -41,6 +43,7 @@ impl AmendedSupervisorLauncher for NativeAmendedSupervisorLauncher {
         _context: &NeverDispatchedContext,
         _config: &Config,
         _revision: &str,
+        _owner: &crate::ownership::WorktreeOwner,
     ) -> Result<(), SupervisorError> {
         Err(SupervisorError::ExecutionUnavailable)
     }

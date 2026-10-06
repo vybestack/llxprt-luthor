@@ -6,6 +6,7 @@ use super::{
     worker::verify_launch_worktree,
 };
 use crate::model::{ChildIdentity, LaunchPlan};
+use crate::ownership::{WorktreeOwner, WorktreeOwnerInternal};
 use crate::state::{journal, launches};
 use crate::{
     config::Config,
@@ -21,8 +22,12 @@ use std::{
 /// Production always starts this binary. The explicit binary variant permits an
 /// integration test process to dispatch the built CLI instead of its test harness.
 #[cfg(unix)]
-pub fn execute(store: &mut StateStore, plan: &LaunchPlan) -> Result<(), SupervisorError> {
-    execute_with_binary(store, plan, &env::current_exe()?)
+pub fn execute(
+    store: &mut StateStore,
+    plan: &LaunchPlan,
+    ownership: &WorktreeOwner,
+) -> Result<(), SupervisorError> {
+    execute_with_binary(store, plan, &env::current_exe()?, ownership)
 }
 
 #[cfg(unix)]
@@ -30,6 +35,7 @@ pub fn execute_with_binary(
     store: &mut StateStore,
     plan: &LaunchPlan,
     binary: &Path,
+    ownership: &WorktreeOwner,
 ) -> Result<(), SupervisorError> {
     if !valid_attempt(&plan.attempt_id) {
         return Err(SupervisorError::Conflict);
@@ -40,14 +46,26 @@ pub fn execute_with_binary(
         return Err(SupervisorError::Conflict);
     }
     let root = store.root().to_path_buf();
+    ownership
+        .verify_binding(&root, &plan.task_id)
+        .map_err(|_| SupervisorError::Conflict)?;
     let attempts = private_attempts(&root)?;
     // A second dispatch cannot overwrite the plan or launch the worker.
     write_private_json(
         &attempts.join(format!("{}.plan.json", plan.attempt_id)),
         plan,
     )?;
-    launches::begin_supervision(store, &plan.task_id, &plan.attempt_id, &serialized)?;
-    launch_dispatched(store, plan, binary)
+    let owner_protocol = ownership
+        .protocol_evidence(&root, &plan.task_id, &plan.attempt_id)
+        .map_err(|_| SupervisorError::Conflict)?;
+    launches::begin_supervision(
+        store,
+        &plan.task_id,
+        &plan.attempt_id,
+        &serialized,
+        &owner_protocol,
+    )?;
+    launch_dispatched(store, plan, binary, ownership)
 }
 
 /// Explicit amended launch. The original launch intent is never rewritten.
@@ -57,8 +75,16 @@ pub fn execute_amended(
     context: &NeverDispatchedContext,
     config: &Config,
     revision: &str,
+    ownership: &WorktreeOwner,
 ) -> Result<(), SupervisorError> {
-    execute_amended_with_binary(store, context, config, revision, &env::current_exe()?)
+    execute_amended_with_binary(
+        store,
+        context,
+        config,
+        revision,
+        &env::current_exe()?,
+        ownership,
+    )
 }
 
 #[cfg(unix)]
@@ -68,6 +94,7 @@ pub fn execute_amended_with_binary(
     config: &Config,
     revision: &str,
     binary: &Path,
+    ownership: &WorktreeOwner,
 ) -> Result<(), SupervisorError> {
     let proof = store.amended_dispatch_proof(context, config, revision)?;
     let plan = &proof.effective_plan;
@@ -78,13 +105,19 @@ pub fn execute_amended_with_binary(
         return Err(SupervisorError::Conflict);
     }
     verify_launch_worktree(&store.connection, plan)?;
+    ownership
+        .verify_binding(store.root(), &plan.task_id)
+        .map_err(|_| SupervisorError::Conflict)?;
+    let owner_protocol = ownership
+        .protocol_evidence(store.root(), &plan.task_id, &plan.attempt_id)
+        .map_err(|_| SupervisorError::Conflict)?;
     let attempts = private_attempts(store.root())?;
-    let committed = store.begin_amended_supervision(context, config, revision)?;
+    let committed = store.begin_amended_supervision(context, config, revision, &owner_protocol)?;
     write_private_json(
         &attempts.join(format!("{}.plan.json", plan.attempt_id)),
         &committed.effective_plan,
     )?;
-    launch_dispatched(store, &committed.effective_plan, binary)
+    launch_dispatched(store, &committed.effective_plan, binary, ownership)
 }
 
 #[cfg(unix)]
@@ -92,6 +125,7 @@ fn launch_dispatched(
     store: &mut StateStore,
     plan: &LaunchPlan,
     binary: &Path,
+    ownership: &WorktreeOwner,
 ) -> Result<(), SupervisorError> {
     let root = store.root().to_path_buf();
     let attempts = private_attempts(&root)?;
@@ -105,6 +139,7 @@ fn launch_dispatched(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(stderr);
+    ownership.inherit_into(&mut command);
     use std::os::unix::process::CommandExt;
     // This process must outlive the coordinator without inheriting its terminal/session.
     unsafe {

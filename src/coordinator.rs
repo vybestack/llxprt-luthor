@@ -121,8 +121,13 @@ impl IdCreator for OsIdCreator {
 pub struct ProductionLauncher;
 
 impl SupervisorLauncher for ProductionLauncher {
-    fn launch(&mut self, store: &mut StateStore, plan: &LaunchPlan) -> Result<(), SupervisorError> {
-        supervisor::execute(store, plan)
+    fn launch(
+        &mut self,
+        store: &mut StateStore,
+        plan: &LaunchPlan,
+        ownership: &crate::WorktreeOwner,
+    ) -> Result<(), SupervisorError> {
+        supervisor::execute(store, plan, ownership)
     }
 }
 
@@ -171,6 +176,8 @@ where
         launcher,
     } = dependencies;
     scheduling::ensure_dispatch_capacity(store)?;
+    let ownership = crate::ownership::WorktreeOwner::acquire(store.root(), task_id)
+        .map_err(|_| SupervisorError::Conflict)?;
     task_records::create_task(store, task_id, candidate, config_revision, config)?;
     let mut launch_preflight_complete = false;
     let result = (|| {
@@ -201,7 +208,7 @@ where
             return Err(DispatchError::ExistingPr);
         }
         let plan = supervisor::prepare_initial(store, task_id, attempt_id)?;
-        launcher.launch(store, &plan)?;
+        launcher.launch(store, &plan, &ownership)?;
         Ok(plan)
     })();
     if let Err(error) = &result {
@@ -338,6 +345,32 @@ pub struct ResumeDependencies<'a, P, Q, L> {
 
 /// Continues a previously reconciled, paused task using only its stored selection.
 /// Failed evidence checks hold the task without reserving another attempt.
+fn acquire_resume_owner(
+    store: &StateStore,
+    task_id: &str,
+) -> Result<crate::ownership::WorktreeOwner, SupervisorError> {
+    let ownership = crate::ownership::WorktreeOwner::acquire_existing(store.root(), task_id)
+        .map_err(|_| SupervisorError::Conflict)?;
+    let prior_attempt: Option<String> = store
+        .connection
+        .query_row(
+            "SELECT id FROM attempts WHERE task_id=?1 ORDER BY rowid DESC LIMIT 1",
+            [task_id],
+            |row| row.get(0),
+        )
+        .map_err(|_| SupervisorError::Conflict)?;
+    let prior_attempt = prior_attempt.ok_or(SupervisorError::Conflict)?;
+    crate::ownership::WorktreeOwnerInternal::verify_protocol(
+        &ownership,
+        &store.connection,
+        store.root(),
+        task_id,
+        &prior_attempt,
+    )
+    .map_err(|_| SupervisorError::Conflict)?;
+    Ok(ownership)
+}
+
 pub fn resume_one<P, Q, L>(
     store: &mut StateStore,
     dependencies: ResumeDependencies<'_, P, Q, L>,
@@ -356,6 +389,7 @@ where
     } = dependencies;
     // Do not change the phase of an active or unverified task to held.
     launches::resume_context(store, task_id)?;
+    let ownership = acquire_resume_owner(store, task_id)?;
     let result = (|| {
         supervisor::validate_stop_socket_path(store.root(), attempt_id)?;
         let selection = task_records::selection_evidence(store, task_id)?
@@ -380,7 +414,7 @@ where
             return Err(DispatchError::ExistingPr);
         }
         let plan = supervisor::prepare_resume(store, task_id, attempt_id)?;
-        launcher.launch(store, &plan)?;
+        launcher.launch(store, &plan, &ownership)?;
         Ok(plan)
     })();
     if let Err(error) = &result {

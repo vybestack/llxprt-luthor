@@ -94,6 +94,7 @@ impl StateStore {
         context: &NeverDispatchedContext,
         config: &Config,
         revision: &str,
+        owner_protocol: &crate::ownership::WorktreeOwnerProtocol,
     ) -> Result<AmendedDispatchProof, StateError> {
         amended_dispatch::begin_amended_supervision(
             &mut self.connection,
@@ -101,6 +102,7 @@ impl StateStore {
             context,
             config,
             revision,
+            owner_protocol,
         )
     }
 

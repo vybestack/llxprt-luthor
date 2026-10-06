@@ -1,6 +1,6 @@
 use super::{Lane, database, executable_lane};
 use luthor::state::{journal, scheduling};
-use luthor::supervisor;
+use luthor::{WorktreeOwner, supervisor};
 use std::{
     fs,
     io::{BufRead, BufReader, Write},
@@ -18,7 +18,12 @@ fn commit_plan(lane: &mut Lane) {
     let proof = lane
         .f
         .store
-        .begin_amended_supervision(&context, &lane.f.config, "corrected-revision")
+        .begin_amended_supervision(
+            &context,
+            &lane.f.config,
+            "corrected-revision",
+            &crate::continuation::owner_protocol(lane, &context),
+        )
         .unwrap();
     let path = lane
         .f
@@ -84,15 +89,18 @@ pub(super) fn ready_supervisor(lane: &mut Lane) -> std::process::Child {
 }
 
 pub(super) fn ready_committed_supervisor(lane: &mut Lane) -> std::process::Child {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_luthor"))
+    let owner = WorktreeOwner::acquire(lane.f.store.root(), "task-a").unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_luthor"));
+    command
         .arg("__supervise")
         .arg(lane.f.store.root())
         .arg("attempt-task-a")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
+        .stderr(Stdio::piped());
+    owner.inherit_into(&mut command);
+    let mut child = command.spawn().unwrap();
+    drop(owner);
     let mut line = String::new();
     BufReader::new(child.stdout.take().unwrap())
         .read_line(&mut line)
@@ -253,6 +261,7 @@ fn amended_conflicting_artifact_is_not_overwritten_or_dispatched() {
         .store
         .never_dispatched_context("task-a", "attempt-task-a")
         .unwrap();
+    let owner = WorktreeOwner::acquire(lane.f.store.root(), "task-a").unwrap();
     let path = lane
         .f
         .store
@@ -265,7 +274,8 @@ fn amended_conflicting_artifact_is_not_overwritten_or_dispatched() {
             &context,
             &lane.f.config,
             "corrected-revision",
-            Path::new(env!("CARGO_BIN_EXE_luthor"))
+            Path::new(env!("CARGO_BIN_EXE_luthor")),
+            &owner
         )
         .is_err()
     );

@@ -1,4 +1,5 @@
 use super::*;
+use luthor::WorktreeOwner;
 use luthor::state::{journal, scheduling, task_records, worktree_records};
 
 // Receipt publication precedes supervisor exit/reaping. Completion-claim tests
@@ -14,7 +15,8 @@ pub(crate) fn completion_fixture() -> (tempfile::TempDir, Config, StateStore) {
     .unwrap();
     let attempts = config.state_root.join("attempts");
     let _cleanup = FixtureGroupGuard(attempts.join("attempt-real.child.json"));
-    execute_with_binary(&mut store, &plan, Path::new(env!("CARGO_BIN_EXE_luthor")))
+    let owner = WorktreeOwner::acquire(store.root(), &plan.task_id).unwrap();
+    execute_with_binary(&mut store, &plan, Path::new(env!("CARGO_BIN_EXE_luthor")), &owner)
         .unwrap_or_else(|error| {
             let stderr = fs::read_to_string(attempts.join("attempt-real.supervisor.log"));
             let supervisor_error = fs::read_to_string(attempts.join("attempt-real.supervisor-error.json"));

@@ -18,11 +18,16 @@ pub(crate) fn live_worker_log_write_failure_stops_and_holds_both_streams() {
         .unwrap();
         fs::set_permissions(&worker, fs::Permissions::from_mode(0o700)).unwrap();
         let plan = prepare_initial(&mut store, "task", "attempt-1").unwrap();
+        let owner = luthor::WorktreeOwner::acquire(&config.state_root, &plan.task_id).unwrap();
+        let proof = owner
+            .protocol_evidence(store.root(), "task", "attempt-1")
+            .unwrap();
         launches::begin_supervision(
             &mut store,
             "task",
             "attempt-1",
             &serde_json::to_string(&plan).unwrap(),
+            &proof,
         )
         .unwrap();
         let attempts = config.state_root.join("attempts");
@@ -48,6 +53,7 @@ pub(crate) fn live_worker_log_write_failure_stops_and_holds_both_streams() {
                     )
                 }
             },
+            &owner,
         );
         assert!(
             matches!(result, Err(SupervisorError::ExecutionUnavailable)),
@@ -57,6 +63,7 @@ pub(crate) fn live_worker_log_write_failure_stops_and_holds_both_streams() {
             started.elapsed() < Duration::from_secs(5),
             "{stream}: stop took too long"
         );
+        drop(owner);
         assert_log_failure_held(&config, &mut store, &attempts, stream);
     }
 }
@@ -76,11 +83,16 @@ pub(crate) fn log_writer_and_evidence_failure_still_stops_registered_child_group
     .unwrap();
     fs::set_permissions(&worker, fs::Permissions::from_mode(0o700)).unwrap();
     let plan = prepare_initial(&mut store, "task", "attempt-fault").unwrap();
+    let owner = luthor::WorktreeOwner::acquire(&config.state_root, &plan.task_id).unwrap();
+    let proof = owner
+        .protocol_evidence(store.root(), "task", "attempt-fault")
+        .unwrap();
     launches::begin_supervision(
         &mut store,
         "task",
         "attempt-fault",
         &serde_json::to_string(&plan).unwrap(),
+        &proof,
     )
     .unwrap();
     let attempts = config.state_root.join("attempts");
@@ -101,6 +113,7 @@ pub(crate) fn log_writer_and_evidence_failure_still_stops_registered_child_group
                 Box::new(err) as Box<dyn Write + Send>,
             )
         },
+        &owner,
     );
     assert!(matches!(result, Err(SupervisorError::Sql(_))), "{result:?}");
     assert_eq!(scheduling::reservation_count(&store).unwrap(), 1);

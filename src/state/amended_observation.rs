@@ -1,7 +1,7 @@
 use super::{
     context::{InitialBranchRemovalAudit, MAX_AUDIT_BYTES, NeverDispatchedContext, SavedRows},
     continuation::{self, ProofRow},
-    proofs::{dispatch_evidence, dispatch_intent, parse_saved},
+    proofs::{dispatch_evidence, dispatch_intent, parse_saved, validate_owner_protocol},
 };
 use crate::model::{ExitReceipt, LaunchPlan, StateError};
 use rusqlite::{Connection, params};
@@ -24,6 +24,7 @@ pub(crate) fn read_context(
         return Err(StateError::LaunchBlocked);
     }
     let audit: InitialBranchRemovalAudit = parse_saved(payload)?;
+    validate_owner_protocol(db, &plan.task_id, &plan.attempt_id)?;
     validate_lifecycle(db, plan)?;
     let mut snapshot = continuation::saved_rows(db, &plan.task_id, &plan.attempt_id, true)?;
     normalize_rows(&mut snapshot)?;

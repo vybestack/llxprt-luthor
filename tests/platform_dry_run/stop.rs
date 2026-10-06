@@ -1,4 +1,5 @@
 use super::*;
+use luthor::WorktreeOwner;
 use luthor::state::{exit_observation, scheduling, task_records};
 
 pub(crate) fn run() {
@@ -7,7 +8,15 @@ pub(crate) fn run() {
     let (config, candidate) = fixture_config(fixture.dir.path(), &fixture.binary, &profile, true);
     let mut store = claimed_store(&config, &candidate);
     let plan = prepare_initial(&mut store, "task", "installed-stop").unwrap();
-    execute_with_binary(&mut store, &plan, Path::new(env!("CARGO_BIN_EXE_luthor"))).unwrap();
+    let owner = WorktreeOwner::acquire(store.root(), &plan.task_id).unwrap();
+    execute_with_binary(
+        &mut store,
+        &plan,
+        Path::new(env!("CARGO_BIN_EXE_luthor")),
+        &owner,
+    )
+    .unwrap();
+    drop(owner);
     let config_root = &fixture.config_root;
     let dir = &fixture.dir;
     let request = request_rx.recv_timeout(Duration::from_secs(20));
@@ -90,12 +99,15 @@ fn execute_resume(
             .contains("Distinct second turn after stop for installed-resume")
     );
     assert_eq!(scheduling::reservation_count(&reopened).unwrap(), 1);
+    let owner = WorktreeOwner::acquire(reopened.root(), &plan.task_id).unwrap();
     execute_with_binary(
         &mut reopened,
         &resume,
         Path::new(env!("CARGO_BIN_EXE_luthor")),
+        &owner,
     )
     .unwrap();
+    drop(owner);
     let resume_receipt_path = config
         .state_root
         .join("attempts/installed-resume.receipt.json");

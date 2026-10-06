@@ -50,17 +50,36 @@ where
             }
             Err(error) => return Err(error),
         };
-    let verified = verify_config(
+    let ownership =
+        match crate::ownership::WorktreeOwner::acquire_existing(store.root(), context.task_id()) {
+            Ok(ownership) => ownership,
+            Err(_) => return refuse(store, &context, ContinuationRefusal::LaunchFailed),
+        };
+    if let Err(refusal) = verify_config(
         store,
         &context,
         dependencies.config,
         dependencies.config_revision,
+    ) {
+        return refuse(store, &context, refusal);
+    }
+    let verified = verify_local(
+        &context,
+        dependencies.local,
+        dependencies.processes,
+        &ownership,
     )
-    .and_then(|()| verify_local(&context, dependencies.local, dependencies.processes))
     .and_then(|()| verify_source(&context, dependencies.projects))
     .and_then(|()| verify_pr(&context, dependencies.actor, dependencies.prs))
     .and_then(|()| verify_source(&context, dependencies.projects))
-    .and_then(|()| verify_local(&context, dependencies.local, dependencies.processes));
+    .and_then(|()| {
+        verify_local(
+            &context,
+            dependencies.local,
+            dependencies.processes,
+            &ownership,
+        )
+    });
     if let Err(reason) = verified {
         return refuse(store, &context, reason);
     }
@@ -74,7 +93,11 @@ where
     {
         return refuse(store, &context, ContinuationRefusal::AuthorizationFailed);
     }
-    if dependencies.launcher.launch(store, context.plan()).is_err() {
+    if dependencies
+        .launcher
+        .launch(store, context.plan(), &ownership)
+        .is_err()
+    {
         return refuse(store, &context, ContinuationRefusal::LaunchFailed);
     }
     Ok(ContinuationResult::Dispatched(Box::new(

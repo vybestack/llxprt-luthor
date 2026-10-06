@@ -1,4 +1,5 @@
 use super::*;
+use luthor::WorktreeOwner;
 use luthor::state::task_records;
 
 #[cfg(unix)]
@@ -65,7 +66,15 @@ exit 2
         .unwrap();
     }
     let plan = prepare_initial(&mut store, "task", "attempt-real").unwrap();
-    execute_with_binary(&mut store, &plan, Path::new(env!("CARGO_BIN_EXE_luthor"))).unwrap();
+    let owner = WorktreeOwner::acquire(store.root(), &plan.task_id).unwrap();
+    execute_with_binary(
+        &mut store,
+        &plan,
+        Path::new(env!("CARGO_BIN_EXE_luthor")),
+        &owner,
+    )
+    .unwrap();
+    drop(owner);
     reconcile_fixture_exit(&config, &mut store);
     // A completed receipt may precede the detached supervisor's own termination.
     let db = rusqlite::Connection::open(config.state_root.join("state.sqlite3")).unwrap();

@@ -38,11 +38,16 @@ where
     {
         return refuse(store, &context, Refusal::ConfigChanged);
     }
+    let ownership =
+        match crate::ownership::WorktreeOwner::acquire_existing(store.root(), context.task_id()) {
+            Ok(owner) => owner,
+            Err(_) => return refuse(store, &context, Refusal::LaunchFailed),
+        };
     let effective = match state::initial_branch_removal_plan(&context) {
         Ok(plan) => plan,
         Err(_) => return refuse(store, &context, Refusal::PlanInvalid),
     };
-    let (pr, processes) = match inspect(&context, &mut dependencies) {
+    let (pr, processes) = match inspect(&context, &mut dependencies, &ownership) {
         Ok(observations) => observations,
         Err(reason) => return refuse(store, &context, reason),
     };
@@ -64,7 +69,7 @@ where
         Some(amended) => amended,
         None => return refuse(store, &context, Refusal::AuthorizationFailed),
     };
-    if let Err(reason) = inspect(&amended, &mut dependencies) {
+    if let Err(reason) = inspect(&amended, &mut dependencies, &ownership) {
         return refuse(store, &context, reason);
     }
     if !dispatch_ready(store, &amended, &dependencies, sequence)? {
@@ -77,6 +82,7 @@ where
             &amended,
             dependencies.config,
             dependencies.config_revision,
+            &ownership,
         )
         .is_err()
     {
@@ -100,6 +106,7 @@ fn read_context(
 fn inspect<P, Q, L, I, O>(
     context: &NeverDispatchedContext,
     dependencies: &mut AmendedContinuationDependencies<'_, P, Q, L, I, O>,
+    owner: &crate::ownership::WorktreeOwner,
 ) -> Result<(ExitPrEvidence, ProcessQuiescence), Refusal>
 where
     P: ProjectReader,
@@ -119,7 +126,7 @@ where
             .clone(),
         status: PausePrStatus::Absent,
     };
-    verify_local(context, dependencies.local, dependencies.processes)?;
+    verify_local(context, dependencies.local, dependencies.processes, owner)?;
     let processes = ProcessQuiescence::Clear {
         observed_at_unix_secs: timestamp()?,
     };

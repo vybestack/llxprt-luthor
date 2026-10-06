@@ -76,6 +76,27 @@ fn failed_resume_dispatch_retains_reservation_and_never_retries() {
 }
 
 #[test]
+fn resume_refuses_missing_owner_protocol_rows_without_state_changes() {
+    coordinator::resume_scenarios::resume_refuses_missing_owner_protocol_rows_without_state_changes(
+    );
+}
+
+#[test]
+fn resume_refuses_replacement_inode_without_creating_an_attempt() {
+    coordinator::resume_scenarios::resume_refuses_replacement_inode_without_creating_an_attempt();
+}
+
+#[test]
+fn busy_owner_refuses_resume_without_mutation_then_same_task_resumes() {
+    coordinator::resume_scenarios::busy_owner_refuses_resume_without_mutation_then_same_task_resumes();
+}
+
+#[test]
+fn resume_requires_existing_owner_and_refuses_busy_before_remote_reads() {
+    coordinator::resume_scenarios::resume_requires_existing_owner_and_refuses_busy_before_remote_reads();
+}
+
+#[test]
 fn startup_reconcile_holds_missing_receipt_without_relaunching() {
     coordinator::scheduling_scenarios::startup_reconcile_holds_missing_receipt_without_relaunching(
     );
@@ -100,4 +121,34 @@ fn scheduler_uses_precomputed_startup_without_reconciling_again() {
 #[test]
 fn scheduler_with_precomputed_blocked_startup_does_not_select_candidates() {
     coordinator::scheduling_scenarios::scheduler_with_precomputed_blocked_startup_does_not_select_candidates();
+}
+
+#[test]
+fn occupied_owner_prevents_dispatch_before_persisting_or_claiming_task() {
+    let mut f = Fixture::new(1);
+    let c = f.candidate.clone();
+    let owner = luthor::WorktreeOwner::acquire(f.store.root(), "task-a").unwrap();
+    let mut github = FakeGithub::new(&c);
+    let mut writer = FakeWriter::default();
+    let mut launcher = FakeLauncher::default();
+
+    assert!(matches!(
+        f.run("task-a", &c, &mut github, &mut writer, &mut launcher),
+        Err(DispatchError::Supervisor(SupervisorError::Conflict))
+    ));
+
+    let connection = rusqlite::Connection::open(f.config.state_root.join("state.sqlite3")).unwrap();
+    for table in ["tasks", "attempts", "reservations", "evidence", "intents"] {
+        let count: i64 = connection
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 0, "unexpected rows in {table}");
+    }
+    assert_eq!(writer.calls, 0);
+    assert_eq!(github.reads, 0);
+    assert_eq!(github.prs.lookups, 0);
+    assert!(launcher.plans.is_empty());
+    drop(owner);
 }

@@ -19,14 +19,22 @@ pub(crate) fn branch_switch_after_ready_blocks_release_and_holds_slot() {
         .unwrap();
     serde_json::to_writer(&mut file, &plan).unwrap();
     file.sync_all().unwrap();
+    let owner = luthor::WorktreeOwner::acquire(store.root(), &plan.task_id).unwrap();
+    let proof = owner
+        .protocol_evidence(store.root(), "task", "attempt-real")
+        .unwrap();
     launches::begin_supervision(
         &mut store,
         "task",
         "attempt-real",
         &serde_json::to_string(&plan).unwrap(),
+        &proof,
     )
     .unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_luthor"))
+    drop(owner);
+    let owner = luthor::WorktreeOwner::acquire(store.root(), &plan.task_id).unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_luthor"));
+    command
         .args([
             "__supervise",
             config.state_root.to_str().unwrap(),
@@ -34,18 +42,30 @@ pub(crate) fn branch_switch_after_ready_blocks_release_and_holds_slot() {
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+        .stderr(Stdio::null());
+    owner.inherit_into(&mut command);
+    let mut child = command.spawn().unwrap();
+    drop(owner);
     let mut ready = String::new();
     std::io::BufReader::new(child.stdout.take().unwrap())
         .read_line(&mut ready)
         .unwrap();
     assert_eq!(ready, "READY\n");
     git(&plan.worktree, &["switch", "-c", "foreign"]);
+    record_ready_release_evidence(&mut store, &mut child, &attempts);
+    child.stdin.take().unwrap().write_all(b"R").unwrap();
+    assert_release_blocked(child, &marker, &attempts, &store);
+}
+
+#[cfg(unix)]
+fn record_ready_release_evidence(
+    store: &mut StateStore,
+    child: &mut std::process::Child,
+    attempts: &Path,
+) {
     let registered = fs::read_to_string(attempts.join("attempt-real.child.json")).unwrap();
     journal::record_evidence(
-        &mut store,
+        store,
         "task",
         Some("attempt-real"),
         "child_registered",
@@ -55,7 +75,7 @@ pub(crate) fn branch_switch_after_ready_blocks_release_and_holds_slot() {
     let (boot, start) = test_process_identity(child.id());
     let process = serde_json::json!({"pid":child.id(),"boot_identity":boot,"start_identity":start});
     journal::record_evidence(
-        &mut store,
+        store,
         "task",
         Some("attempt-real"),
         "supervisor_ready",
@@ -63,7 +83,7 @@ pub(crate) fn branch_switch_after_ready_blocks_release_and_holds_slot() {
     )
     .unwrap();
     journal::record_intent(
-        &mut store,
+        store,
         "gate-attempt-real",
         "task",
         Some("attempt-real"),
@@ -71,11 +91,19 @@ pub(crate) fn branch_switch_after_ready_blocks_release_and_holds_slot() {
         &process.to_string(),
     )
     .unwrap();
-    child.stdin.take().unwrap().write_all(b"R").unwrap();
+}
+
+#[cfg(unix)]
+fn assert_release_blocked(
+    mut child: std::process::Child,
+    marker: &Path,
+    attempts: &Path,
+    store: &StateStore,
+) {
     assert!(!child.wait().unwrap().success());
     assert!(!marker.exists());
     assert!(!attempts.join("attempt-real.receipt.json").exists());
-    assert_eq!(scheduling::reservation_count(&store).unwrap(), 1);
+    assert_eq!(scheduling::reservation_count(store).unwrap(), 1);
 }
 
 #[cfg(unix)]
@@ -94,14 +122,22 @@ pub(crate) fn same_binary_ready_without_release_does_not_launch_worker() {
     serde_json::to_writer(&mut file, &plan).unwrap();
     file.sync_all().unwrap();
     fs::File::open(&attempts).unwrap().sync_all().unwrap();
+    let owner = luthor::WorktreeOwner::acquire(store.root(), &plan.task_id).unwrap();
+    let proof = owner
+        .protocol_evidence(store.root(), "task", "attempt-real")
+        .unwrap();
     launches::begin_supervision(
         &mut store,
         "task",
         "attempt-real",
         &serde_json::to_string(&plan).unwrap(),
+        &proof,
     )
     .unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_luthor"))
+    drop(owner);
+    let owner = luthor::WorktreeOwner::acquire(store.root(), &plan.task_id).unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_luthor"));
+    command
         .args([
             "__supervise",
             config.state_root.to_str().unwrap(),
@@ -109,9 +145,10 @@ pub(crate) fn same_binary_ready_without_release_does_not_launch_worker() {
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+        .stderr(Stdio::null());
+    owner.inherit_into(&mut command);
+    let mut child = command.spawn().unwrap();
+    drop(owner);
     let mut ready = String::new();
     std::io::BufReader::new(child.stdout.take().unwrap())
         .read_line(&mut ready)

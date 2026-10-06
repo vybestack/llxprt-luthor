@@ -1,5 +1,6 @@
 use crate::{config::ConfigError, state::StateError, worktree::WorktreeError};
 use thiserror::Error;
+
 #[derive(Debug, Error)]
 pub enum SupervisorError {
     #[error(transparent)]

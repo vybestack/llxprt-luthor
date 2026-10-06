@@ -3,7 +3,7 @@ use super::{
         KIND, NeverDispatchedAuthorization, NeverDispatchedContext, NeverDispatchedReason,
         SEAL_KIND, SavedClaimAssignment, SavedRows, valid_actor,
     },
-    proofs::{dispatch_evidence, dispatch_intent, parse_saved},
+    proofs::{dispatch_evidence, dispatch_intent, parse_saved, validate_owner_protocol},
 };
 use crate::model::{SelectionEvidence, StateError, WorktreeIdentity, WorktreeIntent};
 use rusqlite::{Connection, TransactionBehavior, params};
@@ -109,6 +109,9 @@ pub(crate) fn read_context_mode(
     dispatched: bool,
 ) -> Result<NeverDispatchedContext, StateError> {
     validate_attempt(db, task_id, attempt_id)?;
+    if dispatched {
+        validate_owner_protocol(db, task_id, attempt_id)?;
+    }
     let snapshot = saved_rows(db, task_id, attempt_id, dispatched)?;
     let mut intents = proof_rows(db, false, task_id, attempt_id)?;
     let mut evidence = proof_rows(db, true, task_id, attempt_id)?;
@@ -393,7 +396,7 @@ pub(crate) fn saved_rows(
         "SELECT json_array(rowid,id,task_id,lifecycle,outcome,created_at) FROM attempts WHERE task_id=?1 OR id=?2 ORDER BY rowid",
         "SELECT json_array(rowid,attempt_id,task_id,status,created_at) FROM reservations WHERE task_id=?1 OR attempt_id=?2 ORDER BY rowid",
         "SELECT json_array(sequence,id,task_id,attempt_id,kind,detail,created_at) FROM intents WHERE (task_id=?1 OR attempt_id=?2) AND kind!='initial_branch_removal_seal' AND (?3=0 OR kind NOT IN ('supervisor_dispatch','gate_release')) ORDER BY sequence",
-        "SELECT json_array(sequence,task_id,attempt_id,kind,payload,created_at) FROM evidence WHERE (task_id=?1 OR attempt_id=?2) AND kind!='initial_branch_removed' AND (?3=0 OR kind NOT IN ('supervisor_ready','child_registered','tracked_descendant','gate_sent')) ORDER BY sequence",
+        "SELECT json_array(sequence,task_id,attempt_id,kind,payload,created_at) FROM evidence WHERE (task_id=?1 OR attempt_id=?2) AND kind!='initial_branch_removed' AND (?3=0 OR kind NOT IN ('supervisor_ready','child_registered','tracked_descendant','gate_sent','worktree_owner_protocol')) ORDER BY sequence",
     ];
     let mut rows = Vec::new();
     for (index, query) in queries.iter().enumerate() {

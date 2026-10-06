@@ -1,4 +1,5 @@
 use super::*;
+use luthor::WorktreeOwner;
 use luthor::state::{journal, scheduling, task_records};
 use luthor::supervisor::LaunchPlan;
 use std::io::Write;
@@ -90,7 +91,9 @@ fn complete_retry(
     projects: &mut OtherProject,
     prs: &mut ExitPr,
 ) {
-    execute_with_binary(store, plan, Path::new(env!("CARGO_BIN_EXE_luthor"))).unwrap();
+    let owner = WorktreeOwner::acquire(store.root(), &plan.task_id).unwrap();
+    execute_with_binary(store, plan, Path::new(env!("CARGO_BIN_EXE_luthor")), &owner).unwrap();
+    drop(owner);
     wait_for_retry_exit(config, &plan.attempt_id);
     assert!(matches!(
         luthor::coordinator::reconcile_with_pr(store, "task", &plan.attempt_id, projects, prs)
@@ -143,7 +146,8 @@ fn assert_missing_audit_refuses_launch(
     plan: &LaunchPlan,
     marker: &Path,
 ) {
-    let result = execute_with_binary(store, plan, Path::new(env!("CARGO_BIN_EXE_luthor")));
+    let owner = WorktreeOwner::acquire(store.root(), &plan.task_id).unwrap();
+    let result = execute_with_binary(store, plan, Path::new(env!("CARGO_BIN_EXE_luthor")), &owner);
     assert!(
         matches!(result, Err(SupervisorError::ExecutionUnavailable)),
         "missing retry audit must refuse supervisor launch for {}: {result:?}",
@@ -205,8 +209,19 @@ fn assert_valid_audit_control(
     audit: &str,
     marker: &Path,
 ) {
-    execute_with_binary(store, plan, Path::new(env!("CARGO_BIN_EXE_luthor"))).unwrap();
+    let owner = WorktreeOwner::acquire(store.root(), &plan.task_id).unwrap();
+    execute_with_binary(store, plan, Path::new(env!("CARGO_BIN_EXE_luthor")), &owner).unwrap();
+    drop(owner);
     wait_for_retry_exit(config, &plan.attempt_id);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Ok(owner) = WorktreeOwner::acquire_existing(store.root(), &plan.task_id) {
+            drop(owner);
+            break;
+        }
+        assert!(Instant::now() < deadline, "worktree owner was not released");
+        thread::sleep(Duration::from_millis(20));
+    }
     assert!(
         fs::read_to_string(marker)
             .unwrap()

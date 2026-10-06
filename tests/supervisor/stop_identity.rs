@@ -6,13 +6,19 @@ pub(crate) fn spoofed_child_identity_does_not_signal_live_group() {
     use std::os::unix::process::CommandExt;
     let dir = tempfile::tempdir().unwrap();
     let (config, mut store, plan, _) = prepared_fake_worker(&dir);
+    let owner = luthor::WorktreeOwner::acquire(store.root(), "task").unwrap();
+    let proof = owner
+        .protocol_evidence(store.root(), "task", "attempt-real")
+        .unwrap();
     launches::begin_supervision(
         &mut store,
         "task",
         "attempt-real",
         &serde_json::to_string(&plan).unwrap(),
+        &proof,
     )
     .unwrap();
+    drop(owner);
     let mut dead = Command::new("/bin/sleep").arg("30").spawn().unwrap();
     let (boot, start) = test_process_identity(dead.id());
     dead.kill().unwrap();
@@ -74,13 +80,19 @@ pub(crate) fn matching_supervisor_without_socket_does_not_fallback_to_group_sign
     use std::os::unix::process::CommandExt;
     let dir = tempfile::tempdir().unwrap();
     let (config, mut store, plan, _) = prepared_fake_worker(&dir);
+    let owner = luthor::WorktreeOwner::acquire(store.root(), "task").unwrap();
+    let proof = owner
+        .protocol_evidence(store.root(), "task", "attempt-real")
+        .unwrap();
     launches::begin_supervision(
         &mut store,
         "task",
         "attempt-real",
         &serde_json::to_string(&plan).unwrap(),
+        &proof,
     )
     .unwrap();
+    drop(owner);
     let (boot, start) = test_process_identity(std::process::id());
     let supervisor =
         serde_json::json!({"pid":std::process::id(),"boot_identity":boot,"start_identity":start});

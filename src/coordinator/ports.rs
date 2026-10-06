@@ -4,6 +4,7 @@ use crate::{
         project::ProjectReader,
         pull_request::{LookupError, PullRequestEvidence, PullRequestReader},
     },
+    ownership::WorktreeOwner,
     pr_evidence::{VerifiedOpenPr, expected_for_task},
     state::{StateError, StateStore},
     supervisor::{LaunchPlan, SupervisorError},
@@ -31,7 +32,12 @@ pub enum DispatchError {
     ExistingPr,
 }
 pub trait SupervisorLauncher {
-    fn launch(&mut self, store: &mut StateStore, plan: &LaunchPlan) -> Result<(), SupervisorError>;
+    fn launch(
+        &mut self,
+        store: &mut StateStore,
+        plan: &LaunchPlan,
+        ownership: &WorktreeOwner,
+    ) -> Result<(), SupervisorError>;
 }
 
 pub(crate) fn completion_claim_failure_reason(error: &ClaimError) -> &'static str {

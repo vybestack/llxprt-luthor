@@ -1,4 +1,5 @@
 use super::*;
+use luthor::WorktreeOwner;
 use luthor::state::{journal, scheduling, task_records};
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -79,7 +80,14 @@ exit 7
         ),
     )
     .unwrap();
-    execute_with_binary(&mut store, &plan, Path::new(env!("CARGO_BIN_EXE_luthor"))).unwrap();
+    let owner = WorktreeOwner::acquire(store.root(), &plan.task_id).unwrap();
+    execute_with_binary(
+        &mut store,
+        &plan,
+        Path::new(env!("CARGO_BIN_EXE_luthor")),
+        &owner,
+    )
+    .unwrap();
     for _ in 0..200 {
         if marker.exists() {
             break;

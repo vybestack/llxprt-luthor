@@ -1,4 +1,5 @@
 use super::*;
+use luthor::WorktreeOwner;
 
 pub(crate) fn run() {
     let fixture = NativeFixture::new();
@@ -6,7 +7,14 @@ pub(crate) fn run() {
     let (config, candidate) = fixture_config(fixture.dir.path(), &fixture.binary, &profile, false);
     let mut store = claimed_store(&config, &candidate);
     let plan = prepare_initial(&mut store, "task", "installed-initial").unwrap();
-    execute_with_binary(&mut store, &plan, Path::new(env!("CARGO_BIN_EXE_luthor"))).unwrap();
+    let owner = WorktreeOwner::acquire(store.root(), &plan.task_id).unwrap();
+    execute_with_binary(
+        &mut store,
+        &plan,
+        Path::new(env!("CARGO_BIN_EXE_luthor")),
+        &owner,
+    )
+    .unwrap();
     assert_initial_turn(&fixture, &config, request_rx, server);
 }
 

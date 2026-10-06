@@ -50,8 +50,42 @@ pub(crate) fn dispatch_intent(kind: &str) -> bool {
 pub(crate) fn dispatch_evidence(kind: &str) -> bool {
     matches!(
         kind,
-        "supervisor_ready" | "child_registered" | "tracked_descendant" | "gate_sent"
+        "supervisor_ready"
+            | "child_registered"
+            | "tracked_descendant"
+            | "gate_sent"
+            | "worktree_owner_protocol"
     )
+}
+
+pub(crate) fn validate_owner_protocol(
+    db: &Connection,
+    task: &str,
+    attempt: &str,
+) -> Result<i64, StateError> {
+    use crate::ownership::WorktreeOwnerProtocolInternal;
+    let rows: Vec<(i64, String, Option<String>, String)> = db
+        .prepare("SELECT sequence,task_id,attempt_id,payload FROM evidence WHERE kind='worktree_owner_protocol' AND (task_id=?1 OR attempt_id=?2) ORDER BY sequence")?
+        .query_map(params![task, attempt], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })?
+        .collect::<Result<_, _>>()?;
+    let [(sequence, row_task, row_attempt, payload)] = rows.as_slice() else {
+        return Err(StateError::LaunchBlocked);
+    };
+    let proof: crate::ownership::WorktreeOwnerProtocol = parse_saved(payload)?;
+    let dispatch_count: i64 = db.query_row(
+        "SELECT COUNT(*) FROM intents WHERE kind='supervisor_dispatch' AND task_id=?1 AND attempt_id=?2",
+        params![task, attempt], |row| row.get(0),
+    )?;
+    if row_task != task
+        || row_attempt.as_deref() != Some(attempt)
+        || !proof.matches_attempt(task, attempt)
+        || dispatch_count != 1
+    {
+        return Err(StateError::LaunchBlocked);
+    }
+    Ok(*sequence)
 }
 
 pub(crate) fn validate_verified_open_pr(

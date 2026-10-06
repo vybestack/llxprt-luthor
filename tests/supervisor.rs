@@ -269,6 +269,12 @@ fn resumed_missing_receipt_accepts_attempt_snapshot_descending_from_original() {
 
 #[cfg(unix)]
 #[test]
+fn operator_recovery_missing_owner_proof_holds_before_github() {
+    operator_absent::operator_recovery_missing_owner_proof_holds_before_github();
+}
+
+#[cfg(unix)]
+#[test]
 fn operator_recovery_pr_lookup_failure_keeps_slot_reserved() {
     operator_absent::operator_recovery_pr_lookup_failure_keeps_slot_reserved();
 }

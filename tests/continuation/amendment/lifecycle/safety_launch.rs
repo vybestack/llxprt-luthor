@@ -129,11 +129,13 @@ fn safety_real_worker_preexec_rechecks_late_drift_after_registered_gate_release(
             let plan: LaunchPlan = commit(&mut lane, amended);
             let shim = script::worker_shim(&lane, change);
             let attempts = lane.f.store.root().join("attempts");
+            let owner = luthor::WorktreeOwner::acquire(lane.f.store.root(), &plan.task_id).unwrap();
             let status = supervisor::run_gated_child_with_binary(
                 &plan,
                 RegisterGate { lane: &mut lane },
                 &attempts,
                 &shim,
+                &owner,
             )
             .unwrap();
             let stdout = fs::read(attempts.join("attempt-task-a.stdout.log")).unwrap();

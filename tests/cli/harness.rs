@@ -1,5 +1,6 @@
 use luthor::state::{journal, scheduling, task_records};
 use luthor::{
+    WorktreeOwner,
     config::{CommandTemplate, Config, Mapping, Marker, Source},
     eligibility::Candidate,
     state::StateStore,
@@ -198,15 +199,20 @@ impl Harness {
     }
     fn launch_worker(&self, store: &mut StateStore) {
         let plan = prepare_initial(store, "task", "running-attempt").unwrap();
-        execute_with_binary(store, &plan, Path::new(env!("CARGO_BIN_EXE_luthor"))).unwrap_or_else(
-            |error| {
-                panic!(
-                    "{error}: {}",
-                    fs::read_to_string(self.state.join("attempts/running-attempt.supervisor.log"))
-                        .unwrap_or_default()
-                )
-            },
-        );
+        let owner = WorktreeOwner::acquire(store.root(), &plan.task_id).unwrap();
+        execute_with_binary(
+            store,
+            &plan,
+            Path::new(env!("CARGO_BIN_EXE_luthor")),
+            &owner,
+        )
+        .unwrap_or_else(|error| {
+            panic!(
+                "{error}: {}",
+                fs::read_to_string(self.state.join("attempts/running-attempt.supervisor.log"))
+                    .unwrap_or_default()
+            )
+        });
         assert_eq!(scheduling::reservation_count(store).unwrap(), 1);
         let marker = self._dir.path().join("a-starts.log");
         let deadline = Instant::now() + Duration::from_secs(5);

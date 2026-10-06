@@ -9,7 +9,10 @@ use super::{
     receipt::finish_receipt,
 };
 #[cfg(unix)]
-use crate::model::{ExitReceipt, LaunchPlan};
+use crate::{
+    model::{ExitReceipt, LaunchPlan},
+    ownership::{WorktreeOwner, WorktreeOwnerInternal},
+};
 #[cfg(unix)]
 use std::{
     env,
@@ -27,8 +30,9 @@ pub fn run_gated_child<R: Read>(
     plan: &LaunchPlan,
     gate: R,
     store_root: &Path,
+    owner: &WorktreeOwner,
 ) -> Result<ExitStatus, SupervisorError> {
-    run_gated_child_with_binary(plan, gate, store_root, &env::current_exe()?)
+    run_gated_child_with_binary(plan, gate, store_root, &env::current_exe()?, owner)
 }
 
 #[cfg(unix)]
@@ -37,8 +41,17 @@ pub fn run_gated_child_with_binary<R: Read>(
     gate: R,
     store_root: &Path,
     binary: &Path,
+    owner: &WorktreeOwner,
 ) -> Result<ExitStatus, SupervisorError> {
-    run_gated_child_control(plan, gate, store_root, None, binary, |out, err| (out, err))
+    run_gated_child_control(
+        plan,
+        gate,
+        store_root,
+        None,
+        binary,
+        |out, err| (out, err),
+        owner,
+    )
 }
 
 /// Allows a controlled log writer to be injected without changing filesystem-wide behavior.
@@ -49,13 +62,14 @@ pub fn run_gated_child_with_log_writers<R, O, E>(
     store_root: &Path,
     binary: &Path,
     writers: impl FnOnce(File, File) -> (O, E),
+    owner: &WorktreeOwner,
 ) -> Result<ExitStatus, SupervisorError>
 where
     R: Read,
     O: Write + Send + 'static,
     E: Write + Send + 'static,
 {
-    run_gated_child_control(plan, gate, store_root, None, binary, writers)
+    run_gated_child_control(plan, gate, store_root, None, binary, writers, owner)
 }
 
 #[cfg(unix)]
@@ -66,6 +80,7 @@ pub(crate) fn run_gated_child_control<R, O, E>(
     control: Option<&UnixListener>,
     binary: &Path,
     writers: impl FnOnce(File, File) -> (O, E),
+    owner: &WorktreeOwner,
 ) -> Result<ExitStatus, SupervisorError>
 where
     R: Read,
@@ -76,7 +91,17 @@ where
         return Err(SupervisorError::Conflict);
     }
     let logs = LogCapture::open(store_root, plan)?;
-    let mut child = spawn_gated_worker(plan, store_root, binary, control.is_some())?;
+    let mut child = spawn_gated_worker(plan, store_root, binary, control.is_some(), owner)?;
+    if control.is_some() {
+        let root = store_root.parent().ok_or(SupervisorError::Conflict)?;
+        let db = rusqlite::Connection::open_with_flags(
+            root.join("state.sqlite3"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?;
+        owner
+            .verify_protocol(&db, root, &plan.task_id, &plan.attempt_id)
+            .map_err(|_| SupervisorError::Conflict)?;
+    }
     let (registered, _shim_gate) =
         release_registered_worker(&mut child, &mut gate, plan, store_root, control.is_some())?;
     let (stdout_path, stderr_path, drains) = logs.start(&mut child, writers);

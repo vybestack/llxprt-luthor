@@ -1,8 +1,9 @@
 use super::{error::SupervisorError, evidence::*, processes::*, terminal_exit};
-use crate::model::*;
+use crate::ownership::{OwnershipError, WorktreeOwner};
 use crate::state::StateStore;
 use crate::state::exits::reconcile_verified_exit as commit_exit;
 use crate::state::{exit_observation, journal, scheduling};
+use crate::{model::*, ownership::WorktreeOwnerInternal};
 use std::fs;
 
 /// Only an exact durable exit with a proven absent process group releases capacity.
@@ -12,7 +13,7 @@ pub fn reconcile_attempt(
     task_id: &str,
     attempt_id: &str,
 ) -> Result<Reconciliation, SupervisorError> {
-    reconcile_attempt_inner(store, task_id, attempt_id, None, false)
+    reconcile_attempt_inner(store, task_id, attempt_id, None, None, false)
 }
 
 #[cfg(unix)]
@@ -20,6 +21,7 @@ pub(crate) fn recheck_retry_exit(
     store: &mut StateStore,
     task_id: &str,
     attempt_id: &str,
+    owner: &WorktreeOwner,
     revalidate_terminal_exit: bool,
     proof: &mut Option<TerminalExitProof>,
 ) -> Result<Reconciliation, SupervisorError> {
@@ -27,6 +29,7 @@ pub(crate) fn recheck_retry_exit(
         store,
         task_id,
         attempt_id,
+        Some(owner),
         Some(proof),
         revalidate_terminal_exit,
     )
@@ -37,10 +40,10 @@ fn reconcile_attempt_inner(
     store: &mut StateStore,
     task_id: &str,
     attempt_id: &str,
+    borrowed_owner: Option<&WorktreeOwner>,
     terminal_exit: Option<&mut Option<TerminalExitProof>>,
     revalidate_terminal_exit: bool,
 ) -> Result<Reconciliation, SupervisorError> {
-    let recheck_processes = terminal_exit.is_some();
     if !valid_attempt(attempt_id) {
         return Err(SupervisorError::Conflict);
     }
@@ -51,19 +54,109 @@ fn reconcile_attempt_inner(
         Ok(context) => context,
         Err(reason) => return Ok(held(reason)),
     };
+    let owned_owner = if borrowed_owner.is_none() {
+        Some(
+            match WorktreeOwner::acquire_existing(store.root(), task_id) {
+                Ok(owner) => owner,
+                Err(OwnershipError::Busy) => {
+                    return owner_busy_reconciliation(store, task_id, attempt_id, &attempts);
+                }
+                Err(OwnershipError::Unavailable) => return Ok(held("worktree owner unavailable")),
+            },
+        )
+    } else {
+        None
+    };
+    let owner = borrowed_owner
+        .or(owned_owner.as_ref())
+        .expect("owner acquired or borrowed");
+    if owner
+        .verify_protocol(&store.connection, store.root(), task_id, attempt_id)
+        .is_err()
+    {
+        return Ok(held("worktree owner protocol unverified"));
+    }
     let processes = match reconciliation_process_evidence(store, task_id, attempt_id, &attempts)? {
         Ok(processes) => processes,
         Err(reason) => return Ok(held(reason)),
+    };
+    reconcile_receipt(
+        store,
+        task_id,
+        attempt_id,
+        ReceiptReconciliationContext {
+            attempts: &attempts,
+            plan: &plan,
+            processes: &processes,
+            owner,
+            terminal_exit,
+            revalidate_terminal_exit,
+        },
+    )
+}
+#[cfg(unix)]
+fn owner_busy_reconciliation(
+    store: &StateStore,
+    task_id: &str,
+    attempt_id: &str,
+    attempts: &std::path::Path,
+) -> Result<Reconciliation, SupervisorError> {
+    let held = |reason: &str| Reconciliation::Held {
+        reason: reason.into(),
+    };
+    if attempts.join(format!("{attempt_id}.receipt.json")).exists() {
+        return Ok(held("worktree owner is busy; operator recovery required"));
+    }
+    let process_evidence =
+        match reconciliation_process_evidence(store, task_id, attempt_id, attempts)? {
+            Ok(processes) => processes,
+            Err(reason) => return Ok(held(reason)),
+        };
+    match live_reconciliation(store, task_id, attempt_id, attempts, &process_evidence) {
+        Ok(Reconciliation::Running) => Ok(Reconciliation::Running),
+        Ok(_) => Ok(held("worktree owner is busy; operator recovery required")),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(unix)]
+struct ReceiptReconciliationContext<'a> {
+    attempts: &'a std::path::Path,
+    plan: &'a LaunchPlan,
+    processes: &'a ReconciliationProcesses,
+    owner: &'a WorktreeOwner,
+    terminal_exit: Option<&'a mut Option<TerminalExitProof>>,
+    revalidate_terminal_exit: bool,
+}
+
+#[cfg(unix)]
+fn reconcile_receipt(
+    store: &mut StateStore,
+    task_id: &str,
+    attempt_id: &str,
+    context: ReceiptReconciliationContext<'_>,
+) -> Result<Reconciliation, SupervisorError> {
+    let ReceiptReconciliationContext {
+        attempts,
+        plan,
+        processes,
+        owner,
+        terminal_exit,
+        revalidate_terminal_exit,
+    } = context;
+    let recheck_processes = terminal_exit.is_some();
+    let held = |reason: &str| Reconciliation::Held {
+        reason: reason.into(),
     };
     let ReconciliationProcesses {
         child: child_file,
         supervisor,
         tracked,
         sent: _,
-    } = &processes;
+    } = processes;
     let receipt_path = attempts.join(format!("{attempt_id}.receipt.json"));
     if !receipt_path.exists() {
-        return live_reconciliation(store, task_id, attempt_id, &attempts, &processes);
+        return live_reconciliation(store, task_id, attempt_id, attempts, processes);
     }
     if recheck_processes
         && !matches!(fs::symlink_metadata(attempts.join(format!("{attempt_id}.supervisor-error.json"))),
@@ -71,7 +164,7 @@ fn reconcile_attempt_inner(
     {
         return Ok(held("supervisor error receipt exists"));
     }
-    let receipt = match validated_receipt(&attempts, attempt_id, child_file) {
+    let receipt = match validated_receipt(attempts, attempt_id, child_file) {
         Ok(receipt) => receipt,
         Err(reason) => return Ok(held(reason)),
     };
@@ -88,7 +181,7 @@ fn reconcile_attempt_inner(
         if !exit_observation::reconciled_exit(store, task_id, attempt_id, &evidence, &outcome)? {
             return Ok(held("terminal exit is not durably reconciled"));
         }
-        match terminal_exit::prove(store, &plan, &receipt, child_file, supervisor, tracked) {
+        match terminal_exit::prove(store, plan, &receipt, child_file, supervisor, tracked) {
             Ok(proof) => {
                 *terminal_exit.expect("retry inspection owns proof output") = Some(proof);
                 return Ok(completed);
@@ -104,12 +197,36 @@ fn reconcile_attempt_inner(
     if let Err(reason) = receipt_process_quiescence(&receipt, supervisor, tracked)? {
         return Ok(held(reason));
     }
+    commit_reconciled_receipt(
+        store, task_id, attempt_id, owner, &evidence, &outcome, completed,
+    )
+}
+
+#[cfg(unix)]
+fn commit_reconciled_receipt(
+    store: &mut StateStore,
+    task_id: &str,
+    attempt_id: &str,
+    owner: &WorktreeOwner,
+    evidence: &str,
+    outcome: &str,
+    completed: Reconciliation,
+) -> Result<Reconciliation, SupervisorError> {
+    let held = |reason: &str| Reconciliation::Held {
+        reason: reason.into(),
+    };
+    if owner
+        .verify_protocol(&store.connection, store.root(), task_id, attempt_id)
+        .is_err()
+    {
+        return Ok(held("worktree owner protocol unverified"));
+    }
     commit_exit(
         &mut store.connection,
         task_id,
         attempt_id,
-        &evidence,
-        &outcome,
+        evidence,
+        outcome,
     )?;
     Ok(completed)
 }
@@ -119,6 +236,7 @@ pub(crate) fn recheck_retry_exit(
     _store: &mut StateStore,
     _task_id: &str,
     _attempt_id: &str,
+    _owner: &WorktreeOwner,
     _revalidate_terminal_exit: bool,
     _proof: &mut Option<TerminalExitProof>,
 ) -> Result<Reconciliation, SupervisorError> {

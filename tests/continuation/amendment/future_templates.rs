@@ -124,7 +124,12 @@ fn future_template_dual_correction_has_distinct_version_and_preserves_original_e
     let proof = lane
         .f
         .store
-        .begin_amended_supervision(&context, &lane.f.config, "corrected-revision")
+        .begin_amended_supervision(
+            &context,
+            &lane.f.config,
+            "corrected-revision",
+            &crate::continuation::owner_protocol(&lane, &context),
+        )
         .unwrap();
     verify_amended_worker_plan(&database(&lane), lane.f.store.root(), &proof.effective_plan)
         .unwrap();

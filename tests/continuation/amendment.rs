@@ -13,6 +13,16 @@ use luthor::state::{
 };
 use rusqlite::{Connection, params};
 
+pub(super) fn owner_protocol(
+    lane: &Lane,
+    context: &luthor::state::NeverDispatchedContext,
+) -> luthor::WorktreeOwnerProtocol {
+    let owner = luthor::WorktreeOwner::acquire(lane.f.store.root(), context.task_id()).unwrap();
+    owner
+        .protocol_evidence(lane.f.store.root(), context.task_id(), context.attempt_id())
+        .unwrap()
+}
+
 pub(super) fn fixture() -> Lane {
     let mut lane = Lane::new();
     lane.f.config.initial.executable = "/native/llxprt-code-rs".into();
@@ -122,12 +132,17 @@ fn amendment_exact_deletion_is_append_only_durable_and_single_use() {
             .is_err()
     );
     assert!(amend(&mut lane).is_err());
+    let owner = luthor::WorktreeOwner::acquire(lane.f.store.root(), "task-a").unwrap();
+    let proof = owner
+        .protocol_evidence(lane.f.store.root(), "task-a", "attempt-task-a")
+        .unwrap();
     assert!(
         launches::begin_supervision(
             &mut lane.f.store,
             "task-a",
             "attempt-task-a",
-            &serde_json::to_string(&effective).unwrap()
+            &serde_json::to_string(&effective).unwrap(),
+            &proof
         )
         .is_err()
     );
@@ -285,25 +300,62 @@ fn amendment_dispatch_proof_binds_effective_plan_and_audit_sequence() {
         .unwrap();
     let db = database(&lane);
     assert!(verify_amended_worker_plan(&db, lane.f.store.root(), &proof.effective_plan).is_err());
+    assert_dispatch_commits_proof(&mut lane, &context, &proof, &db);
+    assert_corrupt_dispatch_proofs_rejected(&lane, &context, &proof, &db);
+    let _: AmendedDispatchProof = proof;
+}
+
+fn assert_dispatch_commits_proof(
+    lane: &mut Lane,
+    context: &luthor::state::NeverDispatchedContext,
+    proof: &AmendedDispatchProof,
+    db: &Connection,
+) {
     let committed = lane
         .f
         .store
-        .begin_amended_supervision(&context, &lane.f.config, "corrected-revision")
+        .begin_amended_supervision(
+            context,
+            &lane.f.config,
+            "corrected-revision",
+            &crate::continuation::owner_protocol(lane, context),
+        )
         .unwrap();
-    assert_eq!(committed, proof);
+    assert_eq!(committed, proof.clone());
+    let owner_proofs: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM evidence WHERE task_id='task-a' AND attempt_id='attempt-task-a' AND kind='worktree_owner_protocol'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(owner_proofs, 1);
     assert!(
         lane.f
             .store
-            .begin_amended_supervision(&context, &lane.f.config, "corrected-revision")
+            .begin_amended_supervision(
+                context,
+                &lane.f.config,
+                "corrected-revision",
+                &crate::continuation::owner_protocol(lane, context)
+            )
             .is_err()
     );
-    verify_amended_worker_plan(&db, lane.f.store.root(), &proof.effective_plan).unwrap();
+    verify_amended_worker_plan(db, lane.f.store.root(), &proof.effective_plan).unwrap();
     assert!(
         lane.f
             .store
             .never_dispatched_context("task-a", "attempt-task-a")
             .is_err()
     );
+}
+
+fn assert_corrupt_dispatch_proofs_rejected(
+    lane: &Lane,
+    context: &luthor::state::NeverDispatchedContext,
+    proof: &AmendedDispatchProof,
+    db: &Connection,
+) {
     for kind in ["missing", "sequence", "original", "duplicate", "extra"] {
         let mut corrupt = proof.clone();
         match kind {
@@ -330,7 +382,7 @@ fn amendment_dispatch_proof_binds_effective_plan_and_audit_sequence() {
         )
         .unwrap();
         assert!(
-            verify_amended_worker_plan(&db, lane.f.store.root(), &proof.effective_plan).is_err(),
+            verify_amended_worker_plan(db, lane.f.store.root(), &proof.effective_plan).is_err(),
             "{kind}"
         );
         db.execute("DELETE FROM intents WHERE id='second'", [])
@@ -341,7 +393,6 @@ fn amendment_dispatch_proof_binds_effective_plan_and_audit_sequence() {
             db.execute("INSERT INTO evidence(sequence,task_id,attempt_id,kind,payload) VALUES(?1,'task-a','attempt-task-a','initial_branch_removed',?2)", params![proof.amendment_sequence, serde_json::to_string(context.amendment().unwrap()).unwrap()]).unwrap();
         }
     }
-    let _: AmendedDispatchProof = proof;
 }
 
 fn evidence_rows(db: &Connection) -> Vec<String> {

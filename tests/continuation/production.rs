@@ -12,7 +12,12 @@ struct ProductionProbe {
     missing_binary: PathBuf,
 }
 impl SupervisorLauncher for ProductionProbe {
-    fn launch(&mut self, store: &mut StateStore, plan: &LaunchPlan) -> Result<(), SupervisorError> {
+    fn launch(
+        &mut self,
+        store: &mut StateStore,
+        plan: &LaunchPlan,
+        owner: &luthor::WorktreeOwner,
+    ) -> Result<(), SupervisorError> {
         assert_eq!(
             journal::evidence_payloads(
                 store,
@@ -24,7 +29,7 @@ impl SupervisorLauncher for ProductionProbe {
             .len(),
             1
         );
-        let result = supervisor::execute_with_binary(store, plan, &self.missing_binary);
+        let result = supervisor::execute_with_binary(store, plan, &self.missing_binary, owner);
         assert!(
             matches!(result, Err(SupervisorError::Io(_))),
             "saved JSON must reach the missing-binary spawn, not fail the dispatch identity gate"

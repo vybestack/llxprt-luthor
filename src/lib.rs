@@ -21,3 +21,7 @@ mod worker_instructions;
 
 mod cli_identifiers;
 mod launch_command;
+#[cfg(unix)]
+mod ownership;
+#[cfg(unix)]
+pub use ownership::{OwnershipError, WorktreeOwner, WorktreeOwnerProtocol};

@@ -53,6 +53,7 @@ fn seed_saved_attempt(config: &Config, task: &str, attempt: &str) -> LaunchPlan 
     };
     let mut store = StateStore::open(&config.state_root, 1).unwrap();
     task_records::create_task(&mut store, task, &candidate, "saved-revision", config).unwrap();
+    drop(luthor::WorktreeOwner::acquire(&config.state_root, task).unwrap());
     task_records::record_claim_intent(&mut store, task, "acoliver", "org/tracker", 7).unwrap();
     journal::record_evidence(&mut store, task, None, "claim_verified", "acoliver").unwrap();
     task_records::set_task_phase(&mut store, task, "claimed").unwrap();

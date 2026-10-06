@@ -1,4 +1,5 @@
 use super::*;
+use luthor::WorktreeOwner;
 use luthor::state::{exit_observation, task_records};
 
 #[cfg(unix)]
@@ -26,7 +27,15 @@ esac
 "#,
     )
     .unwrap();
-    execute_with_binary(&mut store, &first, Path::new(env!("CARGO_BIN_EXE_luthor"))).unwrap();
+    let owner = WorktreeOwner::acquire(store.root(), &first.task_id).unwrap();
+    execute_with_binary(
+        &mut store,
+        &first,
+        Path::new(env!("CARGO_BIN_EXE_luthor")),
+        &owner,
+    )
+    .unwrap();
+    drop(owner);
     let stdout = config.state_root.join("attempts/attempt-real.stdout.log");
     for _ in 0..200 {
         if fs::read_to_string(&stdout).is_ok_and(|s| s.contains("committed-and-running")) {
@@ -78,7 +87,15 @@ fn assert_committed_resume(config: &Config, first: &luthor::supervisor::LaunchPl
         Some("attempt-next")
     );
     assert_ne!(next.expected_worktree.head, first.expected_worktree.head);
-    execute_with_binary(&mut store, &next, Path::new(env!("CARGO_BIN_EXE_luthor"))).unwrap();
+    let owner = WorktreeOwner::acquire(store.root(), &next.task_id).unwrap();
+    execute_with_binary(
+        &mut store,
+        &next,
+        Path::new(env!("CARGO_BIN_EXE_luthor")),
+        &owner,
+    )
+    .unwrap();
+    drop(owner);
     let receipt = config.state_root.join("attempts/attempt-next.receipt.json");
     for _ in 0..200 {
         if receipt.exists() {

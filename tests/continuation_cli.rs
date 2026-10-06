@@ -331,3 +331,44 @@ fn continuation_cli_changed_claim_retains_attempt_slot() {
     assert!(!calls.contains("pulls?"));
     assert!(!calls.contains(" -X "));
 }
+
+#[test]
+fn continuation_cli_refuses_missing_or_busy_worktree_owner_before_remote_reads() {
+    for hold_owner_fd in [false, true] {
+        let f = Fixture::new();
+        f.correct_storage();
+        let owner_path = f
+            .config
+            .state_root
+            .join(format!("worktree-{}.lock", f.task));
+        let owner = if hold_owner_fd {
+            Some(luthor::WorktreeOwner::acquire_existing(&f.config.state_root, &f.task).unwrap())
+        } else {
+            fs::remove_file(&owner_path).unwrap();
+            None
+        };
+        let before = f.rows(&["tasks", "attempts", "reservations", "intents"]);
+        let out = f.run(&f.args());
+        assert!(!out.status.success());
+        let value: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(value["status"], "held");
+        assert_eq!(value["reason"], "launch_failed");
+        assert_eq!(
+            f.rows(&["tasks", "attempts", "reservations", "intents"]),
+            before
+        );
+        assert_eq!(f.count("evidence", "never_dispatched_authorized"), 0);
+        assert_eq!(f.count("intents", "supervisor_dispatch"), 0);
+        assert!(fs::read(&f.calls).unwrap().is_empty());
+        assert!(!f.marker.exists());
+        if hold_owner_fd {
+            assert!(owner_path.exists());
+        } else {
+            assert!(
+                !owner_path.exists(),
+                "refusal must not recreate missing owner file"
+            );
+        }
+        drop(owner);
+    }
+}

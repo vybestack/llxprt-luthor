@@ -1,11 +1,19 @@
 use super::*;
+use luthor::WorktreeOwner;
 use luthor::state::scheduling;
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 
 fn completed_worker(dir: &tempfile::TempDir) -> (Config, StateStore) {
     let (config, mut store, plan, marker) = prepared_fake_worker(dir);
-    execute_with_binary(&mut store, &plan, Path::new(env!("CARGO_BIN_EXE_luthor"))).unwrap();
+    let owner = WorktreeOwner::acquire(store.root(), &plan.task_id).unwrap();
+    execute_with_binary(
+        &mut store,
+        &plan,
+        Path::new(env!("CARGO_BIN_EXE_luthor")),
+        &owner,
+    )
+    .unwrap();
     let receipt = receipt_path(&config);
     let deadline = Instant::now() + Duration::from_secs(10);
     while !marker.exists() || !receipt.exists() {

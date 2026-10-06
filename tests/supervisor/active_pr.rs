@@ -1,4 +1,5 @@
 use super::*;
+use luthor::WorktreeOwner;
 use luthor::state::journal::{evidence_kinds, stop_intent};
 use luthor::state::scheduling::{ensure_dispatch_capacity, reservation_count};
 use luthor::state::task_records::{selection_evidence, task_phase};
@@ -11,7 +12,15 @@ pub(crate) fn live_running_lost_claim_requests_stop_and_holds_reservation_until_
     fs::write(&plan.executable, "#!/bin/sh\nexec /bin/sleep 15\n").unwrap();
     let child_path = config.state_root.join("attempts/attempt-real.child.json");
     let _guard = FixtureGroupGuard(child_path);
-    execute_with_binary(&mut store, &plan, Path::new(env!("CARGO_BIN_EXE_luthor"))).unwrap();
+    let owner = WorktreeOwner::acquire(store.root(), &plan.task_id).unwrap();
+    execute_with_binary(
+        &mut store,
+        &plan,
+        Path::new(env!("CARGO_BIN_EXE_luthor")),
+        &owner,
+    )
+    .unwrap();
+    drop(owner);
 
     assert_eq!(
         reconcile_attempt(&mut store, "task", "attempt-real").unwrap(),
@@ -73,13 +82,25 @@ pub(crate) fn live_running_lost_claim_requests_stop_and_holds_reservation_until_
 }
 
 #[cfg(unix)]
+fn launch_active_pr_worker(
+    config: &Config,
+    store: &mut StateStore,
+    plan: &luthor::supervisor::LaunchPlan,
+) -> FixtureGroupGuard {
+    let child_path = config.state_root.join("attempts/attempt-real.child.json");
+    let guard = FixtureGroupGuard(child_path);
+    let owner = WorktreeOwner::acquire(store.root(), &plan.task_id).unwrap();
+    execute_with_binary(store, plan, Path::new(env!("CARGO_BIN_EXE_luthor")), &owner).unwrap();
+    drop(owner);
+    guard
+}
+
+#[cfg(unix)]
 pub(crate) fn live_matching_pr_requests_stop_but_waits_for_exit_and_independent_rechecks() {
     let dir = tempfile::tempdir().unwrap();
     let (config, mut store, plan, _) = prepared_fake_worker(&dir);
     fs::write(&plan.executable, "#!/bin/sh\nexec /bin/sleep 15\n").unwrap();
-    let child_path = config.state_root.join("attempts/attempt-real.child.json");
-    let _guard = FixtureGroupGuard(child_path);
-    execute_with_binary(&mut store, &plan, Path::new(env!("CARGO_BIN_EXE_luthor"))).unwrap();
+    let _worker_guard = launch_active_pr_worker(&config, &mut store, &plan);
 
     assert_eq!(
         reconcile_attempt(&mut store, "task", "attempt-real").unwrap(),

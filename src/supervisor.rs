@@ -45,6 +45,7 @@ pub(crate) use processes::{identity, private_bytes, verified_live_process};
 pub(crate) use reconciliation::recheck_retry_exit;
 pub use reconciliation::reconcile_attempt;
 pub use recovery::inspect_recovery_quiescence;
+pub(crate) use recovery::inspect_recovery_quiescence_with_owner;
 pub use runner::run_gated_child;
 #[cfg(unix)]
 pub use runner::{run_gated_child_with_binary, run_gated_child_with_log_writers};

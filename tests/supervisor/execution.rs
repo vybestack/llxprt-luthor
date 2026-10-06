@@ -1,4 +1,5 @@
 use super::*;
+use luthor::WorktreeOwner;
 use luthor::state::{journal, scheduling};
 
 #[cfg(unix)]
@@ -113,7 +114,14 @@ pub(crate) fn dispatched_fixture(code: i32) -> (tempfile::TempDir, Config, State
         )
         .unwrap();
     }
-    execute_with_binary(&mut store, &plan, Path::new(env!("CARGO_BIN_EXE_luthor"))).unwrap();
+    let owner = WorktreeOwner::acquire(store.root(), &plan.task_id).unwrap();
+    execute_with_binary(
+        &mut store,
+        &plan,
+        Path::new(env!("CARGO_BIN_EXE_luthor")),
+        &owner,
+    )
+    .unwrap();
     let receipt = config.state_root.join("attempts/attempt-real.receipt.json");
     for _ in 0..200 {
         if receipt.exists() {
@@ -181,7 +189,14 @@ pub(crate) fn running_worker(script: &str) -> (tempfile::TempDir, Config, StateS
     let dir = tempfile::tempdir().unwrap();
     let (config, mut store, plan, _) = prepared_fake_worker(&dir);
     fs::write(&plan.executable, script).unwrap();
-    execute_with_binary(&mut store, &plan, Path::new(env!("CARGO_BIN_EXE_luthor"))).unwrap();
+    let owner = WorktreeOwner::acquire(store.root(), &plan.task_id).unwrap();
+    execute_with_binary(
+        &mut store,
+        &plan,
+        Path::new(env!("CARGO_BIN_EXE_luthor")),
+        &owner,
+    )
+    .unwrap();
     let started = config.state_root.join("attempts/attempt-real.stdout.log");
     for _ in 0..200 {
         if fs::read_to_string(&started).is_ok_and(|output| output.contains("started")) {

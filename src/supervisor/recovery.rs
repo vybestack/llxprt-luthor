@@ -1,7 +1,8 @@
 use super::{error::SupervisorError, evidence::*, processes::*};
-use crate::model::*;
 use crate::state::{journal, scheduling, task_records, worktree_records};
+use crate::{model::*, ownership::WorktreeOwner};
 use crate::{
+    ownership::WorktreeOwnerInternal,
     state::{StateStore, WorktreeIdentity},
     worktree,
 };
@@ -15,6 +16,26 @@ pub fn inspect_recovery_quiescence(
     store: &StateStore,
     task_id: &str,
     attempt_id: &str,
+) -> Result<RecoveryInspection, SupervisorError> {
+    let owner = match WorktreeOwner::acquire_existing(store.root(), task_id) {
+        Ok(owner) => owner,
+        Err(crate::ownership::OwnershipError::Busy) => {
+            return Ok(RecoveryInspection::Held("worktree owner is live"));
+        }
+        Err(crate::ownership::OwnershipError::Unavailable) => {
+            return Ok(RecoveryInspection::Held(
+                "worktree ownership cannot be proved",
+            ));
+        }
+    };
+    inspect_recovery_quiescence_with_owner(store, task_id, attempt_id, &owner)
+}
+
+pub(crate) fn inspect_recovery_quiescence_with_owner(
+    store: &StateStore,
+    task_id: &str,
+    attempt_id: &str,
+    owner: &WorktreeOwner,
 ) -> Result<RecoveryInspection, SupervisorError> {
     if !valid_attempt(attempt_id) {
         return Err(SupervisorError::Conflict);
@@ -64,7 +85,15 @@ pub fn inspect_recovery_quiescence(
     {
         return held("supervisor error receipt exists");
     }
-    recovery_process_quiescence(store, task_id, attempt_id, &attempts, &child_file, &plan)
+    recovery_process_quiescence(
+        store,
+        task_id,
+        attempt_id,
+        &attempts,
+        &child_file,
+        &plan,
+        owner,
+    )
 }
 
 #[cfg(unix)]
@@ -135,6 +164,7 @@ fn recovery_process_quiescence(
     attempts: &Path,
     child_file: &ChildIdentity,
     plan: &LaunchPlan,
+    owner: &WorktreeOwner,
 ) -> Result<RecoveryInspection, SupervisorError> {
     let receipt_path = attempts.join(format!("{attempt_id}.receipt.json"));
     let held = |reason| Ok(RecoveryInspection::Held(reason));
@@ -188,6 +218,7 @@ fn recovery_process_quiescence(
             tracked: &tracked,
             supervisor: &supervisor,
         },
+        owner,
     )
 }
 
@@ -198,6 +229,7 @@ fn recovery_evidence_unchanged(
     attempt_id: &str,
     attempts: &Path,
     snapshot: RecoverySnapshot<'_>,
+    owner: &WorktreeOwner,
 ) -> Result<RecoveryInspection, SupervisorError> {
     let RecoverySnapshot {
         plan,
@@ -248,6 +280,12 @@ fn recovery_evidence_unchanged(
         || !registered_processes_absent(&current_child, supervisor, &current_tracked)
     {
         return held("registered process absence proof changed during inspection");
+    }
+    if owner
+        .verify_protocol(&store.connection, store.root(), task_id, attempt_id)
+        .is_err()
+    {
+        return held("worktree ownership proof is missing or invalid");
     }
     Ok(RecoveryInspection::Quiescent)
 }

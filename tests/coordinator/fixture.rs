@@ -87,6 +87,23 @@ impl Fixture {
         )
         .unwrap();
         let attempt = "attempt-task-a";
+        let launch_detail = luthor::state::launches::launch_intent(&self.store, attempt)
+            .unwrap()
+            .unwrap();
+        let owner =
+            luthor::WorktreeOwner::acquire_existing(&self.config.state_root, "task-a").unwrap();
+        let protocol = owner
+            .protocol_evidence(&self.config.state_root, "task-a", attempt)
+            .unwrap();
+        luthor::state::launches::begin_supervision(
+            &mut self.store,
+            "task-a",
+            attempt,
+            &launch_detail,
+            &protocol,
+        )
+        .unwrap();
+        drop(owner);
         journal::record_stop_intent(&mut self.store, "task-a", attempt).unwrap();
         // Seed the already-reconciled exit. The supervisor integration tests cover
         // receipt and process verification; this fixture exercises the coordinator gate.

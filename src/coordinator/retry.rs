@@ -7,6 +7,7 @@ use crate::{
         project::ProjectReader,
         pull_request::{LookupResult, PullRequestReader, lookup},
     },
+    ownership::WorktreeOwnerInternal,
     state::{ExitPrEvidence, PausePrStatus, StateError, StateStore},
     supervisor::{self, LaunchPlan, SupervisorError},
     worktree,
@@ -58,19 +59,24 @@ pub fn retry_one<P: ProjectReader, Q: PullRequestReader, L: SupervisorLauncher>(
     )?;
     supervisor::validate_stop_socket_path(store.root(), attempt_id)?;
     scheduling::ensure_dispatch_capacity(store)?;
+    let ownership = crate::ownership::WorktreeOwner::acquire_existing(store.root(), task_id)
+        .map_err(|_| SupervisorError::Conflict)?;
+    ownership
+        .verify_protocol(
+            &store.connection,
+            store.root(),
+            task_id,
+            previous_attempt_id,
+        )
+        .map_err(|_| SupervisorError::Conflict)?;
     let terminal_exit = verified_retry_exit(
         store,
         task_id,
         previous_attempt_id,
+        &ownership,
         revalidate_terminal_exit,
     )?;
-    let claim =
-        task_records::source_claim_intent(store, task_id)?.ok_or(DispatchError::ChangedClaim)?;
-    let expected = serde_json::json!({"principal": config.assignment_login,
-        "repository": selection.candidate.repository, "number": selection.candidate.issue_number});
-    if serde_json::from_str::<serde_json::Value>(&claim).ok() != Some(expected) {
-        return Err(DispatchError::ChangedClaim);
-    }
+    let claim = verified_retry_claim(store, task_id, config, &selection)?;
     let (item, issue) = claim::fresh(projects, &selection.candidate)?;
     if issue.assignees != [config.assignment_login.as_str()] {
         return Err(DispatchError::ChangedClaim);
@@ -97,8 +103,24 @@ pub fn retry_one<P: ProjectReader, Q: PullRequestReader, L: SupervisorLauncher>(
             terminal_exit,
         },
     )?;
-    launcher.launch(store, &plan)?;
+    launcher.launch(store, &plan, &ownership)?;
     Ok(plan)
+}
+
+fn verified_retry_claim(
+    store: &StateStore,
+    task_id: &str,
+    config: &Config,
+    selection: &crate::model::SelectionEvidence,
+) -> Result<String, DispatchError> {
+    let claim =
+        task_records::source_claim_intent(store, task_id)?.ok_or(DispatchError::ChangedClaim)?;
+    let expected = serde_json::json!({"principal": config.assignment_login,
+        "repository": selection.candidate.repository, "number": selection.candidate.issue_number});
+    if serde_json::from_str::<serde_json::Value>(&claim).ok() != Some(expected) {
+        return Err(DispatchError::ChangedClaim);
+    }
+    Ok(claim)
 }
 
 fn validate_retry_config(
@@ -165,6 +187,7 @@ fn verified_retry_exit(
     store: &mut StateStore,
     task_id: &str,
     previous_attempt_id: &str,
+    owner: &crate::ownership::WorktreeOwner,
     revalidate_terminal_exit: bool,
 ) -> Result<Option<crate::model::TerminalExitProof>, DispatchError> {
     let mut terminal_exit = None;
@@ -172,6 +195,7 @@ fn verified_retry_exit(
         store,
         task_id,
         previous_attempt_id,
+        owner,
         revalidate_terminal_exit,
         &mut terminal_exit,
     )? {

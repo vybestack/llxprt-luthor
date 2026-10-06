@@ -1,11 +1,20 @@
 use super::*;
+use luthor::WorktreeOwner;
 use luthor::state::{journal, scheduling};
 
 #[cfg(unix)]
 pub(crate) fn detached_same_binary_dispatch_records_gate_and_worker_receipt() {
     let dir = tempfile::tempdir().unwrap();
     let (config, mut store, plan, marker) = prepared_fake_worker(&dir);
-    execute_with_binary(&mut store, &plan, Path::new(env!("CARGO_BIN_EXE_luthor"))).unwrap();
+    let ownership = WorktreeOwner::acquire(store.root(), &plan.task_id).unwrap();
+    execute_with_binary(
+        &mut store,
+        &plan,
+        Path::new(env!("CARGO_BIN_EXE_luthor")),
+        &ownership,
+    )
+    .unwrap();
+    drop(ownership);
     let receipt = config.state_root.join("attempts/attempt-real.receipt.json");
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
@@ -50,7 +59,14 @@ pub(crate) fn detached_same_binary_dispatch_records_gate_and_worker_receipt() {
     let kinds = journal::evidence_kinds(&store, "task").unwrap();
     assert!(kinds.contains(&"supervisor_ready".into()));
     assert!(kinds.contains(&"gate_sent".into()));
+    let ownership = WorktreeOwner::acquire(store.root(), &plan.task_id).unwrap();
     assert!(
-        execute_with_binary(&mut store, &plan, Path::new(env!("CARGO_BIN_EXE_luthor"))).is_err()
+        execute_with_binary(
+            &mut store,
+            &plan,
+            Path::new(env!("CARGO_BIN_EXE_luthor")),
+            &ownership
+        )
+        .is_err()
     );
 }

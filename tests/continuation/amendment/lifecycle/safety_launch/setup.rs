@@ -1,3 +1,4 @@
+use luthor::WorktreeOwner;
 use luthor::state::launches;
 pub(super) mod script;
 use super::super::{Lane, database, executable_lane};
@@ -41,14 +42,30 @@ pub(super) fn commit(lane: &mut Lane, amended: bool) -> LaunchPlan {
             .unwrap();
         lane.f
             .store
-            .begin_amended_supervision(&context, &lane.f.config, "corrected-revision")
+            .begin_amended_supervision(
+                &context,
+                &lane.f.config,
+                "corrected-revision",
+                &crate::continuation::owner_protocol(lane, &context),
+            )
             .unwrap()
             .effective_plan
     } else {
         let saved = launches::launch_intent(&lane.f.store, "attempt-task-a")
             .unwrap()
             .unwrap();
-        launches::begin_supervision(&mut lane.f.store, "task-a", "attempt-task-a", &saved).unwrap();
+        let owner = WorktreeOwner::acquire(lane.f.store.root(), "task-a").unwrap();
+        let proof = owner
+            .protocol_evidence(lane.f.store.root(), "task-a", "attempt-task-a")
+            .unwrap();
+        launches::begin_supervision(
+            &mut lane.f.store,
+            "task-a",
+            "attempt-task-a",
+            &saved,
+            &proof,
+        )
+        .unwrap();
         lane.plan.clone()
     }
 }
@@ -61,7 +78,8 @@ pub(super) fn launch(
     if amended {
         super::super::launch(lane, binary)
     } else {
-        supervisor::execute_with_binary(&mut lane.f.store, &lane.plan, binary)
+        let owner = WorktreeOwner::acquire(lane.f.store.root(), &lane.plan.task_id).unwrap();
+        supervisor::execute_with_binary(&mut lane.f.store, &lane.plan, binary, &owner)
     }
 }
 

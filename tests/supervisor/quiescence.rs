@@ -1,5 +1,8 @@
 use super::*;
-use luthor::state::{journal, scheduling};
+use luthor::{
+    WorktreeOwner,
+    state::{journal, scheduling},
+};
 
 #[cfg(unix)]
 pub(crate) fn reaped_supervisor_with_removed_receipt_proves_recovery_quiescence() {
@@ -40,12 +43,15 @@ pub(crate) fn resumed_missing_receipt_accepts_attempt_snapshot_descending_from_o
         resumed.expected_worktree.head,
         initial.expected_worktree.head
     );
+    let owner = WorktreeOwner::acquire(store.root(), &resumed.task_id).unwrap();
     execute_with_binary(
         &mut store,
         &resumed,
         Path::new(env!("CARGO_BIN_EXE_luthor")),
+        &owner,
     )
     .unwrap();
+    drop(owner);
     let receipt = config.state_root.join("attempts/attempt-next.receipt.json");
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline && !receipt.exists() {

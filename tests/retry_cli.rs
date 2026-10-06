@@ -1,4 +1,5 @@
 #![cfg(unix)]
+mod worker_exit;
 use luthor::state::journal::evidence_payloads;
 use luthor::state::launches::launch_intent;
 use luthor::state::task_records::{selection_evidence, task_phase};
@@ -256,14 +257,7 @@ fn dispatch_and_capture(fixture: &CliFixture, historical: bool) -> ExistingAttem
     let task = dispatched["task_id"].as_str().unwrap();
     let previous = dispatched["attempt_id"].as_str().unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
-    while !config
-        .state_root
-        .join(format!("attempts/{previous}.receipt.json"))
-        .exists()
-    {
-        assert!(Instant::now() < deadline);
-        thread::sleep(Duration::from_millis(20));
-    }
+    worker_exit::await_dispatched_worker_exit(config, task, previous);
     let out = run(config_path, path, "reconcile", &[task]);
     assert!(
         out.status.success(),

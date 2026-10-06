@@ -1,4 +1,5 @@
 use super::*;
+use luthor::WorktreeOwner;
 use luthor::state::journal::evidence_payloads;
 use luthor::state::launches::launch_intent;
 use luthor::state::scheduling::reservation_count;
@@ -20,19 +21,7 @@ pub(crate) fn retry_natural_exit_audits_current_argv_preserves_history_and_recon
     let mut projects = OtherProject(original.candidate.clone(), 1);
     let mut launcher = OtherLauncher::default();
     let plan = retry(&mut store, &config, &mut projects, &mut prs, &mut launcher).unwrap();
-    assert_eq!(launcher.0, 1);
-    assert_eq!(
-        prs.reads, 1,
-        "cached PR absence must not authorize continuation"
-    );
-    assert_eq!(plan.config_revision, "corrected");
-    assert_eq!(plan.session_id, "task");
-    assert_eq!(plan.expected_worktree.branch, "luthor/task");
-    assert!(
-        plan.args
-            .windows(2)
-            .any(|pair| pair == ["--max-tool-calls", "512"])
-    );
+    assert_retry_uses_corrected_plan(&plan, &launcher, &prs);
     let prompt = plan.args.windows(2).find(|p| p[0] == "--prompt").unwrap()[1].as_str();
     assert!(prompt.contains("naturally exited worker"));
     assert!(!prompt.contains("interrupted or canceled turn"));
@@ -49,7 +38,15 @@ pub(crate) fn retry_natural_exit_audits_current_argv_preserves_history_and_recon
     assert_retry_authorization_audit(&store);
     assert!(retry(&mut store, &config, &mut projects, &mut prs, &mut launcher).is_err());
     assert_eq!(launcher.0, 1);
-    execute_with_binary(&mut store, &plan, Path::new(env!("CARGO_BIN_EXE_luthor"))).unwrap();
+    let owner = WorktreeOwner::acquire(store.root(), &plan.task_id).unwrap();
+    execute_with_binary(
+        &mut store,
+        &plan,
+        Path::new(env!("CARGO_BIN_EXE_luthor")),
+        &owner,
+    )
+    .unwrap();
+    drop(owner);
     wait_retry_receipt(&config);
     assert_exact_retry_audit_required(&config, &mut store);
     assert!(matches!(
@@ -131,6 +128,26 @@ pub(crate) fn retry_unsupported_saved_budget_uses_corrected_template_without_rew
     assert_eq!(
         launch_intent(&store, "attempt-real").unwrap().unwrap(),
         old_plan
+    );
+}
+
+fn assert_retry_uses_corrected_plan(
+    plan: &luthor::supervisor::LaunchPlan,
+    launcher: &OtherLauncher,
+    prs: &ExitPr,
+) {
+    assert_eq!(launcher.0, 1);
+    assert_eq!(
+        prs.reads, 1,
+        "cached PR absence must not authorize continuation"
+    );
+    assert_eq!(plan.config_revision, "corrected");
+    assert_eq!(plan.session_id, "task");
+    assert_eq!(plan.expected_worktree.branch, "luthor/task");
+    assert!(
+        plan.args
+            .windows(2)
+            .any(|pair| pair == ["--max-tool-calls", "512"])
     );
 }
 

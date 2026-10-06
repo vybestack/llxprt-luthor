@@ -135,7 +135,12 @@ pub(crate) struct FakeLauncher {
     pub(crate) failure: Option<SupervisorError>,
 }
 impl SupervisorLauncher for FakeLauncher {
-    fn launch(&mut self, _: &mut StateStore, plan: &LaunchPlan) -> Result<(), SupervisorError> {
+    fn launch(
+        &mut self,
+        _: &mut StateStore,
+        plan: &LaunchPlan,
+        _: &luthor::WorktreeOwner,
+    ) -> Result<(), SupervisorError> {
         self.plans.push(plan.clone());
         if let Some(error) = self.failure.take() {
             return Err(error);

@@ -1,6 +1,16 @@
 use luthor::state::{journal, launches, scheduling, task_records};
 mod amended_coordinator;
 mod amendment;
+
+fn owner_protocol(
+    lane: &Lane,
+    context: &luthor::state::NeverDispatchedContext,
+) -> luthor::WorktreeOwnerProtocol {
+    let owner = luthor::WorktreeOwner::acquire(lane.f.store.root(), context.task_id()).unwrap();
+    owner
+        .protocol_evidence(lane.f.store.root(), context.task_id(), context.attempt_id())
+        .unwrap()
+}
 mod authorization;
 mod production;
 mod reads;
@@ -65,7 +75,11 @@ struct Processes {
     calls: usize,
 }
 impl ContinuationProcessInspector for Processes {
-    fn inspect(&mut self, _: &NeverDispatchedContext) -> Result<(), ProcessInspectionError> {
+    fn inspect(
+        &mut self,
+        _: &NeverDispatchedContext,
+        _: &luthor::WorktreeOwner,
+    ) -> Result<(), ProcessInspectionError> {
         self.calls += 1;
         if self.changed_on_recheck && self.calls == 2 {
             return Err(ProcessInspectionError::Conflict);
@@ -79,7 +93,12 @@ struct Launcher {
     fail: bool,
 }
 impl SupervisorLauncher for Launcher {
-    fn launch(&mut self, store: &mut StateStore, plan: &LaunchPlan) -> Result<(), SupervisorError> {
+    fn launch(
+        &mut self,
+        store: &mut StateStore,
+        plan: &LaunchPlan,
+        _: &luthor::WorktreeOwner,
+    ) -> Result<(), SupervisorError> {
         let audits = journal::evidence_payloads(
             store,
             "task-a",
@@ -367,11 +386,16 @@ fn continuation_entire_attempt_artifact_namespace_including_broken_symlinks_refu
 #[test]
 fn continuation_dispatch_marker_and_launch_failure_cannot_reauthorize() {
     let mut lane = Lane::new();
+    let owner = luthor::WorktreeOwner::acquire(lane.f.store.root(), "task-a").unwrap();
+    let proof = owner
+        .protocol_evidence(lane.f.store.root(), "task-a", "attempt-task-a")
+        .unwrap();
     launches::begin_supervision(
         &mut lane.f.store,
         "task-a",
         "attempt-task-a",
         &serde_json::to_string(&lane.plan).unwrap(),
+        &proof,
     )
     .unwrap();
     lane.held(Refusal::Ineligible);

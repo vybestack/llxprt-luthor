@@ -3,7 +3,10 @@ use super::{
     continuation_hold,
     database::StateStore,
 };
-use crate::model::{PausePrStatus, RetryAuthorization, SelectionEvidence, StateError};
+use crate::{
+    model::{PausePrStatus, RetryAuthorization, SelectionEvidence, StateError},
+    ownership::WorktreeOwnerProtocolInternal,
+};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 fn read_resume_context(
@@ -110,6 +113,7 @@ pub fn begin_supervision(
     task_id: &str,
     attempt_id: &str,
     plan: &str,
+    owner_protocol: &crate::ownership::WorktreeOwnerProtocol,
 ) -> Result<(), StateError> {
     let tx = store.connection.transaction()?;
     let persisted: Option<String> = tx
@@ -130,7 +134,10 @@ pub fn begin_supervision(
              + (SELECT COUNT(*) FROM intents WHERE (task_id=?1 OR attempt_id=?2) AND kind='initial_branch_removal_seal')",
         params![task_id, attempt_id], |row| row.get(0),
     )?;
-    if persisted.as_deref() != Some(plan) || amendments != 0 {
+    if persisted.as_deref() != Some(plan)
+        || amendments != 0
+        || !owner_protocol.matches_attempt(task_id, attempt_id)
+    {
         return Err(StateError::LaunchBlocked);
     }
     let previous: i64 = tx.query_row(
@@ -141,8 +148,21 @@ pub fn begin_supervision(
     if previous != 0 {
         return Err(StateError::LaunchBlocked);
     }
+    let owner_payload = serde_json::to_string(owner_protocol)?;
+    let owner_count: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM evidence WHERE task_id=?1 AND attempt_id=?2 AND kind='worktree_owner_protocol'",
+        params![task_id, attempt_id],
+        |row| row.get(0),
+    )?;
+    if owner_count != 0 {
+        return Err(StateError::LaunchBlocked);
+    }
     tx.execute("INSERT INTO intents(id,task_id,attempt_id,kind,detail) VALUES(?1,?2,?3,'supervisor_dispatch',?4)",
         params![format!("supervisor-{attempt_id}"), task_id, attempt_id, plan])?;
+    tx.execute(
+        "INSERT INTO evidence(task_id,attempt_id,kind,payload) VALUES(?1,?2,'worktree_owner_protocol',?3)",
+        params![task_id, attempt_id, owner_payload],
+    )?;
     tx.commit()?;
     Ok(())
 }

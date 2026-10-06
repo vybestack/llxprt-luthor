@@ -4,7 +4,10 @@ use super::{
     storage::{write_private_json, write_private_json_atomic},
     worker::{self, configure_session},
 };
-use crate::model::{ChildIdentity, LaunchPlan};
+use crate::{
+    model::{ChildIdentity, LaunchPlan},
+    ownership::WorktreeOwner,
+};
 use std::{
     fs,
     io::{Read, Write},
@@ -18,6 +21,7 @@ pub(crate) fn spawn_gated_worker(
     root: &Path,
     binary: &Path,
     managed: bool,
+    owner: &WorktreeOwner,
 ) -> Result<Child, SupervisorError> {
     let plan_path = root.join(format!("{}.plan.json", plan.attempt_id));
     if !managed {
@@ -33,6 +37,7 @@ pub(crate) fn spawn_gated_worker(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     configure_session(&mut command, &plan.session_environment);
+    owner.inherit_into(&mut command);
     command.process_group(0);
     Ok(command.spawn()?)
 }

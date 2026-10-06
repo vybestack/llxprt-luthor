@@ -185,12 +185,17 @@ fn amendment_missing_altered_or_duplicate_seal_fails_closed() {
                 .is_err(),
             "{sql}"
         );
+        let owner = luthor::WorktreeOwner::acquire(lane.f.store.root(), "task-a").unwrap();
+        let proof = owner
+            .protocol_evidence(lane.f.store.root(), "task-a", "attempt-task-a")
+            .unwrap();
         assert!(
             launches::begin_supervision(
                 &mut lane.f.store,
                 "task-a",
                 "attempt-task-a",
-                context.saved_launch_plan()
+                context.saved_launch_plan(),
+                &proof
             )
             .is_err(),
             "{sql}"
@@ -267,18 +272,37 @@ fn amendment_cannot_weaken_normal_dispatch_plan_equality() {
         .unwrap();
     let mut altered = lane.plan.clone();
     altered.args.push("extra".into());
+    let owner = luthor::WorktreeOwner::acquire(lane.f.store.root(), "task-a").unwrap();
+    let proof = owner
+        .protocol_evidence(lane.f.store.root(), "task-a", "attempt-task-a")
+        .unwrap();
     assert!(
         launches::begin_supervision(
             &mut lane.f.store,
             "task-a",
             "attempt-task-a",
-            &serde_json::to_string(&altered).unwrap()
+            &serde_json::to_string(&altered).unwrap(),
+            &proof
         )
         .is_err()
     );
-    launches::begin_supervision(&mut lane.f.store, "task-a", "attempt-task-a", &saved).unwrap();
+    launches::begin_supervision(
+        &mut lane.f.store,
+        "task-a",
+        "attempt-task-a",
+        &saved,
+        &proof,
+    )
+    .unwrap();
     assert!(
-        launches::begin_supervision(&mut lane.f.store, "task-a", "attempt-task-a", &saved).is_err()
+        launches::begin_supervision(
+            &mut lane.f.store,
+            "task-a",
+            "attempt-task-a",
+            &saved,
+            &proof
+        )
+        .is_err()
     );
     assert_eq!(
         launches::launch_intent(&lane.f.store, "attempt-task-a")

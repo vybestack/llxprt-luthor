@@ -21,6 +21,7 @@ impl AmendedSupervisorLauncher for Gated {
         context: &NeverDispatchedContext,
         config: &luthor::config::Config,
         revision: &str,
+        owner: &luthor::WorktreeOwner,
     ) -> Result<(), SupervisorError> {
         supervisor::execute_amended_with_binary(
             store,
@@ -28,6 +29,7 @@ impl AmendedSupervisorLauncher for Gated {
             config,
             revision,
             Path::new(env!("CARGO_BIN_EXE_luthor")),
+            owner,
         )
     }
 }

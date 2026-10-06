@@ -1,7 +1,8 @@
 use super::{Lane, await_receipt, database, executable_lane, launch};
+use luthor::WorktreeOwner;
 use luthor::{
     state::{launches, scheduling, verify_amended_observation_plan},
-    supervisor::{self, LaunchPlan},
+    supervisor::LaunchPlan,
 };
 use rusqlite::Connection;
 use serde_json::Value;
@@ -153,7 +154,7 @@ impl Drop for LiveLane {
 
 #[test]
 fn live_amended_worker_is_running_in_real_cli_without_authorizing_another_launch() {
-    let mut live = LiveLane::new();
+    let live = LiveLane::new();
     let plan = live.plan();
     let original = launches::launch_intent(&live.lane.f.store, "attempt-task-a")
         .unwrap()
@@ -169,14 +170,10 @@ fn live_amended_worker_is_running_in_real_cli_without_authorizing_another_launch
             .never_dispatched_context("task-a", "attempt-task-a")
             .is_err()
     );
-    assert!(
-        supervisor::execute_with_binary(
-            &mut live.lane.f.store,
-            &plan,
-            Path::new(env!("CARGO_BIN_EXE_luthor"))
-        )
-        .is_err()
-    );
+    match WorktreeOwner::acquire(live.lane.f.store.root(), &plan.task_id) {
+        Err(error) => assert_eq!(format!("{error:?}"), "Busy"),
+        Ok(_) => panic!("second worktree acquisition succeeded while worker was alive"),
+    }
     assert_eq!(
         launches::launch_intent(&live.lane.f.store, "attempt-task-a")
             .unwrap()

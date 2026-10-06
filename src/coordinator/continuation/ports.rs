@@ -50,7 +50,11 @@ pub enum ProcessInspectionError {
 /// Present-day OS conflict inspection, not a receipt or historical absence proof.
 /// An unassessable relevant process must return Unavailable, never success.
 pub trait ContinuationProcessInspector {
-    fn inspect(&mut self, context: &NeverDispatchedContext) -> Result<(), ProcessInspectionError>;
+    fn inspect(
+        &mut self,
+        context: &NeverDispatchedContext,
+        owner: &crate::ownership::WorktreeOwner,
+    ) -> Result<(), ProcessInspectionError>;
 }
 
 pub struct ContinuationDependencies<'a, P, Q, L, I, O> {

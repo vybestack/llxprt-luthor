@@ -48,6 +48,7 @@ pub(crate) fn verify_gate_release(
 
 use super::{LaunchPlan, SessionEnvironment, SupervisorError};
 use crate::{
+    ownership::WorktreeOwnerInternal,
     state::{SelectionEvidence, WorktreeIntent, WorktreeRecord},
     worktree,
 };
@@ -154,6 +155,22 @@ pub(crate) fn verify_launch_worktree(
 #[cfg(unix)]
 pub fn worker_gate(plan_path: &Path) -> Result<(), SupervisorError> {
     let plan: LaunchPlan = serde_json::from_slice(&fs::read(plan_path)?)?;
+    let plan_dir = plan_path.parent().ok_or(SupervisorError::Conflict)?;
+    let production_layout = plan_dir.file_name() == Some(std::ffi::OsStr::new("attempts"));
+    let root = if production_layout {
+        plan_dir.parent().ok_or(SupervisorError::Conflict)?
+    } else {
+        plan_dir
+    };
+    let _ownership = crate::ownership::WorktreeOwner::inherited(root, &plan.task_id)
+        .map_err(|_| SupervisorError::Conflict)?;
+    if production_layout {
+        let db = root.join("state.sqlite3");
+        let connection = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        _ownership
+            .verify_protocol(&connection, root, &plan.task_id, &plan.attempt_id)
+            .map_err(|_| SupervisorError::Conflict)?;
+    }
     let mut byte = [0];
     std::io::stdin()
         .read_exact(&mut byte)
@@ -162,6 +179,21 @@ pub fn worker_gate(plan_path: &Path) -> Result<(), SupervisorError> {
         return Err(SupervisorError::GateClosed);
     }
     worktree::verify_snapshot(&plan.expected_worktree)?;
+    verify_post_gate_state(plan_path, &plan, root, production_layout, &_ownership)?;
+    let mut command = Command::new(&plan.executable);
+    command.args(&plan.args).current_dir(&plan.worktree);
+    configure_session(&mut command, &plan.session_environment);
+    Err(command.exec().into())
+}
+
+#[cfg(unix)]
+fn verify_post_gate_state(
+    plan_path: &Path,
+    plan: &LaunchPlan,
+    root: &Path,
+    production_layout: bool,
+    ownership: &crate::ownership::WorktreeOwner,
+) -> Result<(), SupervisorError> {
     let db = plan_path
         .parent()
         .ok_or(SupervisorError::Conflict)?
@@ -173,23 +205,28 @@ pub fn worker_gate(plan_path: &Path) -> Result<(), SupervisorError> {
         .is_some_and(|dir| dir.file_name() == Some(std::ffi::OsStr::new("attempts")))
     {
         let connection = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        let root = plan_path
-            .parent()
-            .and_then(Path::parent)
-            .ok_or(SupervisorError::Conflict)?;
         let tx = connection.unchecked_transaction()?;
+        ownership
+            .verify_protocol_in_snapshot(&tx, root, &plan.task_id, &plan.attempt_id)
+            .map_err(|_| SupervisorError::Conflict)?;
         let amended =
-            super::binding_gate::verify(&tx, root, &plan).map_err(|_| SupervisorError::Conflict)?;
+            super::binding_gate::verify(&tx, root, plan).map_err(|_| SupervisorError::Conflict)?;
         if amended {
-            verify_registered_worker(&tx, plan_path, &plan)?;
+            verify_registered_worker(&tx, plan_path, plan)?;
         }
-        verify_launch_worktree(&tx, &plan)?;
+        verify_launch_worktree(&tx, plan)?;
         tx.commit()?;
     }
-    let mut command = Command::new(&plan.executable);
-    command.args(&plan.args).current_dir(&plan.worktree);
-    configure_session(&mut command, &plan.session_environment);
-    Err(command.exec().into())
+    if production_layout {
+        let connection = Connection::open_with_flags(
+            root.join("state.sqlite3"),
+            OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?;
+        ownership
+            .verify_protocol(&connection, root, &plan.task_id, &plan.attempt_id)
+            .map_err(|_| SupervisorError::Conflict)?;
+    }
+    Ok(())
 }
 
 #[cfg(unix)]

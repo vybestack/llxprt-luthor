@@ -1,3 +1,4 @@
+use luthor::WorktreeOwner;
 use luthor::state::{journal, launches, scheduling, task_records};
 mod future_templates;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -66,12 +67,14 @@ fn launch(lane: &mut Lane, binary: &Path) -> Result<(), supervisor::SupervisorEr
         .store
         .never_dispatched_context("task-a", "attempt-task-a")
         .unwrap();
+    let owner = WorktreeOwner::acquire(lane.f.store.root(), "task-a").unwrap();
     supervisor::execute_amended_with_binary(
         &mut lane.f.store,
         &context,
         &lane.f.config,
         "corrected-revision",
         binary,
+        &owner,
     )
 }
 
@@ -105,6 +108,7 @@ fn amended_real_worker_uses_exact_effective_argv_and_reconciles_without_rewritin
         .unwrap();
     launch(&mut lane, Path::new(env!("CARGO_BIN_EXE_luthor"))).unwrap();
     await_receipt(&lane);
+    observation::await_worktree_owner_release(&lane);
     let path = lane
         .f
         .store
@@ -151,11 +155,13 @@ fn amended_real_worker_uses_exact_effective_argv_and_reconciles_without_rewritin
             signal: None
         }
     );
+    let owner = WorktreeOwner::acquire(lane.f.store.root(), &plan.task_id).unwrap();
     assert!(
         supervisor::execute_with_binary(
             &mut lane.f.store,
             &plan,
-            Path::new(env!("CARGO_BIN_EXE_luthor"))
+            Path::new(env!("CARGO_BIN_EXE_luthor")),
+            &owner
         )
         .is_err()
     );
@@ -197,6 +203,7 @@ fn amended_launch_rechecks_config_revision_and_audit_before_artifacts_or_spawn()
             .store
             .never_dispatched_context("task-a", "attempt-task-a")
             .unwrap();
+        let owner = WorktreeOwner::acquire(lane.f.store.root(), "task-a").unwrap();
         if mutation == "config" {
             lane.f.config.resume.args.push("changed".into());
         }
@@ -219,7 +226,8 @@ fn amended_launch_rechecks_config_revision_and_audit_before_artifacts_or_spawn()
                 &context,
                 &lane.f.config,
                 revision,
-                Path::new(env!("CARGO_BIN_EXE_luthor"))
+                Path::new(env!("CARGO_BIN_EXE_luthor")),
+                &owner
             )
             .is_err()
         );

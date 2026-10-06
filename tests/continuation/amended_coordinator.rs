@@ -29,6 +29,7 @@ impl AmendedSupervisorLauncher for Launcher {
         context: &NeverDispatchedContext,
         config: &luthor::config::Config,
         revision: &str,
+        _owner: &luthor::WorktreeOwner,
     ) -> Result<(), SupervisorError> {
         assert_eq!(scheduling::reservation_count(store).unwrap(), 1);
         assert_eq!(
@@ -36,7 +37,14 @@ impl AmendedSupervisorLauncher for Launcher {
             revision
         );
         assert_eq!(context.plan().config_revision, "revision");
-        let proof = store.begin_amended_supervision(context, config, revision)?;
+        let proof = store.begin_amended_supervision(
+            context,
+            config,
+            revision,
+            &_owner
+                .protocol_evidence(store.root(), context.task_id(), context.attempt_id())
+                .map_err(|_| SupervisorError::Conflict)?,
+        )?;
         assert_eq!(proof.effective_plan, *context.effective_plan());
         assert_eq!(count(store, "evidence", "initial_branch_removed"), 1);
         self.plans.push(proof.effective_plan);

@@ -16,15 +16,18 @@ pub(crate) fn verify_local(
     context: &NeverDispatchedContext,
     local: &mut impl ContinuationLocalInspector,
     processes: &mut impl ContinuationProcessInspector,
+    owner: &crate::ownership::WorktreeOwner,
 ) -> Result<(), ContinuationRefusal> {
     if local.session_environment()? != context.plan().session_environment {
         return Err(ContinuationRefusal::EnvironmentChanged);
     }
     local.inspect(context)?;
-    processes.inspect(context).map_err(|error| match error {
-        ProcessInspectionError::Conflict => ContinuationRefusal::ProcessConflict,
-        ProcessInspectionError::Unavailable => ContinuationRefusal::ProcessUnavailable,
-    })
+    processes
+        .inspect(context, owner)
+        .map_err(|error| match error {
+            ProcessInspectionError::Conflict => ContinuationRefusal::ProcessConflict,
+            ProcessInspectionError::Unavailable => ContinuationRefusal::ProcessUnavailable,
+        })
 }
 
 pub(crate) fn verify_source(

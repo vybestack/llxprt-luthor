@@ -1,4 +1,5 @@
 use super::*;
+use luthor::WorktreeOwner;
 use luthor::state::{journal, scheduling, task_records};
 
 #[cfg(unix)]
@@ -41,7 +42,16 @@ pub(crate) fn plan_without_persisted_launch_intent_keeps_slot() {
 pub(crate) fn missing_receipt_after_dispatch_before_worker_start_keeps_reservation() {
     let dir = tempfile::tempdir().unwrap();
     let (config, mut store, plan, _) = prepared_fake_worker(&dir);
-    assert!(execute_with_binary(&mut store, &plan, &dir.path().join("missing-binary")).is_err());
+    let owner = WorktreeOwner::acquire(store.root(), &plan.task_id).unwrap();
+    assert!(
+        execute_with_binary(
+            &mut store,
+            &plan,
+            &dir.path().join("missing-binary"),
+            &owner
+        )
+        .is_err()
+    );
     assert!(!receipt_path(&config).exists());
     hold_slot(&mut store);
 }
