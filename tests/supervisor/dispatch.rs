@@ -36,6 +36,7 @@ pub(crate) fn detached_same_binary_dispatch_records_gate_and_worker_receipt() {
     assert_eq!(receipt.exit_code, Some(0));
     assert_eq!(fs::read(receipt.stdout_path).unwrap(), b"worker stdout\n");
     assert_eq!(fs::read(receipt.stderr_path).unwrap(), b"worker stderr\n");
+    worker_exit::await_dispatched_worker_exit(&config, "task", "attempt-real");
     assert_eq!(scheduling::reservation_count(&store).unwrap(), 1);
     let reconciled = reconcile_attempt(&mut store, "task", "attempt-real").unwrap();
     assert_eq!(

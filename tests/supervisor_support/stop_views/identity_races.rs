@@ -28,6 +28,25 @@ fn completed_worker(dir: &tempfile::TempDir) -> (Config, StateStore) {
     assert_eq!(exit.exit_code, Some(0));
     assert_eq!(fs::read(exit.stdout_path).unwrap(), b"worker stdout\n");
     assert_eq!(fs::read(exit.stderr_path).unwrap(), b"worker stderr\n");
+    drop(owner);
+    loop {
+        match WorktreeOwner::acquire_existing(store.root(), &plan.task_id) {
+            Ok(probe) => {
+                drop(probe);
+                break;
+            }
+            Err(luthor::OwnershipError::Busy) => {
+                assert!(
+                    Instant::now() < deadline,
+                    "worker owner was not released after receipt"
+                );
+                thread::sleep(Duration::from_millis(20));
+            }
+            Err(luthor::OwnershipError::Unavailable) => {
+                panic!("worktree owner became unavailable after receipt")
+            }
+        }
+    }
     (config, store)
 }
 

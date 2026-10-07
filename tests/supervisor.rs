@@ -67,6 +67,8 @@ mod supervisor {
     pub(super) mod stop_race;
     pub(super) mod stop_races;
 }
+mod worker_exit;
+
 use configuration::*;
 use execution::*;
 use log_writers::*;

@@ -50,6 +50,7 @@ esac
     );
     request_stop(&mut store, "task", "attempt-real").unwrap();
     assert!(!stopped_receipt(&config).stop_signals.is_empty());
+    worker_exit::await_dispatched_worker_exit(&config, "task", "attempt-real");
     assert!(matches!(
         reconcile_attempt(&mut store, "task", "attempt-real").unwrap(),
         Reconciliation::Completed { .. }
@@ -117,6 +118,7 @@ fn assert_committed_resume(config: &Config, first: &luthor::supervisor::LaunchPl
             .unwrap()
             .contains("resumed-same-worktree")
     );
+    worker_exit::await_dispatched_worker_exit(config, "task", "attempt-next");
     assert!(matches!(
         reconcile_attempt(&mut store, "task", "attempt-next").unwrap(),
         Reconciliation::Completed {
