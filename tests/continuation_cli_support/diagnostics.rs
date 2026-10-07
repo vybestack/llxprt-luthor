@@ -131,7 +131,7 @@ struct ProtectedChild {
 impl ProtectedChild {
     fn start(env_name: &str) -> Self {
         use std::io::{BufRead, BufReader};
-        let mut process = std::process::Command::new(std::env::current_exe().unwrap())
+        let process = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
                 "continuation_cli_support::diagnostics::protected_same_uid_process_does_not_block_saved_continuation",

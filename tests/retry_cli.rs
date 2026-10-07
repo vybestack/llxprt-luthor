@@ -588,16 +588,8 @@ fn reconcile_retry(fixture: &CliFixture, existing: &ExistingAttempt, retried: &V
     let config = &fixture.config;
     let task = existing.task.as_str();
     let attempt = retried["attempt_id"].as_str().unwrap();
+    worker_exit::await_dispatched_worker_exit(config, task, attempt);
     let mut store = StateStore::open(&config.state_root, 1).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !config
-        .state_root
-        .join(format!("attempts/{attempt}.receipt.json"))
-        .exists()
-    {
-        assert!(Instant::now() < deadline);
-        thread::sleep(Duration::from_millis(20));
-    }
     assert!(matches!(
         luthor::supervisor::reconcile_attempt(&mut store, task, attempt).unwrap(),
         Reconciliation::Completed {
