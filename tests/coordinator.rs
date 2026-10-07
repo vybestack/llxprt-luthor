@@ -108,6 +108,11 @@ fn unproven_stopped_attempt_never_reads_pr_or_releases_task() {
 }
 
 #[test]
+fn scheduler_dispatches_second_issue_while_unproven_launch_intent_stays_reserved() {
+    coordinator::scheduling_scenarios::scheduler_dispatches_second_issue_while_unproven_launch_intent_stays_reserved();
+}
+
+#[test]
 fn scheduler_dispatches_other_task_after_verified_pause_without_resuming_paused_task() {
     coordinator::scheduling_scenarios::scheduler_dispatches_other_task_after_verified_pause_without_resuming_paused_task();
 }

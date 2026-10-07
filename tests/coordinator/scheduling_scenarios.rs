@@ -7,6 +7,7 @@ use luthor::{
     },
     state::StateError,
 };
+use std::os::unix::fs::PermissionsExt;
 
 pub(crate) fn startup_reconcile_holds_missing_receipt_without_relaunching() {
     let mut f = Fixture::new(1);
@@ -54,6 +55,103 @@ pub(crate) fn unproven_stopped_attempt_never_reads_pr_or_releases_task() {
         scheduling::ensure_dispatch_capacity(&f.store),
         Err(StateError::Capacity { .. })
     ));
+}
+
+fn assert_private_root_and_branch_free_templates(f: &Fixture) {
+    assert_eq!(
+        std::fs::metadata(&f.config.state_root)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+    assert!(
+        f.config
+            .initial
+            .args
+            .iter()
+            .chain(&f.config.resume.args)
+            .all(|arg| arg != "--branch")
+    );
+}
+
+pub(crate) fn scheduler_dispatches_second_issue_while_unproven_launch_intent_stays_reserved() {
+    let mut f = Fixture::new(2);
+    let first = f.candidate.clone();
+    let mut first_github = FakeGithub::new(&first);
+    let mut first_writer = FakeWriter::default();
+    let mut failed_launcher = FakeLauncher {
+        fail: true,
+        ..Default::default()
+    };
+    assert!(
+        f.run(
+            "task-a",
+            &first,
+            &mut first_github,
+            &mut first_writer,
+            &mut failed_launcher
+        )
+        .is_err()
+    );
+    let attempt_before = task_records::latest_attempt(&f.store, "task-a").unwrap();
+    assert_eq!(attempt_before.as_deref(), Some("attempt-task-a"));
+    assert_eq!(scheduling::reservation_count(&f.store).unwrap(), 1);
+    assert_private_root_and_branch_free_templates(&f);
+    let original_launch = luthor::state::launches::launch_intent(&f.store, "attempt-task-a")
+        .unwrap()
+        .unwrap();
+
+    let mut second = first.clone();
+    second.issue_node_id = "issue-331".into();
+    second.item_id = "item-331".into();
+    second.issue_number = 331;
+    second.issue_url = "https://github.com/org/tracker/issues/331".into();
+    let mut startup_projects = FakeGithub::new(&first);
+    let mut startup_prs = FakePr::default();
+    let startup =
+        startup_reconcile_all(&mut f.store, &mut startup_projects, &mut startup_prs).unwrap();
+    assert_eq!(startup.attempts.len(), 1);
+    assert!(matches!(startup.attempts[0].review, AttemptReview::Held(_)));
+    assert_eq!(
+        luthor::state::launches::launch_intent(&f.store, "attempt-task-a")
+            .unwrap()
+            .unwrap(),
+        original_launch
+    );
+    assert_eq!(scheduling::reservation_count(&f.store).unwrap(), 1);
+    let mut github = FakeGithub::new(&second);
+    let mut prs = FakePr::default();
+    let mut writer = FakeWriter::default();
+    let mut launcher = FakeLauncher::default();
+    let report = schedule_candidates_after_startup(
+        &mut f.store,
+        vec![second],
+        ScheduleDependencies {
+            config: &f.config,
+            config_revision: "revision",
+            projects: &mut github,
+            prs: &mut prs,
+            assignments: &mut writer,
+            launcher: &mut launcher,
+            ids: &mut FixedIds::default(),
+        },
+        startup,
+    )
+    .unwrap();
+    assert_eq!(
+        report.launched.len(),
+        1,
+        "issue 331 must reach the fake launcher"
+    );
+    assert_eq!(launcher.plans.len(), 1);
+    assert!(luthor::state::task_records::existing_target(&f.store, "org/tracker", 331).unwrap());
+    assert_eq!(
+        task_records::latest_attempt(&f.store, "task-a").unwrap(),
+        attempt_before
+    );
+    assert_eq!(scheduling::reservation_count(&f.store).unwrap(), 2);
 }
 
 pub(crate) fn scheduler_dispatches_other_task_after_verified_pause_without_resuming_paused_task() {
