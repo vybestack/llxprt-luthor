@@ -511,3 +511,108 @@ fn alias_cycle_refuses_then_direct_cycle_holds_issue12_and_launches_331() {
     assert_alias_refuses_cycle(&f, &original, &all_before);
     assert_direct_cycle_schedules_331(&f, &original, &old_before);
 }
+
+fn assert_real_private_root(root: &Path) {
+    let metadata = fs::symlink_metadata(root).unwrap();
+    assert!(metadata.file_type().is_dir());
+    assert_eq!(metadata.uid(), unsafe { libc::geteuid() });
+    assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
+    assert_eq!(fs::canonicalize(root).unwrap(), root);
+}
+
+fn initialize_long_state_root(f: &Fixture) -> Config {
+    use std::os::unix::{ffi::OsStrExt, fs::DirBuilderExt};
+
+    let mut config = f.config.clone();
+    config.state_root = f.root.path().join("s".repeat(100));
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&config.state_root)
+        .unwrap();
+    assert_real_private_root(&config.state_root);
+    let socket = config
+        .state_root
+        .join("attempts/attempt-fixture-id.stop.sock");
+    let bound = unsafe { std::mem::zeroed::<libc::sockaddr_un>() }
+        .sun_path
+        .len()
+        - 1;
+    assert!(config.state_root.as_os_str().as_bytes().len() > bound);
+    assert!(socket.as_os_str().as_bytes().len() > bound);
+    drop(StateStore::open(&config.state_root, config.capacity).unwrap());
+    assert!(config.state_root.join("state.sqlite3").is_file());
+    config
+}
+
+#[test]
+fn long_real_private_state_root_refuses_daemon_before_claim_or_reservation() {
+    let f = Fixture::new();
+    let config = initialize_long_state_root(&f);
+    let before = fs::symlink_metadata(&config.state_root).unwrap();
+    fs::write(&f.calls, "").unwrap();
+    let mut launcher = RecordingLauncher::default();
+    let result = f.cycle(&config, &mut launcher);
+    assert_eq!(
+        result.unwrap_err().to_string(),
+        "daemon scheduling failed; inspect local task state"
+    );
+    assert!(launcher.plans.is_empty());
+    assert!(!f.assigned.exists());
+    assert!(!f.assigned12.exists());
+    let calls = fs::read_to_string(&f.calls).unwrap();
+    assert!(calls.contains("issues/331"));
+    assert!(!calls.contains("issues/12"));
+    assert!(!calls.contains("-X POST"));
+    assert!(!config.initial.executable.exists());
+    assert!(!config.worktree_root.exists());
+    assert!(!config.state_root.join("attempts").exists());
+    assert_real_private_root(&config.state_root);
+    let after = fs::symlink_metadata(&config.state_root).unwrap();
+    assert_eq!((before.dev(), before.ino()), (after.dev(), after.ino()));
+    let store = StateStore::open(&config.state_root, config.capacity).unwrap();
+    assert_eq!(task_records::task_count(&store).unwrap(), 1);
+    assert_eq!(
+        task_records::selection_evidence(&store, "task-fixture-id")
+            .unwrap()
+            .unwrap()
+            .candidate
+            .issue_number,
+        331
+    );
+    assert_eq!(
+        task_records::task_phase(&store, "task-fixture-id")
+            .unwrap()
+            .as_deref(),
+        Some("held")
+    );
+    assert_eq!(
+        task_records::held_reason(&store, "task-fixture-id")
+            .unwrap()
+            .as_deref(),
+        Some("launch preflight socket path too long")
+    );
+    assert_eq!(scheduling::reservation_count(&store).unwrap(), 0);
+    assert!(
+        task_records::latest_attempt(&store, "task-fixture-id")
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        task_records::source_claim_intent(&store, "task-fixture-id")
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        launches::launch_intent(&store, "attempt-fixture-id")
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        crate::state::worktree_records::worktree_record(&store, "task-fixture-id")
+            .unwrap()
+            .is_none()
+    );
+    for rows in &history(&store, None)[1..4] {
+        assert!(rows.is_empty());
+    }
+}
