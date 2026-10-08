@@ -128,6 +128,12 @@ fn scheduler_with_precomputed_blocked_startup_does_not_select_candidates() {
     coordinator::scheduling_scenarios::scheduler_with_precomputed_blocked_startup_does_not_select_candidates();
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn reserved_launch_survives_darwin_final_component_alias_reopen_and_schedules_second_slot() {
+    coordinator::scheduling_scenarios::reserved_launch_survives_darwin_final_component_alias_reopen_and_schedules_second_slot();
+}
+
 #[test]
 fn occupied_owner_prevents_dispatch_before_persisting_or_claiming_task() {
     let mut f = Fixture::new(1);

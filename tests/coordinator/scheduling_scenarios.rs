@@ -76,6 +76,21 @@ fn assert_private_root_and_branch_free_templates(f: &Fixture) {
     );
 }
 
+fn assert_unproven_launch_has_no_child_receipts_or_branch_args(f: &Fixture) {
+    let attempts = f.config.state_root.join("attempts");
+    assert!(!attempts.join("attempt-task-a.child.json").exists());
+    assert!(!attempts.join("attempt-task-a.receipt.json").exists());
+    assert!(!attempts.join("attempt-task-a.dispatch.json").exists());
+    assert!(
+        f.config
+            .initial
+            .args
+            .iter()
+            .chain(&f.config.resume.args)
+            .all(|arg| arg != "--branch")
+    );
+}
+
 pub(crate) fn scheduler_dispatches_second_issue_while_unproven_launch_intent_stays_reserved() {
     let mut f = Fixture::new(2);
     let first = f.candidate.clone();
@@ -121,6 +136,7 @@ pub(crate) fn scheduler_dispatches_second_issue_while_unproven_launch_intent_sta
         original_launch
     );
     assert_eq!(scheduling::reservation_count(&f.store).unwrap(), 1);
+    assert_unproven_launch_has_no_child_receipts_or_branch_args(&f);
     let mut github = FakeGithub::new(&second);
     let mut prs = FakePr::default();
     let mut writer = FakeWriter::default();
@@ -151,7 +167,177 @@ pub(crate) fn scheduler_dispatches_second_issue_while_unproven_launch_intent_sta
         task_records::latest_attempt(&f.store, "task-a").unwrap(),
         attempt_before
     );
+
     assert_eq!(scheduling::reservation_count(&f.store).unwrap(), 2);
+}
+#[cfg(target_os = "macos")]
+fn seed_direct_root(f: &mut Fixture, root: &std::path::Path) -> String {
+    use rusqlite::{Connection, OpenFlags};
+    let candidate = f.candidate.clone();
+    f.config.state_root = root.to_path_buf();
+    f.store = luthor::state::StateStore::open(root, 2).unwrap();
+    let mut github = FakeGithub::new(&candidate);
+    let mut launcher = FakeLauncher {
+        fail: true,
+        ..Default::default()
+    };
+    assert!(
+        f.run(
+            "task-a",
+            &candidate,
+            &mut github,
+            &mut FakeWriter::default(),
+            &mut launcher
+        )
+        .is_err()
+    );
+    let original = luthor::state::launches::launch_intent(&f.store, "attempt-task-a")
+        .unwrap()
+        .unwrap();
+    assert_eq!(scheduling::reservation_count(&f.store).unwrap(), 1);
+    assert_unproven_launch_has_no_child_receipts_or_branch_args(f);
+    let conn =
+        Connection::open_with_flags(root.join("state.sqlite3"), OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    assert_eq!(
+        conn.query_row(
+            "SELECT COUNT(*) FROM reservations WHERE status='reserved'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        1
+    );
+    original
+}
+
+#[cfg(target_os = "macos")]
+fn assert_alias_refuses_launch(f: &mut Fixture, alias: &std::path::Path, original: &String) {
+    f.config.state_root = alias.to_path_buf();
+    let detached_root = f.dir.path().join("detached-state");
+    f.store = luthor::state::StateStore::open(&detached_root, 2).unwrap();
+    f.store = luthor::state::StateStore::open(alias, 2).unwrap();
+    assert_eq!(
+        luthor::state::launches::launch_intent(&f.store, "attempt-task-a")
+            .unwrap()
+            .unwrap(),
+        *original
+    );
+    assert_eq!(scheduling::reservation_count(&f.store).unwrap(), 1);
+    let candidate = f.candidate.clone();
+    let mut github = FakeGithub::new(&candidate);
+    let mut launcher = FakeLauncher::default();
+    assert!(
+        f.run(
+            "task-alias",
+            &candidate,
+            &mut github,
+            &mut FakeWriter::default(),
+            &mut launcher
+        )
+        .is_err()
+    );
+    assert_eq!(github.reads, 0);
+    assert!(launcher.plans.is_empty());
+    assert_eq!(scheduling::reservation_count(&f.store).unwrap(), 1);
+    assert_eq!(
+        task_records::latest_attempt(&f.store, "task-a")
+            .unwrap()
+            .as_deref(),
+        Some("attempt-task-a")
+    );
+}
+
+#[cfg(target_os = "macos")]
+fn assert_direct_root_holds_and_schedules_331(
+    f: &mut Fixture,
+    root: &std::path::Path,
+    original: &String,
+) {
+    f.config.state_root = root.to_path_buf();
+    let detached_root = f.dir.path().join("detached-state");
+    f.store = luthor::state::StateStore::open(&detached_root, 2).unwrap();
+    f.store = luthor::state::StateStore::open(root, 2).unwrap();
+    assert_eq!(
+        luthor::state::launches::launch_intent(&f.store, "attempt-task-a")
+            .unwrap()
+            .unwrap(),
+        *original
+    );
+    assert_eq!(scheduling::reservation_count(&f.store).unwrap(), 1);
+    assert_eq!(
+        task_records::task_phase(&f.store, "task-a")
+            .unwrap()
+            .as_deref(),
+        Some("held")
+    );
+    let mut projects = FakeGithub::new(&f.candidate);
+    let mut prs = FakePr::default();
+    let startup = startup_reconcile_all(&mut f.store, &mut projects, &mut prs).unwrap();
+    assert!(matches!(startup.attempts[0].review, AttemptReview::Held(_)));
+    assert_eq!(
+        luthor::state::launches::launch_intent(&f.store, "attempt-task-a")
+            .unwrap()
+            .unwrap(),
+        *original
+    );
+    assert_eq!(scheduling::reservation_count(&f.store).unwrap(), 1);
+    let mut second = f.candidate.clone();
+    second.issue_node_id = "issue-331".into();
+    second.item_id = "item-331".into();
+    second.issue_number = 331;
+    second.issue_url = "https://github.com/org/tracker/issues/331".into();
+    let mut github = FakeGithub::new(&second);
+    let mut prs = FakePr::default();
+    let mut writer = FakeWriter::default();
+    let mut launcher = FakeLauncher::default();
+    let report = schedule_candidates_after_startup(
+        &mut f.store,
+        vec![second],
+        ScheduleDependencies {
+            config: &f.config,
+            config_revision: "revision",
+            projects: &mut github,
+            prs: &mut prs,
+            assignments: &mut writer,
+            launcher: &mut launcher,
+            ids: &mut FixedIds::default(),
+        },
+        startup,
+    )
+    .unwrap();
+    assert_eq!(report.launched.len(), 1);
+    assert_eq!(launcher.plans.len(), 1);
+    assert!(task_records::existing_target(&f.store, "org/tracker", 331).unwrap());
+    assert_eq!(
+        task_records::latest_attempt(&f.store, "task-a")
+            .unwrap()
+            .as_deref(),
+        Some("attempt-task-a")
+    );
+    assert_eq!(scheduling::reservation_count(&f.store).unwrap(), 2);
+    assert_eq!(
+        luthor::state::launches::launch_intent(&f.store, "attempt-task-a")
+            .unwrap()
+            .unwrap(),
+        *original
+    );
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn reserved_launch_survives_darwin_final_component_alias_reopen_and_schedules_second_slot()
+ {
+    use std::os::unix::fs::symlink;
+    let mut f = Fixture::new(2);
+    let private_root = tempfile::tempdir_in("/private/var/tmp").unwrap();
+    let root = private_root.path().join("state");
+    let alias = private_root.path().join("state-alias");
+    std::fs::create_dir(&root).unwrap();
+    symlink(&root, &alias).unwrap();
+    assert_eq!(std::fs::canonicalize(&alias).unwrap(), root);
+    let original = seed_direct_root(&mut f, &root);
+    assert_alias_refuses_launch(&mut f, &alias, &original);
+    assert_direct_root_holds_and_schedules_331(&mut f, &root, &original);
 }
 
 pub(crate) fn scheduler_dispatches_other_task_after_verified_pause_without_resuming_paused_task() {
