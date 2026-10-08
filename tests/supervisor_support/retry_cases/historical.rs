@@ -68,15 +68,31 @@ pub(crate) fn historical_startup_exit_revalidation_launches_once_preserving_all_
             assert!(Instant::now() < deadline);
             thread::sleep(Duration::from_millis(20));
         }
-        assert!(matches!(
-            reconcile_attempt(&mut store, "task", "attempt-retry").unwrap(),
+        super::super::wait_for_worktree_owner_release(&config.state_root, "task");
+        let reconciliation = reconcile_attempt(&mut store, "task", "attempt-retry").unwrap();
+        assert_historical_retry_completed(reconciliation, &path, &store);
+        assert_eq!(old_retry_rows(&config), rows);
+    }
+}
+
+#[cfg(unix)]
+fn assert_historical_retry_completed(
+    reconciliation: Reconciliation,
+    receipt_path: &std::path::Path,
+    store: &StateStore,
+) {
+    assert!(
+        matches!(
+            reconciliation,
             Reconciliation::Completed {
                 exit_code: Some(2),
                 signal: None
             }
-        ));
-        assert_eq!(old_retry_rows(&config), rows);
-    }
+        ),
+        "expected Completed {{ exit_code: Some(2), signal: None }}; got {reconciliation:?}; receipt file: {:?}; persisted exit: {:?}",
+        fs::read(receipt_path),
+        luthor::state::journal::evidence_payloads(store, "task", "attempt-retry", "attempt_exit"),
+    );
 }
 
 #[cfg(unix)]
