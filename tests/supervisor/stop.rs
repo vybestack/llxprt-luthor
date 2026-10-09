@@ -1,4 +1,5 @@
 use super::*;
+use crate::supervisor_support::wait_for_worktree_owner_release;
 use luthor::state::{journal, scheduling, task_records};
 
 #[cfg(unix)]
@@ -13,6 +14,7 @@ pub(crate) fn stop_term_has_durable_intent_and_keeps_slot_until_reconcile() {
             .is_some()
     );
     let receipt = stopped_receipt(&config);
+    wait_for_worktree_owner_release(&config.state_root, "task");
     assert_eq!(receipt.stop_signals.first(), Some(&libc::SIGINT));
     assert!(receipt.stop_signals.len() <= 2);
     assert!(
@@ -28,10 +30,13 @@ pub(crate) fn stop_term_has_durable_intent_and_keeps_slot_until_reconcile() {
             .all(|signals| { signals == [libc::SIGINT, libc::SIGTERM] })
     );
     assert_eq!(scheduling::reservation_count(&store).unwrap(), 1);
-    assert!(matches!(
-        reconcile_attempt(&mut store, "task", "attempt-real").unwrap(),
-        Reconciliation::Completed { .. }
-    ));
+    let reconciliation = reconcile_attempt(&mut store, "task", "attempt-real").unwrap();
+    assert!(
+        matches!(reconciliation, Reconciliation::Completed { .. }),
+        "expected Completed after stop; got {reconciliation:?}; receipt: {receipt:?}; phase: {:?}; reservations: {:?}",
+        task_records::task_phase(&store, "task"),
+        scheduling::reservation_count(&store),
+    );
     assert_eq!(scheduling::reservation_count(&store).unwrap(), 0);
     assert_eq!(
         task_records::task_phase(&store, "task").unwrap().as_deref(),
@@ -58,16 +63,20 @@ pub(crate) fn stop_escalates_only_on_live_matching_child() {
         running_worker("#!/bin/sh\necho started\ntrap '' INT TERM\nwhile :; do :; done\n");
     request_stop(&mut store, "task", "attempt-real").unwrap();
     let receipt = stopped_receipt(&config);
+    wait_for_worktree_owner_release(&config.state_root, "task");
     assert_eq!(
         receipt.stop_signals,
         vec![libc::SIGINT, libc::SIGTERM, libc::SIGKILL]
     );
     assert_eq!(receipt.signal, Some(libc::SIGKILL));
     assert_eq!(scheduling::reservation_count(&store).unwrap(), 1);
-    assert!(matches!(
-        reconcile_attempt(&mut store, "task", "attempt-real").unwrap(),
-        Reconciliation::Completed { .. }
-    ));
+    let reconciliation = reconcile_attempt(&mut store, "task", "attempt-real").unwrap();
+    assert!(
+        matches!(reconciliation, Reconciliation::Completed { .. }),
+        "expected Completed after escalation; got {reconciliation:?}; receipt: {receipt:?}; phase: {:?}; reservations: {:?}",
+        task_records::task_phase(&store, "task"),
+        scheduling::reservation_count(&store),
+    );
 }
 
 #[cfg(unix)]
