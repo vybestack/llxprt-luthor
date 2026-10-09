@@ -78,9 +78,6 @@ fn fixture(root: &Path) {
     for file in ["tests/smoke.rs", "xtask/tests/smoke.rs"] {
         fs::write(root.join(file), "#[test] fn smoke() {}\n").unwrap();
     }
-    for file in ["xtask/debt.json", "xtask/owners.json"] {
-        fs::write(root.join(file), "[]\n").unwrap();
-    }
     fs::copy(
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()

@@ -1,4 +1,6 @@
 use super::*;
+use luthor::WorktreeOwner;
+use luthor::state::task_records;
 
 #[cfg(unix)]
 pub(crate) fn retry_fixture() -> (tempfile::TempDir, Config, StateStore) {
@@ -43,7 +45,9 @@ exit 2
     prompts::claimed_for_mapping(&mut store, &config, &candidate);
     if let Some(budget) = budget {
         // Reproduce a selection saved by a build that accepted the unsupported budget.
-        let mut saved = store.selection_evidence("task").unwrap().unwrap();
+        let mut saved = task_records::selection_evidence(&store, "task")
+            .unwrap()
+            .unwrap();
         saved
             .effective_config
             .initial
@@ -62,7 +66,15 @@ exit 2
         .unwrap();
     }
     let plan = prepare_initial(&mut store, "task", "attempt-real").unwrap();
-    execute_with_binary(&mut store, &plan, Path::new(env!("CARGO_BIN_EXE_luthor"))).unwrap();
+    let owner = WorktreeOwner::acquire(store.root(), &plan.task_id).unwrap();
+    execute_with_binary(
+        &mut store,
+        &plan,
+        Path::new(env!("CARGO_BIN_EXE_luthor")),
+        &owner,
+    )
+    .unwrap();
+    drop(owner);
     reconcile_fixture_exit(&config, &mut store);
     // A completed receipt may precede the detached supervisor's own termination.
     let db = rusqlite::Connection::open(config.state_root.join("state.sqlite3")).unwrap();
@@ -70,7 +82,7 @@ exit 2
     let ready: serde_json::Value = serde_json::from_str(&ready).unwrap();
     wait_for_process_and_group_absence(ready["pid"].as_i64().unwrap() as i32);
     assert_eq!(
-        store.task_phase("task").unwrap().as_deref(),
+        task_records::task_phase(&store, "task").unwrap().as_deref(),
         Some("attention")
     );
     (dir, config, store)
@@ -192,7 +204,9 @@ fn reconcile_fixture_exit(config: &Config, store: &mut StateStore) {
         );
         thread::sleep(Duration::from_millis(20));
     }
-    let selection = store.selection_evidence("task").unwrap().unwrap();
+    let selection = task_records::selection_evidence(store, "task")
+        .unwrap()
+        .unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let result = luthor::coordinator::reconcile_with_pr(
@@ -203,7 +217,7 @@ fn reconcile_fixture_exit(config: &Config, store: &mut StateStore) {
             &mut ExitPr::default(),
         )
         .unwrap();
-        if store.task_phase("task").unwrap().as_deref() == Some("attention") {
+        if task_records::task_phase(store, "task").unwrap().as_deref() == Some("attention") {
             break;
         }
         assert!(

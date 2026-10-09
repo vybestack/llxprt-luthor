@@ -1,3 +1,4 @@
+use crate::state::{journal, task_records};
 use crate::{
     config::Marker,
     eligibility::Candidate,
@@ -66,6 +67,17 @@ pub(crate) fn fresh<R: ProjectReader>(
     reader: &mut R,
     c: &Candidate,
 ) -> Result<(ProjectItem, Issue), ClaimError> {
+    let item = find_project_item(reader, c)?;
+    let issue = reader.issue(&item).map_err(ProjectError::IssueRead)?;
+    verify_issue_identity(&item, &issue)?;
+    verify_claim_snapshot(c, &item, &issue)?;
+    Ok((item, issue))
+}
+
+fn find_project_item<R: ProjectReader>(
+    reader: &mut R,
+    c: &Candidate,
+) -> Result<ProjectItem, ClaimError> {
     let mut cursor = None;
     let mut seen_cursors = std::collections::HashSet::new();
     let mut seen_items = std::collections::HashSet::new();
@@ -76,27 +88,12 @@ pub(crate) fn fresh<R: ProjectReader>(
             .page(&c.project_id, cursor.as_deref())
             .map_err(ProjectError::Read)?;
         for item in page.items {
-            if item.item_id.is_empty() || item.issue_node_id.is_empty() {
-                return Err(ClaimError::Changed);
-            }
-            if !seen_items.insert(item.item_id.clone())
-                || !seen_issues.insert(item.issue_node_id.clone())
-            {
-                return Err(ClaimError::Changed);
-            }
-            let matches_target = item.item_id == c.item_id
-                || item.issue_node_id == c.issue_node_id
-                || (item.repository == c.repository && item.issue_number == c.issue_number);
-            if matches_target {
-                if target.is_some()
-                    || item.item_id != c.item_id
-                    || item.issue_node_id != c.issue_node_id
-                    || item.repository != c.repository
-                    || item.tracker_repo_id != c.tracker_repo_id
-                    || item.issue_number != c.issue_number
-                {
+            verify_unique_item(&item, &mut seen_items, &mut seen_issues)?;
+            if references_candidate(&item, c) {
+                if target.is_some() {
                     return Err(ClaimError::Changed);
                 }
+                verify_target_item(&item, c)?;
                 target = Some(item);
             }
         }
@@ -112,8 +109,42 @@ pub(crate) fn fresh<R: ProjectReader>(
         }
         cursor = Some(next);
     }
-    let item = target.ok_or(ClaimError::Changed)?;
-    let issue = reader.issue(&item).map_err(ProjectError::IssueRead)?;
+    target.ok_or(ClaimError::Changed)
+}
+
+fn verify_unique_item(
+    item: &ProjectItem,
+    seen_items: &mut std::collections::HashSet<String>,
+    seen_issues: &mut std::collections::HashSet<String>,
+) -> Result<(), ClaimError> {
+    if item.item_id.is_empty() || item.issue_node_id.is_empty() {
+        return Err(ClaimError::Changed);
+    }
+    if !seen_items.insert(item.item_id.clone()) || !seen_issues.insert(item.issue_node_id.clone()) {
+        return Err(ClaimError::Changed);
+    }
+    Ok(())
+}
+
+fn references_candidate(item: &ProjectItem, c: &Candidate) -> bool {
+    item.item_id == c.item_id
+        || item.issue_node_id == c.issue_node_id
+        || (item.repository == c.repository && item.issue_number == c.issue_number)
+}
+
+fn verify_target_item(item: &ProjectItem, c: &Candidate) -> Result<(), ClaimError> {
+    if item.item_id != c.item_id
+        || item.issue_node_id != c.issue_node_id
+        || item.repository != c.repository
+        || item.tracker_repo_id != c.tracker_repo_id
+        || item.issue_number != c.issue_number
+    {
+        return Err(ClaimError::Changed);
+    }
+    Ok(())
+}
+
+fn verify_issue_identity(item: &ProjectItem, issue: &Issue) -> Result<(), ClaimError> {
     if issue.node_id != item.issue_node_id
         || issue.repository != item.repository
         || issue.tracker_repo_id != item.tracker_repo_id
@@ -126,15 +157,31 @@ pub(crate) fn fresh<R: ProjectReader>(
     {
         return Err(ClaimError::Changed);
     }
-    let marker = match &c.marker {
-        Marker::Label { name } => issue.labels.iter().any(|x| x == name),
+    Ok(())
+}
+
+fn claim_marker_matches(
+    marker: &Marker,
+    item: &ProjectItem,
+    issue: &Issue,
+) -> Result<bool, ClaimError> {
+    match marker {
+        Marker::Label { name } => Ok(issue.labels.iter().any(|x| x == name)),
         Marker::ProjectField { name, value } => {
             if item.unsupported_fields.iter().any(|field| field == name) {
                 return Err(ClaimError::Changed);
             }
-            item.fields.iter().any(|(n, v)| n == name && v == value)
+            Ok(item.fields.iter().any(|(n, v)| n == name && v == value))
         }
-    };
+    }
+}
+
+fn verify_claim_snapshot(
+    c: &Candidate,
+    item: &ProjectItem,
+    issue: &Issue,
+) -> Result<(), ClaimError> {
+    let marker = claim_marker_matches(&c.marker, item, issue)?;
     if issue.node_id != c.issue_node_id
         || issue.repository != c.repository
         || issue.tracker_repo_id != c.tracker_repo_id
@@ -151,7 +198,7 @@ pub(crate) fn fresh<R: ProjectReader>(
     {
         return Err(ClaimError::Changed);
     }
-    Ok((item, issue))
+    Ok(())
 }
 pub fn claim<P: ProjectReader, Q: PullRequestReader, W: AssignmentWriter>(
     store: &mut StateStore,
@@ -162,9 +209,7 @@ pub fn claim<P: ProjectReader, Q: PullRequestReader, W: AssignmentWriter>(
     prs: &mut Q,
     writer: &mut W,
 ) -> Result<(), ClaimError> {
-    let selection = store
-        .selection_evidence(task_id)?
-        .ok_or(ClaimError::Changed)?;
+    let selection = task_records::selection_evidence(store, task_id)?.ok_or(ClaimError::Changed)?;
     if selection.candidate != *c {
         return Err(ClaimError::Changed);
     }
@@ -179,7 +224,7 @@ pub fn claim<P: ProjectReader, Q: PullRequestReader, W: AssignmentWriter>(
     if lookup(prs, &c.mapping.code_repository, &c.issue_url)? != LookupResult::Absent {
         return Err(ClaimError::ExistingPr);
     }
-    store.record_claim_intent(task_id, principal, &c.repository, c.issue_number)?;
+    task_records::record_claim_intent(store, task_id, principal, &c.repository, c.issue_number)?;
     let result = (|| {
         writer
             .assign(&c.repository, c.issue_number, principal)
@@ -196,10 +241,10 @@ pub fn claim<P: ProjectReader, Q: PullRequestReader, W: AssignmentWriter>(
         Ok(())
     })();
     if let Err(error) = result {
-        store.set_task_phase(task_id, "held")?;
+        task_records::set_task_phase(store, task_id, "held")?;
         return Err(error);
     }
-    store.record_evidence(task_id, None, "claim_verified", principal)?;
-    store.set_task_phase(task_id, "claimed")?;
+    journal::record_evidence(store, task_id, None, "claim_verified", principal)?;
+    task_records::set_task_phase(store, task_id, "claimed")?;
     Ok(())
 }

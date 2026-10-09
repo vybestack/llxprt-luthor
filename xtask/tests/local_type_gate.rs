@@ -71,9 +71,6 @@ fn compile_gate(root: &Path) -> std::path::PathBuf {
     )
     .unwrap();
     fs::write(root.join("src/lib.rs"), "pub fn fixture() {}\n").unwrap();
-    for file in ["xtask/debt.json", "xtask/owners.json"] {
-        fs::write(root.join(file), "[]\n").unwrap();
-    }
     let libraries = dependencies(workspace);
     let deps = libraries["serde_json"].parent().unwrap();
     let binary = root.join("policy-gate");
@@ -217,6 +214,41 @@ fn actual_policy_gate_enforces_attribute_file_boundaries_and_suppressions() {
             assert_eq!(output.status.code(), Some(1), "{stderr}");
             assert!(stderr.contains("forbidden lint suppression"), "{stderr}");
             assert!(!stderr.contains("file_lines="), "{stderr}");
+        }
+    }
+}
+
+#[test]
+fn actual_policy_gate_rejects_both_cycle_classes_without_exceptions() {
+    let root = tempdir().unwrap();
+    let gate = compile_gate(root.path());
+    let cyclic = "pub mod a { pub struct A { pub b: Option<Box<crate::b::B>> } }
+        pub mod b { pub struct B { pub a: Option<Box<crate::a::A>> } }";
+    for (source, cyclic) in [
+        (cyclic.to_owned(), true),
+        (
+            cyclic.replace("pub a: Option<Box<crate::a::A>>", "pub value: usize"),
+            false,
+        ),
+    ] {
+        fs::write(root.path().join("src/lib.rs"), source).unwrap();
+        let output = Command::new(&gate)
+            .arg("policy")
+            .current_dir(root.path())
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert_eq!(output.status.code(), Some(i32::from(cyclic)), "{stderr}");
+        if cyclic {
+            assert_eq!(
+                stderr.lines().collect::<Vec<_>>(),
+                [
+                    "coupling::src/a->src/b:cyclic_edge: cyclic_edge=1 limit=0",
+                    "coupling::src/b->src/a:feedback: feedback=1 limit=0",
+                ]
+            );
+        } else {
+            assert!(stderr.is_empty(), "{stderr}");
         }
     }
 }

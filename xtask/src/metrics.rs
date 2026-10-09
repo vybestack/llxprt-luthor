@@ -4,7 +4,7 @@ use proc_macro2::{Span, TokenStream, TokenTree};
 use quote::ToTokens;
 use syn::visit::{self, Visit};
 
-use crate::ledger::Measurement;
+use crate::measurement::Measurement;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
@@ -334,7 +334,7 @@ impl Report {
         self.measurements(limits)
             .into_iter()
             .filter(|m| m.value > m.limit)
-            .map(|m| m.diagnostic(m.limit))
+            .map(|m| m.diagnostic())
             .collect()
     }
 }

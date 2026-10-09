@@ -1,10 +1,19 @@
 use super::*;
+use luthor::WorktreeOwner;
+use luthor::state::scheduling;
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 
 fn completed_worker(dir: &tempfile::TempDir) -> (Config, StateStore) {
     let (config, mut store, plan, marker) = prepared_fake_worker(dir);
-    execute_with_binary(&mut store, &plan, Path::new(env!("CARGO_BIN_EXE_luthor"))).unwrap();
+    let owner = WorktreeOwner::acquire(store.root(), &plan.task_id).unwrap();
+    execute_with_binary(
+        &mut store,
+        &plan,
+        Path::new(env!("CARGO_BIN_EXE_luthor")),
+        &owner,
+    )
+    .unwrap();
     let receipt = receipt_path(&config);
     let deadline = Instant::now() + Duration::from_secs(10);
     while !marker.exists() || !receipt.exists() {
@@ -19,6 +28,25 @@ fn completed_worker(dir: &tempfile::TempDir) -> (Config, StateStore) {
     assert_eq!(exit.exit_code, Some(0));
     assert_eq!(fs::read(exit.stdout_path).unwrap(), b"worker stdout\n");
     assert_eq!(fs::read(exit.stderr_path).unwrap(), b"worker stderr\n");
+    drop(owner);
+    loop {
+        match WorktreeOwner::acquire_existing(store.root(), &plan.task_id) {
+            Ok(probe) => {
+                drop(probe);
+                break;
+            }
+            Err(luthor::OwnershipError::Busy) => {
+                assert!(
+                    Instant::now() < deadline,
+                    "worker owner was not released after receipt"
+                );
+                thread::sleep(Duration::from_millis(20));
+            }
+            Err(luthor::OwnershipError::Unavailable) => {
+                panic!("worktree owner became unavailable after receipt")
+            }
+        }
+    }
     (config, store)
 }
 
@@ -53,7 +81,7 @@ fn assert_held_after_restart(config: &Config, mut store: StateStore, reason: &st
             reason: reason.into()
         }
     );
-    assert_eq!(store.reservation_count().unwrap(), 1);
+    assert_eq!(scheduling::reservation_count(&store).unwrap(), 1);
     drop(store);
     let mut reopened = StateStore::open(&config.state_root, 1).unwrap();
     assert_eq!(
@@ -62,7 +90,7 @@ fn assert_held_after_restart(config: &Config, mut store: StateStore, reason: &st
             reason: reason.into()
         }
     );
-    assert_eq!(reopened.reservation_count().unwrap(), 1);
+    assert_eq!(scheduling::reservation_count(&reopened).unwrap(), 1);
 }
 
 #[test]

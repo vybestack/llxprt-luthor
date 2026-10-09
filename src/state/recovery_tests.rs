@@ -1,5 +1,33 @@
 use super::*;
+use crate::model::VerifiedOpenPr;
+use crate::state::journal;
+use rusqlite::params;
 use serde_json::{Value, json};
+
+#[test]
+fn amended_recovery_transactions_refuse_even_intervening_or_partial_amendment_proofs() {
+    for matching in [false, true] {
+        for sql in [
+            "INSERT INTO evidence(task_id,attempt_id,kind,payload) VALUES('task','attempt','initial_branch_removed','stale audit')",
+            "INSERT INTO evidence(task_id,attempt_id,kind,payload) VALUES('task','foreign','initial_branch_removed','intervening audit')",
+            "INSERT INTO intents(id,task_id,attempt_id,kind,detail) VALUES('seal','task','attempt','initial_branch_removal_seal','stale seal')",
+            "UPDATE intents SET detail='{\"amendment_sequence\":1,\"effective_plan\":{}}' WHERE kind='supervisor_dispatch'",
+        ] {
+            let (_dir, mut store) = fixture();
+            let stale_audit = audit().to_string();
+            store.connection.execute_batch(sql).unwrap();
+            let before = snapshot(&store);
+            assert!(
+                matches!(
+                    commit(&mut store, matching, &stale_audit),
+                    Err(StateError::LaunchBlocked)
+                ),
+                "{matching}: {sql}"
+            );
+            assert_eq!(snapshot(&store), before);
+        }
+    }
+}
 
 fn audit() -> Value {
     json!({"actor": "operator", "reason": "receipt lost", "observed_at_unix_secs": 10,
@@ -33,9 +61,22 @@ fn lookup(matching: bool) -> ExitPrEvidence {
 
 fn commit(store: &mut StateStore, matching: bool, audit: &str) -> Result<(), StateError> {
     if matching {
-        store.commit_telemetry_lost_pr_completion("task", "attempt", audit, &lookup(true), &proof())
+        crate::state::exits::commit_telemetry_lost_pr_completion(
+            &mut store.connection,
+            "task",
+            "attempt",
+            audit,
+            &lookup(true),
+            &proof(),
+        )
     } else {
-        store.commit_telemetry_lost_recovery("task", "attempt", audit, &lookup(false))
+        crate::state::exits::commit_telemetry_lost_recovery(
+            &mut store.connection,
+            "task",
+            "attempt",
+            audit,
+            &lookup(false),
+        )
     }
 }
 
@@ -169,8 +210,7 @@ fn malformed_recovery_audits_preserve_every_persisted_transition() {
         assert_eq!(completed[2], "released");
         assert_eq!(completed[3], if matching { "pr_complete" } else { "held" });
         assert!(
-            !store
-                .evidence_kinds("task")
+            !journal::evidence_kinds(&store, "task")
                 .unwrap()
                 .contains(&"attempt_exit".into())
         );
@@ -212,17 +252,33 @@ fn recovery_transition_failures_roll_back_audit_proof_and_capacity() {
 #[test]
 fn completed_exit_replays_require_identical_outcome_reservation_and_receipt() {
     let (_dir, mut store) = fixture();
-    store
-        .reconcile_verified_exit("task", "attempt", "receipt", "outcome")
-        .unwrap();
+    crate::state::exits::reconcile_verified_exit(
+        &mut store.connection,
+        "task",
+        "attempt",
+        "receipt",
+        "outcome",
+    )
+    .unwrap();
     let completed = snapshot(&store);
-    store
-        .reconcile_verified_exit("task", "attempt", "receipt", "outcome")
-        .unwrap();
+    crate::state::exits::reconcile_verified_exit(
+        &mut store.connection,
+        "task",
+        "attempt",
+        "receipt",
+        "outcome",
+    )
+    .unwrap();
     assert_eq!(snapshot(&store), completed);
     for (receipt, outcome) in [("different", "outcome"), ("receipt", "different")] {
         assert!(matches!(
-            store.reconcile_verified_exit("task", "attempt", receipt, outcome),
+            crate::state::exits::reconcile_verified_exit(
+                &mut store.connection,
+                "task",
+                "attempt",
+                receipt,
+                outcome
+            ),
             Err(StateError::LaunchBlocked)
         ));
         assert_eq!(snapshot(&store), completed);
@@ -239,7 +295,13 @@ fn completed_exit_replays_require_identical_outcome_reservation_and_receipt() {
         tx.commit().unwrap();
         let conflicting = snapshot(&store);
         assert!(matches!(
-            store.reconcile_verified_exit("task", "attempt", "receipt", "outcome"),
+            crate::state::exits::reconcile_verified_exit(
+                &mut store.connection,
+                "task",
+                "attempt",
+                "receipt",
+                "outcome"
+            ),
             Err(StateError::LaunchBlocked)
         ));
         assert_eq!(snapshot(&store), conflicting);
@@ -265,7 +327,13 @@ fn verified_exit_transition_failures_do_not_leave_receipt_or_free_capacity() {
             ))
             .unwrap();
         assert!(matches!(
-            store.reconcile_verified_exit("task", "attempt", "receipt", "outcome"),
+            crate::state::exits::reconcile_verified_exit(
+                &mut store.connection,
+                "task",
+                "attempt",
+                "receipt",
+                "outcome"
+            ),
             Err(StateError::LaunchBlocked)
         ));
         assert_eq!(snapshot(&store), before);
@@ -273,8 +341,13 @@ fn verified_exit_transition_failures_do_not_leave_receipt_or_free_capacity() {
             .connection
             .execute_batch("DROP TRIGGER reject_transition")
             .unwrap();
-        store
-            .reconcile_verified_exit("task", "attempt", "receipt", "outcome")
-            .unwrap();
+        crate::state::exits::reconcile_verified_exit(
+            &mut store.connection,
+            "task",
+            "attempt",
+            "receipt",
+            "outcome",
+        )
+        .unwrap();
     }
 }

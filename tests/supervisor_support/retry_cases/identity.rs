@@ -1,4 +1,6 @@
 use super::*;
+use luthor::WorktreeOwner;
+use luthor::state::{journal, scheduling, task_records};
 use luthor::supervisor::LaunchPlan;
 use std::io::Write;
 
@@ -13,7 +15,9 @@ fn two_retries_require_exact_audit_even_when_revision_returns_to_selection() {
 
 fn exercise_retry_identity(revision: &str, authorized: bool) {
     let (_dir, mut config, mut store) = retry_fixture();
-    let original = store.selection_evidence("task").unwrap().unwrap();
+    let original = task_records::selection_evidence(&store, "task")
+        .unwrap()
+        .unwrap();
     let history = old_retry_rows(&config);
     config
         .resume
@@ -72,7 +76,12 @@ fn exercise_retry_identity(revision: &str, authorized: bool) {
         assert_missing_audit_refuses_launch(&config, &mut store, &third, &marker);
     }
     assert_eq!(old_retry_rows(&config), history);
-    assert_eq!(store.selection_evidence("task").unwrap().unwrap(), original);
+    assert_eq!(
+        task_records::selection_evidence(&store, "task")
+            .unwrap()
+            .unwrap(),
+        original
+    );
 }
 
 fn complete_retry(
@@ -82,7 +91,9 @@ fn complete_retry(
     projects: &mut OtherProject,
     prs: &mut ExitPr,
 ) {
-    execute_with_binary(store, plan, Path::new(env!("CARGO_BIN_EXE_luthor"))).unwrap();
+    let owner = WorktreeOwner::acquire(store.root(), &plan.task_id).unwrap();
+    execute_with_binary(store, plan, Path::new(env!("CARGO_BIN_EXE_luthor")), &owner).unwrap();
+    drop(owner);
     wait_for_retry_exit(config, &plan.attempt_id);
     assert!(matches!(
         luthor::coordinator::reconcile_with_pr(store, "task", &plan.attempt_id, projects, prs)
@@ -93,7 +104,7 @@ fn complete_retry(
         }
     ));
     assert_eq!(
-        store.task_phase("task").unwrap().as_deref(),
+        task_records::task_phase(store, "task").unwrap().as_deref(),
         Some("attention")
     );
 }
@@ -135,7 +146,8 @@ fn assert_missing_audit_refuses_launch(
     plan: &LaunchPlan,
     marker: &Path,
 ) {
-    let result = execute_with_binary(store, plan, Path::new(env!("CARGO_BIN_EXE_luthor")));
+    let owner = WorktreeOwner::acquire(store.root(), &plan.task_id).unwrap();
+    let result = execute_with_binary(store, plan, Path::new(env!("CARGO_BIN_EXE_luthor")), &owner);
     assert!(
         matches!(result, Err(SupervisorError::ExecutionUnavailable)),
         "missing retry audit must refuse supervisor launch for {}: {result:?}",
@@ -167,8 +179,7 @@ fn assert_missing_audit_refuses_launch(
     );
     for kind in ["child_registered", "supervisor_ready", "gate_sent"] {
         assert!(
-            store
-                .evidence_payloads("task", "attempt-third", kind)
+            journal::evidence_payloads(store, "task", "attempt-third", kind)
                 .unwrap()
                 .is_empty()
         );
@@ -183,8 +194,11 @@ fn assert_missing_audit_refuses_launch(
         matches!(reconcile_attempt(store, "task", "attempt-third").unwrap(),
         Reconciliation::Held { reason } if reason == "selection mismatch")
     );
-    assert_eq!(store.task_phase("task").unwrap().as_deref(), Some("held"));
-    assert_eq!(store.reservation_count().unwrap(), 1);
+    assert_eq!(
+        task_records::task_phase(store, "task").unwrap().as_deref(),
+        Some("held")
+    );
+    assert_eq!(scheduling::reservation_count(store).unwrap(), 1);
 }
 
 fn assert_valid_audit_control(
@@ -195,8 +209,19 @@ fn assert_valid_audit_control(
     audit: &str,
     marker: &Path,
 ) {
-    execute_with_binary(store, plan, Path::new(env!("CARGO_BIN_EXE_luthor"))).unwrap();
+    let owner = WorktreeOwner::acquire(store.root(), &plan.task_id).unwrap();
+    execute_with_binary(store, plan, Path::new(env!("CARGO_BIN_EXE_luthor")), &owner).unwrap();
+    drop(owner);
     wait_for_retry_exit(config, &plan.attempt_id);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Ok(owner) = WorktreeOwner::acquire_existing(store.root(), &plan.task_id) {
+            drop(owner);
+            break;
+        }
+        assert!(Instant::now() < deadline, "worktree owner was not released");
+        thread::sleep(Duration::from_millis(20));
+    }
     assert!(
         fs::read_to_string(marker)
             .unwrap()
@@ -207,8 +232,11 @@ fn assert_valid_audit_control(
         matches!(reconcile_attempt(store, "task", "attempt-third").unwrap(),
         Reconciliation::Held { reason } if reason == "selection mismatch")
     );
-    assert_eq!(store.reservation_count().unwrap(), 1);
-    assert_eq!(store.task_phase("task").unwrap().as_deref(), Some("held"));
+    assert_eq!(scheduling::reservation_count(store).unwrap(), 1);
+    assert_eq!(
+        task_records::task_phase(store, "task").unwrap().as_deref(),
+        Some("held")
+    );
     assert_eq!(db.execute(
         "INSERT INTO evidence(task_id,attempt_id,kind,payload) VALUES('task','attempt-third','retry_authorized',?1)",
         [audit],
@@ -220,5 +248,5 @@ fn assert_valid_audit_control(
             signal: None
         }
     ));
-    assert_eq!(store.reservation_count().unwrap(), 0);
+    assert_eq!(scheduling::reservation_count(store).unwrap(), 0);
 }

@@ -1,7 +1,12 @@
 #![cfg(unix)]
 
 use serde_json::{Value, json};
-use std::{fs, os::unix::fs::PermissionsExt, path::Path, process::Command};
+use std::{
+    fs,
+    os::unix::fs::{MetadataExt, PermissionsExt},
+    path::Path,
+    process::Command,
+};
 
 fn tempdir() -> tempfile::TempDir {
     tempfile::Builder::new()
@@ -218,6 +223,33 @@ fn execute_unknown_target_fails_without_assignment_post() {
     );
 }
 
+fn snapshot_state(path: &Path) -> Value {
+    let metadata = fs::symlink_metadata(path).unwrap();
+    let contents = if metadata.is_dir() {
+        Value::Object(
+            fs::read_dir(path)
+                .unwrap()
+                .map(|entry| {
+                    let entry = entry.unwrap();
+                    (
+                        entry.file_name().into_string().unwrap(),
+                        snapshot_state(&entry.path()),
+                    )
+                })
+                .collect(),
+        )
+    } else {
+        assert!(metadata.is_file());
+        json!(fs::read(path).unwrap())
+    };
+    json!({
+        "directory": metadata.is_dir(),
+        "mode": metadata.permissions().mode(),
+        "owner": metadata.uid(),
+        "contents": contents
+    })
+}
+
 #[test]
 fn preview_assigned_target_fails_without_mutating_persisted_state() {
     let dir = tempdir();
@@ -246,22 +278,10 @@ fn preview_assigned_target_fails_without_mutating_persisted_state() {
     let first = run(&config, &path, &["--issues", "7", "--execute"]);
     assert!(!first.status.success());
     assert!(dir.path().join("assigned").exists());
-    let snapshot = fs::read_dir(dir.path().join("state"))
-        .unwrap()
-        .map(|entry| {
-            let entry = entry.unwrap();
-            (entry.file_name(), fs::read(entry.path()).unwrap())
-        })
-        .collect::<Vec<_>>();
+    let snapshot = snapshot_state(&dir.path().join("state"));
     let preview = run(&config, &path, &["--issues", "7"]);
     assert!(!preview.status.success());
-    let after = fs::read_dir(dir.path().join("state"))
-        .unwrap()
-        .map(|entry| {
-            let entry = entry.unwrap();
-            (entry.file_name(), fs::read(entry.path()).unwrap())
-        })
-        .collect::<Vec<_>>();
+    let after = snapshot_state(&dir.path().join("state"));
     assert_eq!(after, snapshot);
     let calls = fs::read_to_string(dir.path().join("calls")).unwrap();
     assert_eq!(

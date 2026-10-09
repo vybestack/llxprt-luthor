@@ -362,3 +362,32 @@ impl TerminalExitProof {
         false
     }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SavedPromptVersion {
+    TrackerOnlyV1,
+    TrackerAndClosingV2,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct VerifiedOpenPr {
+    pub(crate) id: u64,
+    pub(crate) number: u64,
+    pub(crate) url: String,
+    pub(crate) repository_id: u64,
+    pub(crate) repository: String,
+    pub(crate) head_repository_id: u64,
+    pub(crate) head_repository: String,
+    pub(crate) base_branch: String,
+    pub(crate) head_branch: String,
+    pub(crate) author: String,
+    pub(crate) active_login: String,
+    pub(crate) tracker_issue_url: String,
+    pub(crate) draft: bool,
+    pub(crate) checks: Option<Vec<String>>,
+    pub(crate) created_at: String,
+    pub(crate) head_commit_sha: String,
+    pub(crate) observed_at: u64,
+    pub(crate) attempt_id: String,
+}

@@ -1,4 +1,6 @@
 use super::*;
+use luthor::WorktreeOwner;
+use luthor::state::{exit_observation, journal, launches, scheduling, task_records};
 
 pub(super) fn configured_mapping(root: &Path, same_repository: bool) -> (Config, Candidate) {
     let (mut config, mut candidate) = configured(root);
@@ -80,19 +82,24 @@ fn stopped_resume_prompts_require_tracker_and_closing_lines_for_both_mappings() 
 }
 
 pub(super) fn claimed_for_mapping(store: &mut StateStore, config: &Config, candidate: &Candidate) {
-    store.create_task("task", candidate, "rev", config).unwrap();
-    store
-        .record_claim_intent(
-            "task",
-            &config.assignment_login,
-            &candidate.repository,
-            candidate.issue_number,
-        )
-        .unwrap();
-    store
-        .record_evidence("task", None, "claim_verified", &config.assignment_login)
-        .unwrap();
-    store.set_task_phase("task", "claimed").unwrap();
+    task_records::create_task(store, "task", candidate, "rev", config).unwrap();
+    task_records::record_claim_intent(
+        store,
+        "task",
+        &config.assignment_login,
+        &candidate.repository,
+        candidate.issue_number,
+    )
+    .unwrap();
+    journal::record_evidence(
+        store,
+        "task",
+        None,
+        "claim_verified",
+        &config.assignment_login,
+    )
+    .unwrap();
+    task_records::set_task_phase(store, "task", "claimed").unwrap();
     let checkout = &candidate.mapping.checkout;
     fs::create_dir(checkout).unwrap();
     git(checkout, &["init", "-b", "main"]);
@@ -144,7 +151,15 @@ fn paused_fixture_for_mapping(
 ) {
     let dir = tempfile::tempdir().unwrap();
     let (config, mut store, plan, _) = prepared_for_mapping(&dir, resume_prompt, same_repository);
-    execute_with_binary(&mut store, &plan, Path::new(env!("CARGO_BIN_EXE_luthor"))).unwrap();
+    let owner = WorktreeOwner::acquire(store.root(), &plan.task_id).unwrap();
+    execute_with_binary(
+        &mut store,
+        &plan,
+        Path::new(env!("CARGO_BIN_EXE_luthor")),
+        &owner,
+    )
+    .unwrap();
+    drop(owner);
     let receipt = config.state_root.join("attempts/attempt-real.receipt.json");
     for _ in 0..200 {
         if receipt.exists() {
@@ -153,9 +168,13 @@ fn paused_fixture_for_mapping(
         thread::sleep(Duration::from_millis(20));
     }
     assert!(receipt.exists());
-    let initial =
-        serde_json::from_str(&store.launch_intent("attempt-real").unwrap().unwrap()).unwrap();
-    store.record_stop_intent("task", "attempt-real").unwrap();
+    let initial = serde_json::from_str(
+        &launches::launch_intent(&store, "attempt-real")
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    journal::record_stop_intent(&mut store, "task", "attempt-real").unwrap();
     edit_receipt(&config, |receipt| {
         receipt.stop_signals = vec![libc::SIGTERM]
     });
@@ -165,11 +184,11 @@ fn paused_fixture_for_mapping(
         match reconcile_attempt(&mut store, "task", "attempt-real").unwrap() {
             Reconciliation::Completed { .. } => break,
             Reconciliation::Held { reason } => {
-                assert_eq!(store.reservation_count().unwrap(), 1);
+                assert_eq!(scheduling::reservation_count(&store).unwrap(), 1);
                 last_reason = reason;
             }
             Reconciliation::Running => {
-                assert_eq!(store.reservation_count().unwrap(), 1);
+                assert_eq!(scheduling::reservation_count(&store).unwrap(), 1);
             }
         }
         assert!(
@@ -178,18 +197,21 @@ fn paused_fixture_for_mapping(
         );
         thread::sleep(Duration::from_millis(20));
     }
-    store
-        .record_pause_pr_lookup(
-            "task",
-            "attempt-real",
-            &luthor::state::PausePrEvidence {
-                observed_at_unix_secs: 2,
-                repository: "org/code".into(),
-                status: luthor::state::PausePrStatus::Absent,
-            },
-        )
-        .unwrap();
-    assert_eq!(store.task_phase("task").unwrap().as_deref(), Some("paused"));
+    exit_observation::record_pause_pr_lookup(
+        &mut store,
+        "task",
+        "attempt-real",
+        &luthor::state::PausePrEvidence {
+            observed_at_unix_secs: 2,
+            repository: "org/code".into(),
+            status: luthor::state::PausePrStatus::Absent,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        task_records::task_phase(&store, "task").unwrap().as_deref(),
+        Some("paused")
+    );
     (dir, config, store, initial)
 }
 
@@ -197,7 +219,9 @@ fn paused_fixture_for_mapping(
 fn natural_exit_retry_prompts_require_tracker_and_closing_lines_for_both_mappings() {
     for same_repository in [false, true] {
         let (_dir, mut config, mut store) = retry_fixture_for_mapping(None, same_repository);
-        let selected = store.selection_evidence("task").unwrap().unwrap();
+        let selected = task_records::selection_evidence(&store, "task")
+            .unwrap()
+            .unwrap();
         config.resume.args[5] = "Continue {task.issue_url} for {attempt.id}. Fixes #999".into();
         let mut projects = OtherProject(selected.candidate, 1);
         let plan = retry(

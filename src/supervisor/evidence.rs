@@ -1,3 +1,28 @@
+use crate::state::{journal, task_records, worktree_records};
+#[cfg(unix)]
+fn verify_dispatch_binding(
+    store: &StateStore,
+    plan: &LaunchPlan,
+) -> Result<Result<(), &'static str>, SupervisorError> {
+    for (kind, missing) in [
+        ("launch", "missing launch intent"),
+        ("supervisor_dispatch", "missing dispatch intent"),
+    ] {
+        match journal::intent_payload(store, &plan.task_id, &plan.attempt_id, kind) {
+            Ok(Some(_)) => {}
+            Ok(None) => return Ok(Err(missing)),
+            Err(StateError::LaunchBlocked) => {
+                return Ok(Err("launch or dispatch plan binding mismatch"));
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(
+        super::binding::verify_observed_plan(&store.connection, store.root(), plan)
+            .map_err(|_| "launch or dispatch plan binding mismatch"),
+    )
+}
+
 use super::{error::SupervisorError, processes::*};
 use crate::model::*;
 use crate::state::{StateStore, WorktreeIdentity};
@@ -24,13 +49,14 @@ pub(crate) fn reconciliation_plan_evidence(
         Ok(plan) => plan,
         Err(reason) => return Ok(Err(reason)),
     };
-    let Some(worktree) = store.evidence_payload(task_id, None, "worktree_created")? else {
+    let Some(worktree) = journal::evidence_payload(store, task_id, None, "worktree_created")?
+    else {
         return Ok(Err("missing worktree evidence"));
     };
     let Some(worktree) = serde_json::from_str::<WorktreeIdentity>(&worktree).ok() else {
         return Ok(Err("invalid worktree evidence"));
     };
-    let record = store.worktree_record(task_id)?;
+    let record = worktree_records::worktree_record(store, task_id)?;
     if worktree.path != plan.worktree
         || record.as_ref().is_none_or(|r| {
             r.identity.as_ref() != Some(&worktree)
@@ -42,7 +68,7 @@ pub(crate) fn reconciliation_plan_evidence(
     {
         return Ok(Err("worktree identity mismatch"));
     }
-    let Some(selection) = store.selection_evidence(task_id)? else {
+    let Some(selection) = task_records::selection_evidence(store, task_id)? else {
         return Ok(Err("missing selection"));
     };
     if crate::state::selection_for_attempt(store, &plan).is_err()
@@ -50,7 +76,7 @@ pub(crate) fn reconciliation_plan_evidence(
     {
         return Ok(Err("selection mismatch"));
     }
-    let Some(claim) = store.evidence_payload(task_id, None, "claim_verified")? else {
+    let Some(claim) = journal::evidence_payload(store, task_id, None, "claim_verified")? else {
         return Ok(Err("missing claim evidence"));
     };
     if claim.trim().is_empty() || claim != selection.effective_config.assignment_login {
@@ -72,7 +98,7 @@ pub(crate) fn recovery_child_evidence(
         return Ok(Err("missing or invalid child identity"));
     };
     let Some(child_evidence) =
-        store.evidence_payload(task_id, Some(attempt_id), "child_registered")?
+        journal::evidence_payload(store, task_id, Some(attempt_id), "child_registered")?
     else {
         return Ok(Err("missing child registration"));
     };
@@ -104,7 +130,7 @@ pub(crate) fn reconciliation_process_evidence(
         return Ok(Err("missing or invalid child identity"));
     };
     let Some(child_evidence) =
-        store.evidence_payload(task_id, Some(attempt_id), "child_registered")?
+        journal::evidence_payload(store, task_id, Some(attempt_id), "child_registered")?
     else {
         return Ok(Err("missing child registration"));
     };
@@ -119,16 +145,15 @@ pub(crate) fn reconciliation_process_evidence(
     {
         return Ok(Err("child registration mismatch"));
     }
-    if store
-        .evidence_payload(task_id, Some(attempt_id), "log_failure")?
-        .is_some()
-    {
+    if journal::evidence_payload(store, task_id, Some(attempt_id), "log_failure")?.is_some() {
         return Ok(Err("log drain failed"));
     }
-    let Some(release) = store.intent_payload(task_id, attempt_id, "gate_release")? else {
+    let Some(release) = journal::intent_payload(store, task_id, attempt_id, "gate_release")? else {
         return Ok(Err("missing gate release decision"));
     };
-    let Some(ready) = store.evidence_payload(task_id, Some(attempt_id), "supervisor_ready")? else {
+    let Some(ready) =
+        journal::evidence_payload(store, task_id, Some(attempt_id), "supervisor_ready")?
+    else {
         return Ok(Err("missing or invalid supervisor identity"));
     };
     let Some(supervisor) = recorded_process(&ready) else {
@@ -137,15 +162,14 @@ pub(crate) fn reconciliation_process_evidence(
     if recorded_process(&release).as_ref() != Some(&supervisor) {
         return Ok(Err("supervisor identity contradiction"));
     }
-    let sent = store.evidence_payload(task_id, Some(attempt_id), "gate_sent")?;
+    let sent = journal::evidence_payload(store, task_id, Some(attempt_id), "gate_sent")?;
     if sent.is_some() && sent.as_deref().and_then(recorded_process).as_ref() != Some(&supervisor) {
         return Ok(Err("supervisor identity contradiction"));
     }
     if supervisor.pid == child_file.pid {
         return Ok(Err("supervisor and child identity contradiction"));
     }
-    let tracked = store
-        .evidence_payloads(task_id, attempt_id, "tracked_descendant")?
+    let tracked = journal::evidence_payloads(store, task_id, attempt_id, "tracked_descendant")?
         .into_iter()
         .map(|payload| recorded_process(&payload))
         .collect::<Option<Vec<_>>>();
@@ -188,17 +212,8 @@ pub(crate) fn recovery_dispatch_plan(
     {
         return held("plan identity mismatch");
     }
-    let Some(launch) = store.intent_payload(task_id, attempt_id, "launch")? else {
-        return held("missing launch intent");
-    };
-    if serde_json::from_str::<LaunchPlan>(&launch).ok().as_ref() != Some(&plan) {
-        return held("launch intent mismatch");
-    }
-    let Some(dispatch) = store.intent_payload(task_id, attempt_id, "supervisor_dispatch")? else {
-        return held("missing dispatch intent");
-    };
-    if serde_json::from_str::<LaunchPlan>(&dispatch).ok().as_ref() != Some(&plan) {
-        return held("dispatch plan mismatch");
+    if let Err(reason) = verify_dispatch_binding(store, &plan)? {
+        return held(reason);
     }
 
     Ok(Ok(plan))
@@ -224,17 +239,8 @@ pub(crate) fn reconciliation_dispatch_plan(
     {
         return Ok(Err("plan identity mismatch"));
     }
-    let Some(persisted) = store.intent_payload(task_id, attempt_id, "launch")? else {
-        return Ok(Err("missing launch intent"));
-    };
-    if serde_json::from_str::<LaunchPlan>(&persisted).ok().as_ref() != Some(&plan) {
-        return Ok(Err("launch intent mismatch"));
-    }
-    let Some(dispatch) = store.intent_payload(task_id, attempt_id, "supervisor_dispatch")? else {
-        return Ok(Err("missing dispatch intent"));
-    };
-    if serde_json::from_str::<LaunchPlan>(&dispatch).ok().as_ref() != Some(&plan) {
-        return Ok(Err("dispatch plan mismatch"));
+    if let Err(reason) = verify_dispatch_binding(store, &plan)? {
+        return Ok(Err(reason));
     }
     Ok(Ok(plan))
 }

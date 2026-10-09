@@ -1,4 +1,8 @@
 #![cfg(unix)]
+mod worker_exit;
+use luthor::state::journal::evidence_payloads;
+use luthor::state::launches::launch_intent;
+use luthor::state::task_records::{selection_evidence, task_phase};
 use luthor::{config::Config, state::StateStore, supervisor::Reconciliation};
 use serde_json::{Value, json};
 use std::{
@@ -253,14 +257,7 @@ fn dispatch_and_capture(fixture: &CliFixture, historical: bool) -> ExistingAttem
     let task = dispatched["task_id"].as_str().unwrap();
     let previous = dispatched["attempt_id"].as_str().unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
-    while !config
-        .state_root
-        .join(format!("attempts/{previous}.receipt.json"))
-        .exists()
-    {
-        assert!(Instant::now() < deadline);
-        thread::sleep(Duration::from_millis(20));
-    }
+    worker_exit::await_dispatched_worker_exit(config, task, previous);
     let out = run(config_path, path, "reconcile", &[task]);
     assert!(
         out.status.success(),
@@ -269,14 +266,14 @@ fn dispatch_and_capture(fixture: &CliFixture, historical: bool) -> ExistingAttem
     );
     let store = StateStore::open(&config.state_root, 1).unwrap();
     assert_eq!(
-        store.task_phase(task).unwrap().as_deref(),
+        task_phase(&store, task).unwrap().as_deref(),
         Some("attention")
     );
     if historical {
         seed_unsupported_saved_budget(config, &store, task, previous);
     }
-    let original = store.selection_evidence(task).unwrap().unwrap();
-    let prior_plan = store.launch_intent(previous).unwrap().unwrap();
+    let original = selection_evidence(&store, task).unwrap().unwrap();
+    let prior_plan = launch_intent(&store, previous).unwrap().unwrap();
     let ready = rusqlite::Connection::open(config.state_root.join("state.sqlite3"))
         .unwrap()
         .query_row(
@@ -310,7 +307,7 @@ fn dispatch_and_capture(fixture: &CliFixture, historical: bool) -> ExistingAttem
 fn seed_unsupported_saved_budget(config: &Config, store: &StateStore, task: &str, previous: &str) {
     let db = rusqlite::Connection::open(config.state_root.join("state.sqlite3")).unwrap();
     let mut plan: luthor::supervisor::LaunchPlan =
-        serde_json::from_str(&store.launch_intent(previous).unwrap().unwrap()).unwrap();
+        serde_json::from_str(&launch_intent(store, previous).unwrap().unwrap()).unwrap();
     *plan.args.last_mut().unwrap() = "1024".into();
     let payload = serde_json::to_string(&plan).unwrap();
     db.execute("UPDATE intents SET detail=?1 WHERE attempt_id=?2 AND kind IN ('launch','supervisor_dispatch')", [&payload, previous]).unwrap();
@@ -321,7 +318,7 @@ fn seed_unsupported_saved_budget(config: &Config, store: &StateStore, task: &str
         &payload,
     )
     .unwrap();
-    let mut selection = store.selection_evidence(task).unwrap().unwrap();
+    let mut selection = selection_evidence(store, task).unwrap().unwrap();
     *selection.effective_config.initial.args.last_mut().unwrap() = "1024".into();
     *selection.effective_config.resume.args.last_mut().unwrap() = "1024".into();
     db.execute(
@@ -536,10 +533,16 @@ fn verify_retry_state(
     let original = &attempt.original;
     let prior_plan = &attempt.prior_plan;
     let store = StateStore::open(&config.state_root, 1).unwrap();
-    assert_eq!(store.selection_evidence(task).unwrap().unwrap(), *original);
-    assert_eq!(store.launch_intent(previous).unwrap().unwrap(), *prior_plan);
+    assert_eq!(
+        selection_evidence(&store, task).unwrap().unwrap(),
+        *original
+    );
+    assert_eq!(
+        launch_intent(&store, previous).unwrap().unwrap(),
+        *prior_plan
+    );
     let new_plan: luthor::supervisor::LaunchPlan =
-        serde_json::from_str(&store.launch_intent(task_attempt).unwrap().unwrap()).unwrap();
+        serde_json::from_str(&launch_intent(&store, task_attempt).unwrap().unwrap()).unwrap();
     assert!(
         new_plan
             .args
@@ -551,9 +554,7 @@ fn verify_retry_state(
         if historical { "1024" } else { "1" }
     );
     let audit: Value = serde_json::from_str(
-        &store
-            .evidence_payloads(task, task_attempt, "retry_authorized")
-            .unwrap()[0],
+        &evidence_payloads(&store, task, task_attempt, "retry_authorized").unwrap()[0],
     )
     .unwrap();
     if historical {
@@ -587,16 +588,8 @@ fn reconcile_retry(fixture: &CliFixture, existing: &ExistingAttempt, retried: &V
     let config = &fixture.config;
     let task = existing.task.as_str();
     let attempt = retried["attempt_id"].as_str().unwrap();
+    worker_exit::await_dispatched_worker_exit(config, task, attempt);
     let mut store = StateStore::open(&config.state_root, 1).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !config
-        .state_root
-        .join(format!("attempts/{attempt}.receipt.json"))
-        .exists()
-    {
-        assert!(Instant::now() < deadline);
-        thread::sleep(Duration::from_millis(20));
-    }
     assert!(matches!(
         luthor::supervisor::reconcile_attempt(&mut store, task, attempt).unwrap(),
         Reconciliation::Completed {

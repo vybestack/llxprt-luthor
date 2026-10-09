@@ -17,7 +17,7 @@ offline validation. No toolchain installation is needed when it is already
 available. Build and fixture directories stay in ignored workspace `tmp`.
 No downloads/builds touch the private operator state or acceptance-live.
 
-`ci` runs structural/coupling/suppression/owner policy, fmt, gate fixtures,
+`ci` runs strict structural/coupling/suppression policy, fmt, gate fixtures,
 general strict Clippy (workspace/all targets/all features, `-D warnings`, plus
 explicit denied cognitive/type complexity), locked build, all-target serial
 tests, documentation tests, then every exact required contract individually.
@@ -27,22 +27,28 @@ execute and finish `ok`, never ignored, renamed, absent, failed or unsupported.
 The final GitHub `Luthor quality gates` job runs even after matrix failure and
 requires success on **both** Ubuntu and macOS; skipped jobs are not success.
 
-`cargo xtask measure` emits JSON without writing any baseline; `policy` and
-`contracts` diagnose individual stages, using the same policy. Normal gates
-never rewrite debt, ownership evidence, contracts or reports. Run `ci` before
-commit/push. Do not baseline failures of fmt, tests, Clippy, unreadable sources,
-parser errors, incomplete trees or unsupported source-generating macros.
+`cargo xtask measure` emits JSON without writing a checked-in report; `policy`
+and `contracts` diagnose individual stages, using the same policy. Gates never
+rewrite contracts or reports. Run `ci` before commit/push. Failures of fmt,
+tests, Clippy, unreadable sources, parser errors, incomplete trees or unsupported
+source-generating macros must be fixed, not accepted as a baseline.
 
 ## Measurement and numerical policy
 
-`measurement.json` records token-aware initial measurements after the
-behavior-preserving supervisor proof refactor. Each entry has a tightly keyed
-path/symbol/metric, measured value and policy limit. Duplicate cfg alternatives
-use the **maximum** per-symbol measurement; aggregates conservatively include
-all alternatives. Initial scanner output is not platform-dependent.
+All limits apply to **existing and new code without exceptions**. Any measured
+value above its default limit fails. There is no allowance registry, owner
+parameter, per-key exemption or environment override. Refactor code that exceeds
+a limit. Improvements within the limits need no registry change.
 
-New code ceilings: **800 effective lines/file, 80/function, cyclomatic 25,
-cognitive 30** (the issue's proposals, unchanged). For file LOC, a physical line
+Each measurement keeps the same JSON fields: `key` (path/symbol/metric), `value`
+and `limit`. Duplicate cfg alternatives use the **maximum** per-symbol
+measurement; aggregates conservatively include all alternatives. Measurements
+are computed from the current source tree on every invocation. The old checked-in
+initial snapshot was unused by the gate and has been removed; save current
+`cargo xtask measure` output under ignored workspace `tmp` when needed.
+
+Unchanged ceilings: **800 effective lines/file, 80/function, cyclomatic 25,
+cognitive 30**. For file LOC, a physical line
 counts once when it contains a Rust token outside a parsed attribute. Blank
 lines, comments and attribute-only lines do not count. The scanner excludes
 attribute token positions, not whole source lines: code before or after an
@@ -96,13 +102,10 @@ instantiations and imported aliases. Default trait methods count too. Pure
 records/enums without methods are not God objects. Free-function modules:
 **600 effective function lines**, including coherent inline modules. Module
 and file ceilings are separate; splitting impl blocks or files cannot evade
-type totals. Existing StateStore (49 methods, >1,400 implementation lines)
-is conspicuous debt; next-largest production behavior type is GhProjectReader
-(369 lines). Twenty methods leaves useful headroom for ordinary cohesive types
-but rejects StateStore-scale concentration. Worktree's 449 free-function lines
-fit 600; supervisor/CLI/coordinator modules exceed it and require decomposition
-by coherent responsibilities, not arbitrary file sharding. New xtask code fits
-all limits; no xtask debt exceptions were introduced.
+type totals. These limits apply to production, test and xtask source. Decompose
+oversized types and modules by coherent responsibilities, not arbitrary file
+sharding. StateStore now retains six methods; state operations live in separate
+modules rather than a forwarding facade.
 
 All required production/test/xtask roots must exist and parse. Production trees
 are resolved from lib/main entries; declared missing/ambiguous or orphan sources
@@ -117,31 +120,16 @@ macros require an explicit policy/fixture review, never an automatic fallback.
 
 The module graph resolves crate/self/super imports and qualified paths. An edge
 is cyclic exactly when its target can reach its source in the complete graph.
-Every cyclic edge is measured once at value 1 with new-code limit 0. The
-deterministic feedback subset uses `:feedback`; the original three feedback
-keys and ceilings remain unchanged. Cyclic edges outside that subset use
+Every cyclic edge is measured once at value 1 with unchanged limit **0** and
+fails policy. The deterministic feedback subset retains `:feedback` keys;
+cyclic edges outside that subset retain
 `coupling::<from>-><to>:cyclic_edge`. The feedback subset is computed by
 accepting sorted edges unless they close a cycle in the accepted graph.
 Complete reachability uses all edges, including feedback, so adding a path
-behind an owned feedback edge cannot hide growth.
-A newly cyclic edge needs its own reviewed ledger entry. Removing an edge or
-breaking its return path makes its entry stale; same-size replacement produces
-both stale and unowned keys. Acyclic growth does not create cycle debt.
-
-The cyclic portion of `measurement.json` now includes the three already
-existing non-feedback cyclic edges: `src/pr_evidence->src/state`,
-`src/state->src/supervisor`, and `src/supervisor->src/worktree`. The initial
-structural snapshot is retained; its file LOC predates attribute exclusion.
-The nine affected file-debt ceilings in `debt.json` have been lowered to the
-corrected measurements. Function/type/module and cyclic debt are unchanged.
-Each added cyclic debt entry has measured ceiling 1;
-no original feedback key or numeric ceiling changed. Each structural outlier
-and edge is owned by [remediation issue #6](https://github.com/vybestack/llxprt-luthor/issues/6).
-`owners.json` is reviewed GitHub evidence (open, assigned acoliver); ownership
-is validated in Rust offline, not through a Python script or a hidden network
-fallback. Refresh evidence explicitly when ownership changes. Stale entries,
-removed/renamed symbols, growing ceilings, unknown owner issues and broad
-wildcards fail. Improvements require an explicit reviewed ceiling decrease.
+behind a feedback edge cannot hide a cycle. Both classes are rejected, including
+same-size replacements, alias-resolved cycles and previously acyclic bridges
+that acquire a return path. Removing an edge or breaking its return path removes
+the corresponding finding. Acyclic growth produces no cyclic findings.
 
 ## Executed behavioral contracts
 
@@ -157,6 +145,6 @@ individual executions. Existing opt-in installed-LLxprt smoke tests are not the
 offline contract suite and remain opt-in; CI does not misreport them as executed.
 
 Root clippy.toml is checked for exact settings. External Clippy/Cargo compiler
-wrappers/flags/config replacements are rejected. Baseline/manifest/workflow
-changes are reviewable policy changes, not an escape hatch for failing code.
+wrappers/flags/config replacements are rejected. Manifest/workflow changes
+are reviewable policy changes, not an escape hatch for failing code.
 Independent review is still required even when the automated gate passes.

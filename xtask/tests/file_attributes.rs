@@ -1,6 +1,6 @@
 use std::{fs, process::Command};
 use tempfile::tempdir;
-use xtask::{ledger, measurements, metrics, scan};
+use xtask::{measurements, metrics, policy, scan};
 
 fn record(lines: usize) -> String {
     let mut source = String::from("#[repr(C)]\n#[derive(Debug)]\npub struct Record {\n");
@@ -12,7 +12,7 @@ fn record(lines: usize) -> String {
 }
 
 #[test]
-fn compiled_attribute_records_obey_scan_collect_ledger_file_boundaries() {
+fn compiled_attribute_records_obey_scan_collect_policy_file_boundaries() {
     let root = tempdir().unwrap();
     fs::create_dir(root.path().join("src")).unwrap();
     for lines in [799, 800, 801] {
@@ -39,13 +39,13 @@ fn compiled_attribute_records_obey_scan_collect_ledger_file_boundaries() {
         assert_eq!(file.value, lines);
         assert_eq!(file.limit, 800);
         assert!(result.suppressions.is_empty());
-        let findings = ledger::validate(&measured, &[]);
+        let findings = policy::validate(&measured);
         if lines <= 800 {
             assert!(findings.is_empty(), "{findings:?}");
         } else {
             assert_eq!(
                 findings,
-                ["src/lib.rs::file:file_lines: file_lines=801 limit=800 (new-code limit=800)"]
+                ["src/lib.rs::file:file_lines: file_lines=801 limit=800"]
             );
         }
     }
@@ -149,7 +149,7 @@ fn excluded_attributes_still_reach_suppression_validation() {
         .unwrap();
         let result = scan::scan(root.path(), &["src"]).unwrap();
         let measured = measurements::collect(&result, metrics::Limits::default());
-        assert!(ledger::validate(&measured, &[]).is_empty());
+        assert!(policy::validate(&measured).is_empty());
         assert_eq!(result.reports[0].file_lines, 800);
         assert!(
             result
@@ -279,10 +279,6 @@ fn compiled_nested_attributes_cover_fields_variants_statements_and_macro_inputs(
     assert_eq!(result.reports[0].file_lines, 33);
     assert!(result.suppressions.is_empty());
     assert!(
-        ledger::validate(
-            &measurements::collect(&result, metrics::Limits::default()),
-            &[]
-        )
-        .is_empty()
+        policy::validate(&measurements::collect(&result, metrics::Limits::default())).is_empty()
     );
 }

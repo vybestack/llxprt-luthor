@@ -1,4 +1,6 @@
 use super::*;
+use luthor::state::{journal, launches, scheduling, task_records};
+mod continuation;
 
 #[cfg(unix)]
 pub(crate) fn assert_natural_stop_views_and_restart(
@@ -20,11 +22,15 @@ pub(crate) fn assert_natural_stop_views_and_restart(
 
     let mut store = StateStore::open(&config.state_root, config.capacity).unwrap();
     assert_natural_stop_cached_views(config, plan);
-    let launch: luthor::supervisor::LaunchPlan =
-        serde_json::from_str(&store.launch_intent("attempt-real").unwrap().unwrap()).unwrap();
+    let launch: luthor::supervisor::LaunchPlan = serde_json::from_str(
+        &launches::launch_intent(&store, "attempt-real")
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
     assert_eq!(&launch, plan);
-    assert!(!store.has_attempt("task", "attempt-next").unwrap());
-    let kinds = store.evidence_kinds("task").unwrap();
+    assert!(!task_records::has_attempt(&store, "task", "attempt-next").unwrap());
+    let kinds = journal::evidence_kinds(&store, "task").unwrap();
     assert_eq!(
         kinds.iter().filter(|kind| *kind == "attempt_exit").count(),
         1
@@ -33,7 +39,10 @@ pub(crate) fn assert_natural_stop_views_and_restart(
     assert!(!kinds.contains(&"independent_stop_decision".into()));
     assert_eq!(fs::read(receipt_path(config)).unwrap(), receipt);
     let mut projects = OtherProject(
-        store.selection_evidence("task").unwrap().unwrap().candidate,
+        task_records::selection_evidence(&store, "task")
+            .unwrap()
+            .unwrap()
+            .candidate,
         1,
     );
     assert!(matches!(
@@ -48,16 +57,16 @@ pub(crate) fn assert_natural_stop_views_and_restart(
         Reconciliation::Completed { .. }
     ));
     assert_eq!(prs.reads, 1);
-    assert_eq!(store.reservation_count().unwrap(), 0);
+    assert_eq!(scheduling::reservation_count(&store).unwrap(), 0);
     assert_eq!(
-        store.task_phase("task").unwrap().as_deref(),
+        task_records::task_phase(&store, "task").unwrap().as_deref(),
         Some("attention")
     );
 }
 
 #[cfg(unix)]
 pub(crate) fn assert_crashed_supervisor_reservation(config: &Config, mut store: StateStore) {
-    let kinds = store.evidence_kinds("task").unwrap();
+    let kinds = journal::evidence_kinds(&store, "task").unwrap();
     assert!(kinds.contains(&"independent_stop_decision".into()));
     assert!(kinds.contains(&"independent_stop_signal".into()));
     assert!(kinds.contains(&"independent_group_absent".into()));
@@ -65,13 +74,12 @@ pub(crate) fn assert_crashed_supervisor_reservation(config: &Config, mut store: 
         reconcile_attempt(&mut store, "task", "attempt-real").unwrap(),
         Reconciliation::Held { reason } if reason == "live worker identity or reservation unverified"
     ));
-    assert_eq!(store.reservation_count().unwrap(), 1);
+    assert_eq!(scheduling::reservation_count(&store).unwrap(), 1);
     drop(store);
     let store = StateStore::open(&config.state_root, 1).unwrap();
-    assert_eq!(store.reservation_count().unwrap(), 1);
+    assert_eq!(scheduling::reservation_count(&store).unwrap(), 1);
     assert!(
-        store
-            .evidence_kinds("task")
+        journal::evidence_kinds(&store, "task")
             .unwrap()
             .contains(&"independent_group_absent".into())
     );

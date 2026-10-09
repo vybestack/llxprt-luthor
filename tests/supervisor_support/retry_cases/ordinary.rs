@@ -1,11 +1,16 @@
 use super::*;
+use luthor::WorktreeOwner;
+use luthor::state::journal::evidence_payloads;
+use luthor::state::launches::launch_intent;
+use luthor::state::scheduling::reservation_count;
+use luthor::state::task_records::{selection_evidence, task_phase};
 
 #[cfg(unix)]
 pub(crate) fn retry_natural_exit_audits_current_argv_preserves_history_and_reconciles_new_revision()
 {
     let (_dir, mut config, mut store) = retry_fixture();
-    let original = store.selection_evidence("task").unwrap().unwrap();
-    let old_plan = store.launch_intent("attempt-real").unwrap().unwrap();
+    let original = selection_evidence(&store, "task").unwrap().unwrap();
+    let old_plan = launch_intent(&store, "attempt-real").unwrap().unwrap();
     let old_receipt = fs::read(receipt_path(&config)).unwrap();
     let old_rows = old_retry_rows(&config);
     config
@@ -16,42 +21,32 @@ pub(crate) fn retry_natural_exit_audits_current_argv_preserves_history_and_recon
     let mut projects = OtherProject(original.candidate.clone(), 1);
     let mut launcher = OtherLauncher::default();
     let plan = retry(&mut store, &config, &mut projects, &mut prs, &mut launcher).unwrap();
-    assert_eq!(launcher.0, 1);
-    assert_eq!(
-        prs.reads, 1,
-        "cached PR absence must not authorize continuation"
-    );
-    assert_eq!(plan.config_revision, "corrected");
-    assert_eq!(plan.session_id, "task");
-    assert_eq!(plan.expected_worktree.branch, "luthor/task");
-    assert!(
-        plan.args
-            .windows(2)
-            .any(|pair| pair == ["--max-tool-calls", "512"])
-    );
+    assert_retry_uses_corrected_plan(&plan, &launcher, &prs);
     let prompt = plan.args.windows(2).find(|p| p[0] == "--prompt").unwrap()[1].as_str();
     assert!(prompt.contains("naturally exited worker"));
     assert!(!prompt.contains("interrupted or canceled turn"));
-    assert_eq!(store.selection_evidence("task").unwrap().unwrap(), original);
     assert_eq!(
-        store.launch_intent("attempt-real").unwrap().unwrap(),
+        selection_evidence(&store, "task").unwrap().unwrap(),
+        original
+    );
+    assert_eq!(
+        launch_intent(&store, "attempt-real").unwrap().unwrap(),
         old_plan
     );
     assert_eq!(fs::read(receipt_path(&config)).unwrap(), old_receipt);
-    assert_eq!(store.reservation_count().unwrap(), 1);
-    let audit = store
-        .evidence_payloads("task", "attempt-retry", "retry_authorized")
-        .unwrap();
-    let audit: serde_json::Value = serde_json::from_str(&audit[0]).unwrap();
-    assert_eq!(audit["actor"], "operator");
-    assert_eq!(audit["reason"], "correct worker budget");
-    assert_eq!(audit["previous_plan"]["config_revision"], "rev");
-    assert_eq!(audit["plan"]["attempt_id"], "attempt-retry");
-    assert_eq!(audit["reservation"], "attempt-retry");
-    assert_eq!(audit["pr"]["status"]["status"], "absent");
+    assert_eq!(reservation_count(&store).unwrap(), 1);
+    assert_retry_authorization_audit(&store);
     assert!(retry(&mut store, &config, &mut projects, &mut prs, &mut launcher).is_err());
     assert_eq!(launcher.0, 1);
-    execute_with_binary(&mut store, &plan, Path::new(env!("CARGO_BIN_EXE_luthor"))).unwrap();
+    let owner = WorktreeOwner::acquire(store.root(), &plan.task_id).unwrap();
+    execute_with_binary(
+        &mut store,
+        &plan,
+        Path::new(env!("CARGO_BIN_EXE_luthor")),
+        &owner,
+    )
+    .unwrap();
+    drop(owner);
     wait_retry_receipt(&config);
     assert_exact_retry_audit_required(&config, &mut store);
     assert!(matches!(
@@ -68,14 +63,17 @@ pub(crate) fn retry_natural_exit_audits_current_argv_preserves_history_and_recon
             signal: None
         }
     ));
-    assert_eq!(store.reservation_count().unwrap(), 0);
+    assert_eq!(reservation_count(&store).unwrap(), 0);
     assert_eq!(old_retry_rows(&config), old_rows);
     assert_eq!(
-        store.task_phase("task").unwrap().as_deref(),
+        task_phase(&store, "task").unwrap().as_deref(),
         Some("attention")
     );
     assert_eq!(prs.reads, 2);
-    assert_eq!(store.selection_evidence("task").unwrap().unwrap(), original);
+    assert_eq!(
+        selection_evidence(&store, "task").unwrap().unwrap(),
+        original
+    );
     assert!(prepare_resume(&mut store, "task", "forbidden-resume").is_err());
     assert_eq!(fs::read_dir(&config.worktree_root).unwrap().count(), 1);
 }
@@ -90,8 +88,8 @@ pub(crate) fn retry_refusals_never_reserve_or_launch_or_rewrite_selection() {
 #[cfg(unix)]
 pub(crate) fn retry_unsupported_saved_budget_uses_corrected_template_without_rewriting_old_argv() {
     let (_dir, mut config, mut store) = retry_fixture_with_saved_budget(Some("1024"));
-    let original = store.selection_evidence("task").unwrap().unwrap();
-    let old_plan = store.launch_intent("attempt-real").unwrap().unwrap();
+    let original = selection_evidence(&store, "task").unwrap().unwrap();
+    let old_plan = launch_intent(&store, "attempt-real").unwrap().unwrap();
     let old_plan_typed: luthor::supervisor::LaunchPlan = serde_json::from_str(&old_plan).unwrap();
     assert!(
         old_plan_typed
@@ -123,10 +121,33 @@ pub(crate) fn retry_unsupported_saved_budget_uses_corrected_template_without_rew
     );
     assert!(!plan.args.iter().any(|arg| arg == "1024"));
     assert_eq!(launcher.0, 1);
-    assert_eq!(store.selection_evidence("task").unwrap().unwrap(), original);
     assert_eq!(
-        store.launch_intent("attempt-real").unwrap().unwrap(),
+        selection_evidence(&store, "task").unwrap().unwrap(),
+        original
+    );
+    assert_eq!(
+        launch_intent(&store, "attempt-real").unwrap().unwrap(),
         old_plan
+    );
+}
+
+fn assert_retry_uses_corrected_plan(
+    plan: &luthor::supervisor::LaunchPlan,
+    launcher: &OtherLauncher,
+    prs: &ExitPr,
+) {
+    assert_eq!(launcher.0, 1);
+    assert_eq!(
+        prs.reads, 1,
+        "cached PR absence must not authorize continuation"
+    );
+    assert_eq!(plan.config_revision, "corrected");
+    assert_eq!(plan.session_id, "task");
+    assert_eq!(plan.expected_worktree.branch, "luthor/task");
+    assert!(
+        plan.args
+            .windows(2)
+            .any(|pair| pair == ["--max-tool-calls", "512"])
     );
 }
 
@@ -144,10 +165,21 @@ fn wait_retry_receipt(config: &Config) {
     }
 }
 
+fn assert_retry_authorization_audit(store: &StateStore) {
+    let audit = evidence_payloads(store, "task", "attempt-retry", "retry_authorized").unwrap();
+    let audit: serde_json::Value = serde_json::from_str(&audit[0]).unwrap();
+    assert_eq!(audit["actor"], "operator");
+    assert_eq!(audit["reason"], "correct worker budget");
+    assert_eq!(audit["previous_plan"]["config_revision"], "rev");
+    assert_eq!(audit["plan"]["attempt_id"], "attempt-retry");
+    assert_eq!(audit["reservation"], "attempt-retry");
+    assert_eq!(audit["pr"]["status"]["status"], "absent");
+}
+
 fn assert_exact_retry_audit_required(config: &Config, store: &mut StateStore) {
     let db = rusqlite::Connection::open(config.state_root.join("state.sqlite3")).unwrap();
     let audit: String = db.query_row("SELECT payload FROM evidence WHERE attempt_id='attempt-retry' AND kind='retry_authorized'", [], |row| row.get(0)).unwrap();
-    let phase = store.task_phase("task").unwrap();
+    let phase = task_phase(store, "task").unwrap();
     for mismatch in [false, true] {
         if mismatch {
             let mut changed: serde_json::Value = serde_json::from_str(&audit).unwrap();
@@ -164,10 +196,10 @@ fn assert_exact_retry_audit_required(config: &Config, store: &mut StateStore) {
         assert!(
             matches!(reconcile_attempt(store, "task", "attempt-retry").unwrap(), Reconciliation::Held { reason } if reason == "selection mismatch")
         );
-        assert_eq!(store.reservation_count().unwrap(), 1);
+        assert_eq!(reservation_count(store).unwrap(), 1);
         assert_eq!(old_retry_rows(config), rows);
         assert_eq!(
-            store.task_phase("task").unwrap().as_deref(),
+            task_phase(store, "task").unwrap().as_deref(),
             phase.as_deref()
         );
         if mismatch {

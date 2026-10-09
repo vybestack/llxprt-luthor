@@ -1,4 +1,6 @@
 use super::*;
+use luthor::WorktreeOwner;
+use luthor::state::{journal, launches, scheduling, task_records};
 
 #[cfg(unix)]
 pub(crate) fn historical_startup_exit_revalidation_launches_once_preserving_all_old_rows_and_files()
@@ -8,17 +10,11 @@ pub(crate) fn historical_startup_exit_revalidation_launches_once_preserving_all_
         "{ sec = 1790533213, usec = 220969 } Sun Sep 27 15:20:13 2026",
     ] {
         let (_dir, config, mut store) = historical_retry_fixture_with_boot(old_boot);
-        let original = store.selection_evidence("task").unwrap().unwrap();
-        let rows = old_retry_rows(&config);
-        let files: Vec<_> = fs::read_dir(config.state_root.join("attempts"))
+        let original = task_records::selection_evidence(&store, "task")
             .unwrap()
-            .map(|e| e.unwrap().path())
-            .filter(|p| p.is_file())
-            .map(|p| {
-                let bytes = fs::read(&p).unwrap();
-                (p, bytes)
-            })
-            .collect();
+            .unwrap();
+        let rows = old_retry_rows(&config);
+        let files = snapshot_attempt_files(&config);
         let mut projects = OtherProject(original.candidate, 1);
         let mut prs = ExitPr::default();
         let mut launcher = OtherLauncher::default();
@@ -29,12 +25,9 @@ pub(crate) fn historical_startup_exit_revalidation_launches_once_preserving_all_
         assert_eq!(prs.reads, 1);
         assert_eq!(plan.session_id, "task");
         assert_eq!(old_retry_rows(&config), rows);
-        for (path, bytes) in files {
-            assert_eq!(fs::read(path).unwrap(), bytes);
-        }
+        assert_attempt_files_unchanged(files);
         let audit: serde_json::Value = serde_json::from_str(
-            &store
-                .evidence_payloads("task", "attempt-retry", "retry_authorized")
+            &journal::evidence_payloads(&store, "task", "attempt-retry", "retry_authorized")
                 .unwrap()[0],
         )
         .unwrap();
@@ -54,11 +47,19 @@ pub(crate) fn historical_startup_exit_revalidation_launches_once_preserving_all_
             audit["source"]["issue"]["assignees"],
             serde_json::json!(["operator"])
         );
-        assert_eq!(store.reservation_count().unwrap(), 1);
+        assert_eq!(scheduling::reservation_count(&store).unwrap(), 1);
         assert!(
             historical_retry(&mut store, &config, &mut projects, &mut prs, &mut launcher).is_err()
         );
-        execute_with_binary(&mut store, &plan, Path::new(env!("CARGO_BIN_EXE_luthor"))).unwrap();
+        let owner = WorktreeOwner::acquire(store.root(), &plan.task_id).unwrap();
+        execute_with_binary(
+            &mut store,
+            &plan,
+            Path::new(env!("CARGO_BIN_EXE_luthor")),
+            &owner,
+        )
+        .unwrap();
+        drop(owner);
         let path = config
             .state_root
             .join("attempts/attempt-retry.receipt.json");
@@ -75,6 +76,23 @@ pub(crate) fn historical_startup_exit_revalidation_launches_once_preserving_all_
             }
         ));
         assert_eq!(old_retry_rows(&config), rows);
+    }
+}
+
+#[cfg(unix)]
+fn snapshot_attempt_files(config: &Config) -> Vec<(std::path::PathBuf, Vec<u8>)> {
+    fs::read_dir(config.state_root.join("attempts"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.is_file())
+        .map(|path| (path.clone(), fs::read(path).unwrap()))
+        .collect()
+}
+
+#[cfg(unix)]
+fn assert_attempt_files_unchanged(files: Vec<(std::path::PathBuf, Vec<u8>)>) {
+    for (path, bytes) in files {
+        assert_eq!(fs::read(path).unwrap(), bytes);
     }
 }
 
@@ -100,7 +118,9 @@ pub(crate) fn historical_revalidation_refuses_unknown_runtime_and_live_or_reused
         let (_dir, config, mut store) = historical_retry_fixture();
         apply_historical_refusal(refusal, &config, &mut store);
         let rows = old_retry_rows(&config);
-        let selection = store.selection_evidence("task").unwrap().unwrap();
+        let selection = task_records::selection_evidence(&store, "task")
+            .unwrap()
+            .unwrap();
         let mut projects = OtherProject(selection.candidate, 1);
         let mut prs = ExitPr::default();
         let mut launcher = OtherLauncher::default();
@@ -111,9 +131,15 @@ pub(crate) fn historical_revalidation_refuses_unknown_runtime_and_live_or_reused
         assert_eq!(launcher.0, 0, "{refusal}");
         assert_eq!(prs.reads, 0, "{refusal}");
         assert_eq!(projects.1, 1, "{refusal}");
-        assert_eq!(store.reservation_count().unwrap(), 0, "{refusal}");
         assert_eq!(
-            store.latest_attempt("task").unwrap().as_deref(),
+            scheduling::reservation_count(&store).unwrap(),
+            0,
+            "{refusal}"
+        );
+        assert_eq!(
+            task_records::latest_attempt(&store, "task")
+                .unwrap()
+                .as_deref(),
             Some("attempt-real")
         );
         assert_eq!(old_retry_rows(&config), rows, "{refusal}");
@@ -170,7 +196,9 @@ pub(crate) fn historical_exit_handoff_refuses_surviving_groups_even_with_reaped_
             db.execute("UPDATE intents SET detail=?1 WHERE attempt_id='attempt-real' AND kind='gate_release'", [ready.to_string()]).unwrap();
         }
         let rows = old_retry_rows(&config);
-        let selection = store.selection_evidence("task").unwrap().unwrap();
+        let selection = task_records::selection_evidence(&store, "task")
+            .unwrap()
+            .unwrap();
         let mut projects = OtherProject(selection.candidate, 1);
         let mut prs = ExitPr::default();
         let mut launcher = OtherLauncher::default();
@@ -181,7 +209,7 @@ pub(crate) fn historical_exit_handoff_refuses_surviving_groups_even_with_reaped_
         );
         assert_eq!(launcher.0, 0);
         assert_eq!(prs.reads, 0);
-        assert_eq!(store.reservation_count().unwrap(), 0);
+        assert_eq!(scheduling::reservation_count(&store).unwrap(), 0);
         assert_eq!(old_retry_rows(&config), rows);
     }
 }
@@ -226,7 +254,9 @@ pub(crate) fn historical_handoff_requires_exhaustive_pr_absence_and_rechecks_tra
     for conflict in [false, true] {
         let (_dir, config, mut store) = historical_retry_fixture();
         let rows = old_retry_rows(&config);
-        let selection = store.selection_evidence("task").unwrap().unwrap();
+        let selection = task_records::selection_evidence(&store, "task")
+            .unwrap()
+            .unwrap();
         let mut projects = OtherProject(selection.candidate, 1);
         let mut prs = Pr {
             pages: 0,
@@ -253,9 +283,13 @@ pub(crate) fn historical_handoff_requires_exhaustive_pr_absence_and_rechecks_tra
         assert!(result.is_err());
         assert_eq!(prs.pages, 2);
         assert_eq!(launcher.0, 0);
-        assert_eq!(store.reservation_count().unwrap(), 0);
+        assert_eq!(scheduling::reservation_count(&store).unwrap(), 0);
         assert_eq!(old_retry_rows(&config), rows);
-        assert!(store.launch_intent("attempt-retry").unwrap().is_none());
+        assert!(
+            launches::launch_intent(&store, "attempt-retry")
+                .unwrap()
+                .is_none()
+        );
     }
 }
 
@@ -319,7 +353,7 @@ fn apply_historical_refusal(refusal: &str, config: &Config, store: &mut StateSto
             db.execute("UPDATE intents SET detail=?1 WHERE attempt_id='attempt-real' AND kind='gate_release'", [&payload]).unwrap();
         }
         "tracked_escaped" => {
-            store.record_evidence("task", Some("attempt-real"), "tracked_descendant", &serde_json::json!({"pid":std::process::id(),"boot_identity":receipt.boot_identity,"start_identity":"escaped-start"}).to_string()).unwrap();
+            journal::record_evidence(store, "task", Some("attempt-real"), "tracked_descendant", &serde_json::json!({"pid":std::process::id(),"boot_identity":receipt.boot_identity,"start_identity":"escaped-start"}).to_string()).unwrap();
         }
         "log_symlink" => {
             let content = fs::read(&receipt.stdout_path).unwrap();

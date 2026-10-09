@@ -85,7 +85,7 @@ where
         .iter()
         .map(|m| (m.tracker_repository.as_str(), m))
         .collect();
-    let mut candidates: HashMap<String, (Candidate, Marker, Option<String>)> = HashMap::new();
+    let mut candidates = HashMap::new();
     for source in sources {
         for (item, issue) in enumerate_source(reader, source)? {
             if !source
@@ -117,49 +117,56 @@ where
             {
                 continue;
             }
-            let key = format!("{}:{}", issue.repository, issue.node_id);
-            let candidate = Candidate {
-                project_id: source.project_id.clone(),
-                item_id: item.item_id,
-                repository: issue.repository.clone(),
-                issue_node_id: issue.node_id.clone(),
-                issue_number: issue.number,
-                issue_url: issue.url.clone(),
-                tracker_repo_id: issue.tracker_repo_id.clone(),
-                milestone_id: issue.milestone_id.clone(),
-                milestone_title: issue.milestone.clone(),
-                observed_at_unix_secs: issue.observed_at_unix_secs,
-                observed_state: issue.state.clone(),
-                observed_assignees: issue.assignees.clone(),
-                observed_labels: issue.labels.clone(),
-                observed_project_fields: item.fields.clone(),
-                marker: source.ready_marker.clone(),
-                mapping: (*mapping).clone(),
-                source: source.clone(),
-            };
-            if let Some((previous, marker, milestone)) = candidates.get(&key) {
-                if previous.mapping != candidate.mapping
-                    || *marker != source.ready_marker
-                    || *milestone != source.milestone
-                {
-                    return Err(EligibilityError::ConflictingSource(key));
-                }
-            } else {
-                candidates.insert(
-                    key,
-                    (
-                        candidate,
-                        source.ready_marker.clone(),
-                        source.milestone.clone(),
-                    ),
-                );
-            }
+            let candidate = observed_candidate(source, item, issue, mapping);
+            merge_candidate(&mut candidates, candidate)?;
         }
     }
-    Ok(candidates
-        .into_values()
-        .map(|(candidate, _, _)| candidate)
-        .collect())
+    Ok(candidates.into_values().collect())
+}
+
+fn observed_candidate(
+    source: &Source,
+    item: ProjectItem,
+    issue: Issue,
+    mapping: &Mapping,
+) -> Candidate {
+    Candidate {
+        project_id: source.project_id.clone(),
+        item_id: item.item_id,
+        repository: issue.repository,
+        issue_node_id: issue.node_id,
+        issue_number: issue.number,
+        issue_url: issue.url,
+        tracker_repo_id: issue.tracker_repo_id,
+        milestone_id: issue.milestone_id,
+        milestone_title: issue.milestone,
+        observed_at_unix_secs: issue.observed_at_unix_secs,
+        observed_state: issue.state,
+        observed_assignees: issue.assignees,
+        observed_labels: issue.labels,
+        observed_project_fields: item.fields,
+        marker: source.ready_marker.clone(),
+        mapping: mapping.clone(),
+        source: source.clone(),
+    }
+}
+
+fn merge_candidate(
+    candidates: &mut HashMap<String, Candidate>,
+    candidate: Candidate,
+) -> Result<(), EligibilityError> {
+    let key = format!("{}:{}", candidate.repository, candidate.issue_node_id);
+    if let Some(previous) = candidates.get(&key) {
+        if previous.mapping != candidate.mapping
+            || previous.marker != candidate.marker
+            || previous.source.milestone != candidate.source.milestone
+        {
+            return Err(EligibilityError::ConflictingSource(key));
+        }
+    } else {
+        candidates.insert(key, candidate);
+    }
+    Ok(())
 }
 
 fn marker_matches(marker: &Marker, item: &ProjectItem, issue: &Issue) -> bool {

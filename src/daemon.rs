@@ -1,3 +1,4 @@
+use crate::state::task_records;
 use crate::{
     claim::GhAssignmentWriter,
     config::Config,
@@ -129,7 +130,7 @@ fn candidates(
             )?;
             if matches.is_empty()
                 && let Some(store) = store
-                && store.existing_target(repository, *number)?
+                && task_records::existing_target(store, repository, *number)?
             {
                 continue;
             }
