@@ -1,9 +1,11 @@
+use crate::state::task_records;
 use crate::{
     claim::GhAssignmentWriter,
     config::Config,
     coordinator::{
-        AttemptReview, OsIdCreator, ProductionLauncher, ScheduleDependencies,
-        schedule_candidates_after_startup, startup_reconcile_all,
+        AttemptReview, IdCreator, OsIdCreator, ProductionLauncher, ScheduleDependencies,
+        ScheduleReport, SupervisorLauncher, schedule_candidates_after_startup,
+        startup_reconcile_all,
     },
     eligibility::{self, Candidate},
     github::{
@@ -129,7 +131,7 @@ fn candidates(
             )?;
             if matches.is_empty()
                 && let Some(store) = store
-                && store.existing_target(repository, *number)?
+                && task_records::existing_target(store, repository, *number)?
             {
                 continue;
             }
@@ -155,7 +157,25 @@ fn candidates(
 }
 
 fn cycle(config: &Config, options: &Options) -> Result<(), Error> {
-    let gh = PathBuf::from("gh");
+    let mut launcher = ProductionLauncher;
+    let mut ids = OsIdCreator;
+    cycle_with_dependencies(
+        config,
+        options,
+        PathBuf::from("gh"),
+        &mut launcher,
+        &mut ids,
+    )
+    .map(|_| ())
+}
+
+fn cycle_with_dependencies<L: SupervisorLauncher, I: IdCreator>(
+    config: &Config,
+    options: &Options,
+    gh: PathBuf,
+    launcher: &mut L,
+    ids: &mut I,
+) -> Result<Option<ScheduleReport>, Error> {
     let mut projects = GhProjectReader::new(gh.clone());
     if !options.execute {
         let selected = candidates(&mut projects, config, options.targets.as_ref(), None)?;
@@ -166,7 +186,7 @@ fn cycle(config: &Config, options: &Options) -> Result<(), Error> {
             "project_id":c.project_id,"item_id":c.item_id
         })).collect::<Vec<_>>()})
         );
-        return Ok(());
+        return Ok(None);
     }
     let mut store = StateStore::open(&config.state_root, config.capacity)?;
     let mut prs = GhPullRequestReader::new(gh.clone());
@@ -185,8 +205,6 @@ fn cycle(config: &Config, options: &Options) -> Result<(), Error> {
         verify_authenticated_account(&gh, candidate)?;
     }
     let mut assignments = GhAssignmentWriter { executable: gh };
-    let mut launcher = ProductionLauncher;
-    let mut ids = OsIdCreator;
     let result = schedule_candidates_after_startup(
         &mut store,
         selected,
@@ -196,34 +214,14 @@ fn cycle(config: &Config, options: &Options) -> Result<(), Error> {
             projects: &mut projects,
             prs: &mut prs,
             assignments: &mut assignments,
-            launcher: &mut launcher,
-            ids: &mut ids,
+            launcher,
+            ids,
         },
         startup,
     );
     // Keep task and attempt identities visible without echoing prompts, shell stderr or API responses.
     let report = result.map_err(|_| "daemon scheduling failed; inspect local task state")?;
-    let attempts = report
-        .startup
-        .attempts
-        .iter()
-        .map(|a| {
-            let status = match a.review {
-                AttemptReview::Running => "running",
-                AttemptReview::Completed(_) => "completed",
-                AttemptReview::Held(_) => "held",
-                AttemptReview::Error(_) => "error",
-            };
-            json!({"task_id":a.task_id,"attempt_id":a.attempt_id,"status":status})
-        })
-        .collect::<Vec<_>>();
-    println!(
-        "{}",
-        json!({"mode":"execute", "reconciliation":attempts,
-        "source_holds":report.startup.source_holds.iter().map(|h| json!({"task_id":h.task_id,"kind":h.kind})).collect::<Vec<_>>(),
-        "launched":report.launched.iter().map(|p| json!({"task_id":p.task_id,"attempt_id":p.attempt_id})).collect::<Vec<_>>(),
-        "skipped_existing":report.skipped_existing.len(), "capacity_full":report.capacity_full})
-    );
+    print_schedule_report(&report);
     if report
         .startup
         .attempts
@@ -232,8 +230,35 @@ fn cycle(config: &Config, options: &Options) -> Result<(), Error> {
     {
         return Err("reconciliation failed; scheduling blocked".into());
     }
-    Ok(())
+    Ok(Some(report))
 }
+
+fn print_schedule_report(report: &ScheduleReport) {
+    let attempts = report
+        .startup
+        .attempts
+        .iter()
+        .map(|attempt| {
+            let status = match attempt.review {
+                AttemptReview::Running => "running",
+                AttemptReview::Completed(_) => "completed",
+                AttemptReview::Held(_) => "held",
+                AttemptReview::Error(_) => "error",
+            };
+            json!({"task_id":attempt.task_id,"attempt_id":attempt.attempt_id,"status":status})
+        })
+        .collect::<Vec<_>>();
+    println!(
+        "{}",
+        json!({"mode":"execute", "reconciliation":attempts,
+        "source_holds":report.startup.source_holds.iter().map(|hold| json!({"task_id":hold.task_id,"kind":hold.kind})).collect::<Vec<_>>(),
+        "launched":report.launched.iter().map(|plan| json!({"task_id":plan.task_id,"attempt_id":plan.attempt_id})).collect::<Vec<_>>(),
+        "skipped_existing":report.skipped_existing.len(), "capacity_full":report.capacity_full})
+    );
+}
+
+#[cfg(test)]
+mod tests;
 
 pub fn run(args: &[String]) -> Result<(), Error> {
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {

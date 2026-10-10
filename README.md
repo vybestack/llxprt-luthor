@@ -31,6 +31,7 @@ Usage: luthor discover --config <path>
        luthor daemon --config PATH --config-revision REV [--repository owner/repo --issues N,N,...] [--once] [--execute]
        luthor dispatch --config <path> --repository owner/repo --issue N --config-revision REV [--execute]
        luthor resume TASK --config <path> --execute
+       luthor retry TASK --attempt ID --config PATH --config-revision REV --actor LOGIN --reason TEXT [--revalidate-terminal-exit] --execute
        luthor recover TASK --attempt ID --config PATH --actor LOGIN --reason TEXT --execute
        luthor status --config <path>
        luthor show TASK --config <path>
@@ -95,7 +96,11 @@ The examples show syntax only. They are not a recommendation to run against live
 
 ## Private state, capacity, and recovery
 
-`state_root` contains `state.sqlite3` and private per-attempt artifacts, including worker logs and process evidence. The state implementation uses restrictive permissions for private artifacts. Keep the root on a trusted local filesystem and back it up only with appropriate protections. A process-level coordinator lock prevents simultaneous coordinators from dispatching against the same state root; database transactions and durable reservations also enforce capacity across restarts. Do not remove lock, reservation, or attempt artifacts to free capacity manually.
+`state_root` contains `state.sqlite3` and private per-attempt artifacts, including worker logs and process evidence. The state implementation uses restrictive permissions for private artifacts. Keep the root on a trusted local filesystem and back it up only with appropriate protections. A process-level coordinator lock prevents simultaneous coordinators from dispatching against the same state root; database transactions and durable reservations also enforce capacity across restarts. Each task also has a private worktree-owner lock in the state root. Its exclusive file descriptor (FD) is passed from the coordinator through the supervisor to the worker, including across `exec`, so the reservation remains owned while that task's worker is alive even if the coordinator exits. The lock is per task, so separate tasks do not block one another. Luthor records the task ID, attempt ID, and lock file device/inode as evidence and checks that the open descriptor still names the expected file before relying on it.
+
+If the owner lock cannot be acquired or verified, launch is refused and recorded as a bounded launch failure such as `launch_failed`; inspect the task and attempt evidence with `status` and `show`. Older attempts without owner-lock proof do not gain proof retroactively. Recovery of those attempts remains held when ownership or process quiescence cannot be established. Do not replace, remove, or recreate a lock file to clear a refusal: that changes its inode and can let two processes hold locks on different files under the same path. Do not release a task reservation just because the lock path appears free. Require the recorded attempt and process evidence to establish that the worker is accounted for.
+
+This lock coordinates cooperative Luthor workers that follow the protocol. It does not contain arbitrary uncooperative programs running as the same user, which can ignore the lock or interfere with same-user files and processes. Use separate operating-system isolation for that threat boundary. Do not remove lock, reservation, or attempt artifacts to free capacity manually.
 
 Capacity counts reserved attempts, including uncertain attempts. A slot is not released merely because a process appears absent or a worker exited. Luthor retains reservations when process, receipt, claim, or PR evidence is uncertain. Pause can free a slot only after process-group termination is verified; the task's claim, worktree, logs, and session identity remain. A paused task requires explicit resume. Each resume keeps the task's worker session and worktree and creates a new attempt.
 
@@ -134,3 +139,89 @@ Use pause only when you intend to stop that task. Reconciliation can leave a tas
 - **Offline Cargo commands cannot resolve dependencies**: the locked dependencies are not cached locally. Populate Cargo's cache through your approved environment before repeating the commands.
 
 For state layout, migrations, and configuration details, see [Configuration and state](dev-docs/config-and-state.md). For what validation has and has not established, see [WP05 validation](dev-docs/wp05-validation.md).
+
+
+### Continue after a natural worker exit
+
+`retry` is an explicit authorization for one existing task in `attention`, naming
+its latest completed, released attempt. It requires a natural exit with no signal
+or stop intent, rechecks the private receipt and registered process absence, then
+reads the source claim and exhaustive open-PR list again. It never reassigns the
+issue, creates another task or worktree, or retries on daemon startup.
+
+```sh
+luthor retry TASK --attempt PREVIOUS_ATTEMPT --config /private/luthor.json --config-revision corrected-budget-512 --actor acoliver --reason 'Correct unsupported worker budget from 1024 to 512' --execute
+```
+
+The new attempt uses the current private config's `resume` executable and argv.
+Its session, task branch, worktree identity, source rules, mappings, assignment
+login, state/worktree roots, and capacity must remain unchanged. Only the two
+worker command templates may change. Give the new attempt a revision different
+from the previous attempt's revision. Keep both current templates valid, including
+`--max-tool-calls 512` instead of `1024`; `-1` also means unlimited. The original
+selection and previous attempts remain unchanged, including an old unsupported
+argument. The private `retry_authorized` evidence records the actor, reason,
+previous plan/config, new plan/config, fresh source/claim and PR absence, and reservation ID in the
+same transaction as the new launch intent and reservation.
+
+`--execute` is required. Missing or uncertain receipts/processes, pending stops,
+PR errors/ambiguity/presence, claim or identity drift, conflicting worktrees,
+invalid configuration, and unavailable capacity refuse the continuation. An
+uncertain launch keeps its new reservation and must be reconciled; running the
+same command again does not launch another worker. No SQLite edits or worker
+wrappers are needed.
+
+Normal `resume` retains its original stopped-attempt and selection-configuration
+requirements. It does not adopt a retry's changed revision. A revised retry that
+is subsequently paused cannot be resumed through that original-config path.
+Another natural exit may be explicitly retried with a different revision and
+fresh proof, but there is no automatic retry loop. The process-absence check covers
+registered processes and tracked descendants, not deliberately untracked escaped
+children. A reused PID or boot change fails closed.
+
+For a historical Darwin attempt that failed during native CLI startup on
+`--max-tool-calls 1024`, add `--revalidate-terminal-exit` immediately before
+`--execute`. This requires the exact reconciled exit-code-2 receipt, the matching
+single native startup JSON diagnostic, empty stderr, consistent original
+registrations, no tracked descendants, and current absence of both recorded PIDs
+and groups. The audit records this separate terminal proof without changing the
+old boot identity. Ordinary historical exits stay held because escaped runtime
+workers cannot be excluded by a receipt and group probes alone. See
+[terminal startup revalidation](dev-docs/config-and-state.md#darwin-boot-identity-and-terminal-startup-revalidation)
+for the proof and refusal boundaries.
+
+## Rust quality gates
+
+From the repository root, use **`cargo xtask ci`** for the same offline, locked
+policy enforced on Ubuntu and macOS. See [the xtask guide](xtask/README.md) for
+the compatible toolchain, deliberate dependency fetch, absolute workspace-local
+Cargo/fixture directories, strict measurements and executed contracts.
+All structural limits apply to existing and new code, with no exceptions;
+refactor code that exceeds them.
+Keep cwd stable for Unix stop-socket fixtures; do not use an external `/tmp`
+workaround or weaken production path validation.
+
+### PR provenance and issue-closing references
+
+Every initial worker launch, stopped-session resume and audited natural-exit
+retry requires both references on separate complete lines in the PR body:
+
+```text
+Tracker-Issue: https://github.com/OWNER/REPO/issues/N
+Fixes #N
+```
+
+The tracker repository and issue number come from the verified task selection.
+When the tracker and code repositories differ, the closing line is instead
+`Fixes OWNER/REPO#N`, referring to the **tracker** repository. The exact
+`Tracker-Issue` line remains required for supervisor provenance matching;
+`Fixes` alone cannot satisfy it. Author, claim, base and head checks are unchanged.
+
+GitHub closing keywords in PR bodies only automatically close issues when the
+PR targets the code repository's **default branch**. The maintained Luthor base
+is `work/luthor-issue-to-pr-daemon`, while this repository's default is
+`bootstrap/luthor-base`. These references improve linking but cannot by
+themselves guarantee closure after merge to the maintained base. The operator
+must continue verifying merged delivery and closing remaining issues until
+branch policy is deliberately aligned; this does not change the configured
+base, repository default, branch protection or safety checks.

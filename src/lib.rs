@@ -14,3 +14,14 @@ pub mod github {
 pub mod state;
 pub mod supervisor;
 pub mod worktree;
+
+pub(crate) mod model;
+
+mod worker_instructions;
+
+mod cli_identifiers;
+mod launch_command;
+#[cfg(unix)]
+mod ownership;
+#[cfg(unix)]
+pub use ownership::{OwnershipError, WorktreeOwner, WorktreeOwnerProtocol};

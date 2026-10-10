@@ -301,30 +301,59 @@ fn optional_source_selects_issue_with_actual_milestone_identity() {
     assert_eq!(candidates[0].milestone_id.as_deref(), Some("MILESTONE1"));
 }
 
-#[test]
-fn closed_or_milestone_mismatched_issue_is_stale_and_not_eligible() {
+fn eligible_for(
+    issue_state: &str,
+    issue_milestone: Option<&str>,
+    assignees: Vec<&str>,
+    expected_milestone: Option<&str>,
+) -> bool {
     let mut fake = Fake {
         pages: vec![Page {
             items: vec![item("I1", "N7", vec![])],
             has_next_page: false,
             end_cursor: None,
         }],
-        issues: vec![issue("closed", vec!["ready"], vec![], Some("old"))],
+        issues: vec![issue(
+            issue_state,
+            vec!["ready"],
+            assignees,
+            issue_milestone,
+        )],
         calls: 0,
         fail_page: false,
     };
-    let selected = select(
+    !select(
         &mut fake,
         &[source(
             Marker::Label {
                 name: "ready".into(),
             },
-            Some("current"),
+            expected_milestone,
         )],
         &[mapping()],
     )
-    .unwrap();
-    assert!(selected.is_empty());
+    .unwrap()
+    .is_empty()
+}
+
+#[test]
+fn closed_issue_is_stale_and_not_eligible() {
+    assert!(!eligible_for(
+        "closed",
+        Some("current"),
+        vec![],
+        Some("current")
+    ));
+}
+
+#[test]
+fn valid_open_issue_with_wrong_milestone_is_not_eligible() {
+    assert!(!eligible_for("open", Some("old"), vec![], Some("current")));
+}
+
+#[test]
+fn valid_open_issue_assigned_to_another_user_is_not_eligible() {
+    assert!(!eligible_for("open", None, vec!["someone-else"], None));
 }
 
 #[test]

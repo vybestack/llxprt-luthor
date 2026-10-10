@@ -1,3 +1,4 @@
+use crate::state::{task_records, worktree_records};
 use crate::{
     github::pull_request::PullRequestEvidence,
     github::pull_request::{LookupError, PullRequestReader},
@@ -55,11 +56,9 @@ pub fn expected_for_task<Q: PullRequestReader>(
     reader: &mut Q,
     current_identity: &str,
 ) -> Result<ExpectedPr, ExpectedPrError> {
-    let selection = store
-        .selection_evidence(task_id)?
+    let selection = task_records::selection_evidence(store, task_id)?
         .ok_or(ExpectedPrError::MissingEvidence)?;
-    let worktree = store
-        .worktree_record(task_id)?
+    let worktree = worktree_records::worktree_record(store, task_id)?
         .ok_or(ExpectedPrError::MissingEvidence)?;
     let identity = worktree.identity.ok_or(ExpectedPrError::MissingEvidence)?;
     let mapping = &selection.candidate.mapping;
@@ -74,7 +73,7 @@ pub fn expected_for_task<Q: PullRequestReader>(
     {
         return Err(ExpectedPrError::WorktreeMismatch);
     }
-    if store.latest_attempt(task_id)?.is_none() {
+    if task_records::latest_attempt(store, task_id)?.is_none() {
         return Err(ExpectedPrError::MissingEvidence);
     }
     if current_identity != mapping.allowed_pr_author || current_identity.is_empty() {
@@ -132,27 +131,7 @@ pub fn verify(pr: PrIdentityEvidence, expected: &ExpectedPr, body: &str) -> Veri
     Verification::Matching(pr)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct VerifiedOpenPr {
-    pub(crate) id: u64,
-    pub(crate) number: u64,
-    pub(crate) url: String,
-    pub(crate) repository_id: u64,
-    pub(crate) repository: String,
-    pub(crate) head_repository_id: u64,
-    pub(crate) head_repository: String,
-    pub(crate) base_branch: String,
-    pub(crate) head_branch: String,
-    pub(crate) author: String,
-    pub(crate) active_login: String,
-    pub(crate) tracker_issue_url: String,
-    pub(crate) draft: bool,
-    pub(crate) checks: Option<Vec<String>>,
-    pub(crate) created_at: String,
-    pub(crate) head_commit_sha: String,
-    pub(crate) observed_at: u64,
-    pub(crate) attempt_id: String,
-}
+pub use crate::model::VerifiedOpenPr;
 
 impl VerifiedOpenPr {
     pub fn from_matching(

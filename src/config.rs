@@ -146,83 +146,102 @@ impl Config {
         {
             return Err(ConfigError::Invalid("invalid assignment_login".into()));
         }
-        let mapping_repositories: HashSet<_> = self
-            .mappings
-            .iter()
-            .map(|mapping| mapping.tracker_repository.as_str())
-            .collect();
-        let mut project_ids = HashSet::new();
-        for source in &self.sources {
-            if source.project_id.trim().is_empty() || source.repositories.is_empty() {
-                return Err(ConfigError::Invalid(
-                    "source project_id and repositories are required".into(),
-                ));
-            }
-            if !project_ids.insert(&source.project_id) {
-                return Err(ConfigError::Invalid("duplicate source project_id".into()));
-            }
-            for repository in &source.repositories {
-                validate_repository(repository)?;
-                if !mapping_repositories.contains(repository.as_str()) {
-                    return Err(ConfigError::Invalid(
-                        "source repository has no mapping".into(),
-                    ));
-                }
-            }
-            match &source.ready_marker {
-                Marker::Label { name } if name.trim().is_empty() => {
-                    return Err(ConfigError::Invalid("empty label marker".into()));
-                }
-                Marker::ProjectField { name, value }
-                    if name.trim().is_empty() || value.trim().is_empty() =>
-                {
-                    return Err(ConfigError::Invalid(
-                        "project marker name and value are required".into(),
-                    ));
-                }
-                _ => {}
-            }
-            if source
-                .milestone
-                .as_ref()
-                .is_some_and(|m| m.trim().is_empty())
-            {
-                return Err(ConfigError::Invalid("milestone cannot be empty".into()));
-            }
-        }
-        let mut trackers = HashSet::new();
-        let mut code_repositories = HashSet::new();
-        for mapping in &self.mappings {
-            validate_repository(&mapping.tracker_repository)?;
-            validate_repository(&mapping.code_repository)?;
-            if !trackers.insert(&mapping.tracker_repository) {
-                return Err(ConfigError::Invalid("duplicate mapping".into()));
-            }
-            if !code_repositories.insert(&mapping.code_repository) {
-                return Err(ConfigError::Invalid(
-                    "duplicate code repository mapping".into(),
-                ));
-            }
-            if mapping.checkout.as_os_str().is_empty() || mapping.base_branch.trim().is_empty() {
-                return Err(ConfigError::Invalid(
-                    "mapping checkout and base_branch are required".into(),
-                ));
-            }
-            validate_push_remote(&mapping.push_remote)?;
-            validate_repository(&mapping.allowed_pr_head_repository)?;
-            if mapping.allowed_pr_author.trim().is_empty()
-                || !mapping
-                    .allowed_pr_author
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || "-_".contains(c))
-            {
-                return Err(ConfigError::Invalid("invalid allowed_pr_author".into()));
-            }
-        }
+        validate_sources(&self.sources, &self.mappings)?;
+        validate_mappings(&self.mappings)?;
         validate_command(&self.initial)?;
         validate_command(&self.resume)?;
         Ok(())
     }
+}
+
+fn validate_sources(sources: &[Source], mappings: &[Mapping]) -> Result<(), ConfigError> {
+    let mapping_repositories: HashSet<_> = mappings
+        .iter()
+        .map(|mapping| mapping.tracker_repository.as_str())
+        .collect();
+    let mut project_ids = HashSet::new();
+    for source in sources {
+        if source.project_id.trim().is_empty() || source.repositories.is_empty() {
+            return Err(ConfigError::Invalid(
+                "source project_id and repositories are required".into(),
+            ));
+        }
+        if !project_ids.insert(&source.project_id) {
+            return Err(ConfigError::Invalid("duplicate source project_id".into()));
+        }
+        for repository in &source.repositories {
+            validate_repository(repository)?;
+            if !mapping_repositories.contains(repository.as_str()) {
+                return Err(ConfigError::Invalid(
+                    "source repository has no mapping".into(),
+                ));
+            }
+        }
+        validate_source_marker(source)?;
+    }
+    Ok(())
+}
+
+fn validate_source_marker(source: &Source) -> Result<(), ConfigError> {
+    match &source.ready_marker {
+        Marker::Label { name } if name.trim().is_empty() => {
+            return Err(ConfigError::Invalid("empty label marker".into()));
+        }
+        Marker::ProjectField { name, value }
+            if name.trim().is_empty() || value.trim().is_empty() =>
+        {
+            return Err(ConfigError::Invalid(
+                "project marker name and value are required".into(),
+            ));
+        }
+        _ => {}
+    }
+    if source
+        .milestone
+        .as_ref()
+        .is_some_and(|m| m.trim().is_empty())
+    {
+        return Err(ConfigError::Invalid("milestone cannot be empty".into()));
+    }
+    Ok(())
+}
+
+fn validate_mappings(mappings: &[Mapping]) -> Result<(), ConfigError> {
+    let mut trackers = HashSet::new();
+    let mut code_repositories = HashSet::new();
+    for mapping in mappings {
+        validate_repository(&mapping.tracker_repository)?;
+        validate_repository(&mapping.code_repository)?;
+        if !trackers.insert(&mapping.tracker_repository) {
+            return Err(ConfigError::Invalid("duplicate mapping".into()));
+        }
+        if !code_repositories.insert(&mapping.code_repository) {
+            return Err(ConfigError::Invalid(
+                "duplicate code repository mapping".into(),
+            ));
+        }
+        validate_mapping_fields(mapping)?;
+    }
+    Ok(())
+}
+
+fn validate_mapping_fields(mapping: &Mapping) -> Result<(), ConfigError> {
+    if mapping.checkout.as_os_str().is_empty() || mapping.base_branch.trim().is_empty() {
+        return Err(ConfigError::Invalid(
+            "mapping checkout and base_branch are required".into(),
+        ));
+    }
+    validate_push_remote(&mapping.push_remote)?;
+    validate_repository(&mapping.allowed_pr_head_repository)?;
+    if mapping.allowed_pr_author.trim().is_empty()
+        || !mapping
+            .allowed_pr_author
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_".contains(c))
+    {
+        return Err(ConfigError::Invalid("invalid allowed_pr_author".into()));
+    }
+    Ok(())
 }
 
 fn is_sensitive_header(value: &str) -> bool {
@@ -382,7 +401,31 @@ const WORKER_FLAGS_WITHOUT_VALUE: &[&str] = &[
     "--version",
 ];
 
+fn validate_tool_budget(command: &CommandTemplate) -> Result<(), ConfigError> {
+    let mut count = 0;
+    for (index, arg) in command.args.iter().enumerate() {
+        let value = if arg == "--max-tool-calls" {
+            command.args.get(index + 1).map(String::as_str)
+        } else {
+            arg.strip_prefix("--max-tool-calls=")
+        };
+        if arg == "--max-tool-calls" || arg.starts_with("--max-tool-calls=") {
+            count += 1;
+            let valid = value
+                .and_then(|v| v.parse::<i64>().ok())
+                .is_some_and(|v| v == -1 || (1..=512).contains(&v));
+            if !valid || count > 1 {
+                return Err(ConfigError::Invalid(
+                    "--max-tool-calls requires exactly one value: -1 or 1..512".into(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_command(command: &CommandTemplate) -> Result<(), ConfigError> {
+    validate_tool_budget(command)?;
     if command.executable.as_os_str().is_empty() {
         return Err(ConfigError::Invalid(
             "command executable is required".into(),
@@ -394,91 +437,109 @@ fn validate_command(command: &CommandTemplate) -> Result<(), ConfigError> {
         ));
     }
     let mut expects_value = false;
-    for arg in &command.args {
-        if matches!(arg.as_str(), "--header" | "-H" | "--env" | "-e")
-            || arg.starts_with("--header=")
-            || arg.starts_with("--env=")
+    for (index, arg) in command.args.iter().enumerate() {
+        if expects_value
+            && arg == "-1"
+            && index > 0
+            && command.args[index - 1] == "--max-tool-calls"
         {
-            return Err(ConfigError::Invalid(
-                "forbidden worker argument option".into(),
-            ));
-        }
-        if arg.starts_with('-') {
-            let flag = arg.split_once('=').map_or(arg.as_str(), |(flag, _)| flag);
-            let inline_value = arg.contains('=');
-            let takes_value = WORKER_FLAGS_WITH_VALUE.contains(&flag);
-            if !takes_value && !WORKER_FLAGS_WITHOUT_VALUE.contains(&flag) {
-                return Err(ConfigError::Invalid(
-                    "unrecognized worker argument option".into(),
-                ));
-            }
-            if expects_value {
-                return Err(ConfigError::Invalid(
-                    "worker option value is missing".into(),
-                ));
-            }
-            if takes_value && !inline_value {
-                expects_value = true;
-            } else if !takes_value && inline_value {
-                return Err(ConfigError::Invalid(
-                    "worker option does not accept a value".into(),
-                ));
-            }
-        } else if expects_value {
             expects_value = false;
-        } else if arg.is_empty() {
-            return Err(ConfigError::Invalid("invalid worker argument".into()));
+            continue;
         }
-        if sensitive_argument(arg) {
-            return Err(ConfigError::Invalid(
-                "credential-bearing command argument is forbidden".into(),
-            ));
-        }
-        if arg.contains("${")
-            || arg.contains("$(")
-            || arg.contains('`')
-            || arg.contains(';')
-            || arg.contains('|')
-            || arg.contains('>')
-            || arg.contains('<')
-        {
-            return Err(ConfigError::Invalid(
-                "shell interpolation/operators are forbidden in argv templates".into(),
-            ));
-        }
-        let mut rest = arg.as_str();
-        while let Some(start) = rest.find(['{', '}']) {
-            if rest.as_bytes()[start] == b'}' {
-                return Err(ConfigError::Invalid("unmatched template delimiter".into()));
-            }
-            let tail = &rest[start + 1..];
-            let Some(end) = tail.find(['{', '}']) else {
-                return Err(ConfigError::Invalid("unclosed template variable".into()));
-            };
-            if tail.as_bytes()[end] != b'}' {
-                return Err(ConfigError::Invalid("nested template delimiter".into()));
-            }
-            if !matches!(
-                &tail[..end],
-                "task.issue_number"
-                    | "task.repository"
-                    | "task.issue_url"
-                    | "task.id"
-                    | "attempt.id"
-                    | "worktree"
-            ) {
-                return Err(ConfigError::Invalid("unsupported template variable".into()));
-            }
-            rest = &tail[end + 1..];
-        }
-        if rest.contains('}') {
-            return Err(ConfigError::Invalid("unmatched template delimiter".into()));
-        }
+        validate_worker_option(arg, &mut expects_value)?;
+        validate_argument_template(arg)?;
     }
     if expects_value {
         return Err(ConfigError::Invalid(
             "worker option value is missing".into(),
         ));
+    }
+    Ok(())
+}
+
+fn validate_worker_option(arg: &str, expects_value: &mut bool) -> Result<(), ConfigError> {
+    if matches!(arg, "--header" | "-H" | "--env" | "-e")
+        || arg.starts_with("--header=")
+        || arg.starts_with("--env=")
+    {
+        return Err(ConfigError::Invalid(
+            "forbidden worker argument option".into(),
+        ));
+    }
+    if arg.starts_with('-') {
+        let flag = arg.split_once('=').map_or(arg, |(flag, _)| flag);
+        let inline_value = arg.contains('=');
+        let takes_value = WORKER_FLAGS_WITH_VALUE.contains(&flag);
+        if !takes_value && !WORKER_FLAGS_WITHOUT_VALUE.contains(&flag) {
+            return Err(ConfigError::Invalid(
+                "unrecognized worker argument option".into(),
+            ));
+        }
+        if *expects_value {
+            return Err(ConfigError::Invalid(
+                "worker option value is missing".into(),
+            ));
+        }
+        if takes_value && !inline_value {
+            *expects_value = true;
+        } else if !takes_value && inline_value {
+            return Err(ConfigError::Invalid(
+                "worker option does not accept a value".into(),
+            ));
+        }
+    } else if *expects_value {
+        *expects_value = false;
+    } else if arg.is_empty() {
+        return Err(ConfigError::Invalid("invalid worker argument".into()));
+    }
+    Ok(())
+}
+
+fn validate_argument_template(arg: &str) -> Result<(), ConfigError> {
+    if sensitive_argument(arg) {
+        return Err(ConfigError::Invalid(
+            "credential-bearing command argument is forbidden".into(),
+        ));
+    }
+    if arg.contains("${")
+        || arg.contains("$(")
+        || arg.contains('`')
+        || arg.contains(';')
+        || arg.contains('|')
+        || arg.contains('>')
+        || arg.contains('<')
+    {
+        return Err(ConfigError::Invalid(
+            "shell interpolation/operators are forbidden in argv templates".into(),
+        ));
+    }
+    let mut rest = arg;
+    while let Some(start) = rest.find(['{', '}']) {
+        if rest.as_bytes()[start] == b'}' {
+            return Err(ConfigError::Invalid("unmatched template delimiter".into()));
+        }
+        let tail = &rest[start + 1..];
+        let Some(end) = tail.find(['{', '}']) else {
+            return Err(ConfigError::Invalid("unclosed template variable".into()));
+        };
+        if tail.as_bytes()[end] != b'}' {
+            return Err(ConfigError::Invalid("nested template delimiter".into()));
+        }
+        if !matches!(
+            &tail[..end],
+            "task.issue_number"
+                | "task.repository"
+                | "task.issue_url"
+                | "task.id"
+                | "attempt.id"
+                | "worktree"
+        ) {
+            return Err(ConfigError::Invalid("unsupported template variable".into()));
+        }
+        rest = &tail[end + 1..];
+    }
+    if rest.contains('}') {
+        return Err(ConfigError::Invalid("unmatched template delimiter".into()));
     }
     Ok(())
 }
