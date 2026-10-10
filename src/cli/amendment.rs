@@ -50,7 +50,7 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::from_json(
         &fs::read_to_string(&args[5]).map_err(|_| "amendment configuration unavailable")?,
     )
-    .map_err(|_| "amendment configuration invalid")?;
+    .map_err(|error| error.operator_message("amendment"))?;
     let mut store = StateStore::open(&config.state_root, config.capacity)
         .map_err(|_| "amendment state unavailable")?;
     let mut projects = GhProjectReader::new(PathBuf::from("gh"));
