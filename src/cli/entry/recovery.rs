@@ -36,7 +36,7 @@ pub(crate) fn recover(args: Vec<String>) -> Result<(), Box<dyn std::error::Error
     let config = Config::from_json(
         &fs::read_to_string(&args[4]).map_err(|_| "recovery configuration unavailable")?,
     )
-    .map_err(|_| "recovery configuration invalid")?;
+    .map_err(|error| error.operator_message("recovery"))?;
     let mut store = StateStore::open(&config.state_root, config.capacity)
         .map_err(|_| "recovery state unavailable")?;
     let mut projects = GhProjectReader::new(PathBuf::from("gh"));
@@ -86,9 +86,7 @@ pub(crate) fn retry(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>>
     let config = Config::from_json(
         &fs::read_to_string(&args[4]).map_err(|_| "retry configuration unavailable")?,
     )
-    .map_err(
-        |_| "retry configuration invalid (check worker flags and --max-tool-calls: -1 or 1..512)",
-    )?;
+    .map_err(|error| error.operator_message("retry"))?;
     let mut store = StateStore::open(&config.state_root, config.capacity)?;
     crate::state::retry_context_for_task(&store, &args[0], &args[2])
         .map_err(|_| "retry requires the latest verified natural exit in attention")?;

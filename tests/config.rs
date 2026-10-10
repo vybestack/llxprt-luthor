@@ -120,19 +120,30 @@ fn rejects_duplicate_code_repository_mappings() {
 }
 
 #[test]
-fn rejects_unknown_template_and_shell_expansion() {
-    let json = valid().replace("{task.issue_url}", "$(curl bad)");
-    assert!(
-        Config::from_json(&json)
-            .unwrap_err()
-            .to_string()
-            .contains("shell")
-    );
+fn rejects_unknown_template_variables_without_echoing_values() {
     let sentinel = "PRIVATE_SENTINEL_SECRET_BYTES";
     let json = valid().replace("{task.issue_url}", &format!("{{{sentinel}}}"));
     let error = Config::from_json(&json).unwrap_err().to_string();
     assert!(error.contains("unsupported"));
     assert!(!error.contains(sentinel));
+}
+
+#[test]
+fn accepts_shell_metacharacters_because_argv_is_never_shell_interpreted() {
+    for prompt in [
+        "fix a; then b",
+        "left | right",
+        "write > out < in",
+        "$(echo hi) $HOME `date`",
+    ] {
+        let mut value: serde_json::Value = serde_json::from_str(valid()).unwrap();
+        value["initial"]["args"] = serde_json::json!(["-p", prompt]);
+        let config = Config::from_json(&value.to_string()).unwrap();
+        assert_eq!(
+            config.initial.render(&task_values()).unwrap().args,
+            ["-p", prompt]
+        );
+    }
 }
 
 #[test]
@@ -249,7 +260,7 @@ fn milestone_can_be_omitted() {
 }
 
 #[test]
-fn rejects_header_env_and_unknown_flags_without_echoing_values() {
+fn rejects_credential_bearing_header_and_env_arguments_without_echoing_values() {
     for args in [
         vec!["--header", "PRIVATE-TOKEN: DEMO_VALUE"],
         vec!["-H", "PRIVATE-TOKEN: DEMO_VALUE"],
@@ -257,7 +268,7 @@ fn rejects_header_env_and_unknown_flags_without_echoing_values() {
         vec!["--env", "PRIVATE_TOKEN=DEMO_VALUE"],
         vec!["-e", "TOKEN=DEMO_VALUE"],
         vec!["--env=TOKEN=DEMO_VALUE"],
-        vec!["--unrecognized", "DEMO_VALUE"],
+        vec!["--token", "DEMO_VALUE"],
     ] {
         let mut value: serde_json::Value = serde_json::from_str(valid()).unwrap();
         value["initial"]["args"] = serde_json::json!(args);
@@ -265,6 +276,27 @@ fn rejects_header_env_and_unknown_flags_without_echoing_values() {
             .unwrap_err()
             .to_string();
         assert!(!error.contains("DEMO_VALUE"), "{error}");
+    }
+}
+
+#[test]
+fn accepts_arbitrary_worker_flags_because_the_worker_validates_its_own_cli() {
+    for args in [
+        vec!["--localoauth", "--prompt", "literal"],
+        vec!["--unrecognized", "value"],
+        vec!["--oauth-login"],
+        vec!["--help=yes"],
+        vec!["--prompt"],
+        vec!["--max-tool-calls", "1024"],
+        vec!["--max-tool-calls=0", "--max-tool-calls=-1"],
+        vec!["--prompt", ""],
+        vec!["positional"],
+    ] {
+        let mut value: serde_json::Value = serde_json::from_str(valid()).unwrap();
+        value["initial"]["args"] = serde_json::json!(args);
+        value["resume"]["args"] = serde_json::json!(args);
+        let config = Config::from_json(&value.to_string()).unwrap();
+        assert_eq!(config.initial.render(&task_values()).unwrap().args, args);
     }
 }
 
@@ -281,34 +313,6 @@ fn accepts_verified_rs_arguments_and_renders_task_placeholders() {
             "/tmp/worktree"
         ]
     );
-}
-
-#[test]
-fn native_tool_budget_rejects_unsupported_values_and_accepts_unlimited() {
-    for value in ["-1", "1", "512", "0", "513", "1024", "no", "{attempt.id}"] {
-        for inline in [false, true] {
-            let mut config = Config::from_json(valid()).unwrap();
-            if inline {
-                config.resume.args.push(format!("--max-tool-calls={value}"));
-            } else {
-                config
-                    .resume
-                    .args
-                    .extend(["--max-tool-calls".into(), value.into()]);
-            }
-            assert_eq!(
-                config.validate().is_ok(),
-                ["-1", "1", "512"].contains(&value),
-                "{value}, inline={inline}"
-            );
-        }
-    }
-    let mut config = Config::from_json(valid()).unwrap();
-    config
-        .resume
-        .args
-        .extend(["--max-tool-calls=512".into(), "--max-tool-calls=-1".into()]);
-    assert!(config.validate().is_err());
 }
 
 mod validation_characterization {
@@ -472,7 +476,7 @@ mod validation_characterization {
         c.mappings[0].allowed_pr_head_repository = "bad".into();
         c.mappings[0].allowed_pr_author.clear();
         c.initial.executable = "".into();
-        c.resume.args = vec!["--unknown".into()];
+        c.resume.args = vec!["API_KEY=x".into()];
         assert_invalid(&c, "capacity, sources and mappings must be non-empty");
         c.capacity = 1;
         assert_invalid(&c, "invalid assignment_login");
@@ -501,7 +505,7 @@ mod validation_characterization {
         c.mappings[0].allowed_pr_author = "alice".into();
         assert_invalid(&c, "command executable is required");
         c.initial.executable = "/bin/llxprt-code-rs".into();
-        assert_invalid(&c, "unrecognized worker argument option");
+        assert_invalid(&c, "credential-bearing command argument is forbidden");
     }
 
     fn with_worker_args(resume: bool, args: &[&str]) -> Config {
@@ -513,116 +517,6 @@ mod validation_characterization {
         };
         command.args = args.iter().map(|arg| (*arg).into()).collect();
         config
-    }
-
-    #[test]
-    fn initial_and_resume_parser_keep_exact_errors_and_precedence() {
-        let cases: &[(&[&str], &str)] = &[
-            (&["--prompt"], "worker option value is missing"),
-            (&["--prompt", "--help"], "worker option value is missing"),
-            (
-                &["--prompt", "--unknown"],
-                "unrecognized worker argument option",
-            ),
-            (
-                &["--prompt", "--header"],
-                "forbidden worker argument option",
-            ),
-            (
-                &["--prompt", "--env=value"],
-                "forbidden worker argument option",
-            ),
-            (
-                &["--allow-shell=yes"],
-                "worker option does not accept a value",
-            ),
-            (&["--help=yes"], "worker option does not accept a value"),
-            (&[""], "invalid worker argument"),
-            (&["--help", ""], "invalid worker argument"),
-            (&["--prompt", "-1"], "unrecognized worker argument option"),
-            (
-                &["--prompt", "--help=yes"],
-                "worker option value is missing",
-            ),
-        ];
-        for resume in [false, true] {
-            for (args, expected) in cases {
-                assert_invalid(&with_worker_args(resume, args), expected);
-            }
-            for args in [
-                vec!["--prompt=literal", "--cwd", "{worktree}"],
-                vec!["--prompt", "literal", "--cwd={worktree}"],
-                vec!["--prompt=", "--prompt", ""],
-                vec!["--allow-shell", "--help", "--version"],
-                vec!["--max-tool-calls", "-1", "--prompt", "literal"],
-            ] {
-                let config = with_worker_args(resume, &args);
-                config.validate().unwrap();
-                let command = if resume {
-                    &config.resume
-                } else {
-                    &config.initial
-                };
-                let expected: Vec<_> = args
-                    .iter()
-                    .map(|arg| arg.replace("{worktree}", &task_values().worktree))
-                    .collect();
-                assert_eq!(command.render(&task_values()).unwrap().args, expected);
-            }
-        }
-    }
-
-    #[test]
-    fn localoauth_is_a_no_value_flag_and_oauth_login_stays_rejected() {
-        for resume in [false, true] {
-            let args = ["--localoauth", "--prompt", "literal"];
-            with_worker_args(resume, &args).validate().unwrap();
-            assert_invalid(
-                &with_worker_args(resume, &["--localoauth=x"]),
-                "worker option does not accept a value",
-            );
-            assert_invalid(
-                &with_worker_args(resume, &["--oauth-login"]),
-                "unrecognized worker argument option",
-            );
-        }
-    }
-
-    #[test]
-    fn initial_and_resume_budgets_keep_exact_errors_and_run_first() {
-        let error = "--max-tool-calls requires exactly one value: -1 or 1..512";
-        for resume in [false, true] {
-            for value in ["-1", "1", "512", "0", "513", "1024", "no", "{attempt.id}"] {
-                for args in [
-                    vec!["--max-tool-calls".into(), value.into()],
-                    vec![format!("--max-tool-calls={value}")],
-                ] {
-                    let refs: Vec<_> = args.iter().map(String::as_str).collect();
-                    let config = with_worker_args(resume, &refs);
-                    if ["-1", "1", "512"].contains(&value) {
-                        config.validate().unwrap();
-                    } else {
-                        assert_invalid(&config, error);
-                    }
-                }
-            }
-            for args in [
-                vec!["--max-tool-calls"],
-                vec!["--max-tool-calls", "--help"],
-                vec!["--unknown", "--max-tool-calls=0"],
-                vec!["--max-tool-calls=1", "--max-tool-calls=-1"],
-                vec!["--max-tool-calls", "512", "--max-tool-calls=1"],
-            ] {
-                let mut config = with_worker_args(resume, &args);
-                let command = if resume {
-                    &mut config.resume
-                } else {
-                    &mut config.initial
-                };
-                command.executable = "".into();
-                assert_invalid(&config, error);
-            }
-        }
     }
 
     #[test]
@@ -666,7 +560,7 @@ mod validation_characterization {
                         .contains("ISSUE12_SENTINEL")
                 );
             }
-            let mut config = with_worker_args(resume, &["--unknown"]);
+            let mut config = with_worker_args(resume, &["--prompt", "literal"]);
             let command = if resume {
                 &mut config.resume
             } else {
@@ -686,4 +580,18 @@ mod validation_characterization {
             assert_invalid(&config, "command executable is required");
         }
     }
+}
+
+#[test]
+fn operator_message_surfaces_fixed_validation_reasons_but_not_serde_input() {
+    let invalid = Config::from_json(&valid().replace("{task.issue_url}", "{nope}")).unwrap_err();
+    assert_eq!(
+        invalid.operator_message("retry"),
+        "retry configuration invalid: unsupported template variable"
+    );
+    let json = Config::from_json("{\"private-data\":true}").unwrap_err();
+    assert_eq!(
+        json.operator_message("retry"),
+        "retry configuration invalid"
+    );
 }

@@ -1,6 +1,6 @@
 # Configuration and state contract
 
-Configuration is a JSON object with `state_root`, `worktree_root`, positive `capacity`, an explicit non-secret `assignment_login` (the configured issue assignee, independent of the allowed PR author), non-empty `sources` and `mappings`, and `initial`/`resume` command templates. Each source has a Project ID, repository names (`owner/repo`), one `ready_marker`, and optional exact `milestone`. A marker is either `{ "kind": "label", "name": "..." }` or `{ "kind": "project_field", "name": "...", "value": "..." }`. Each mapping identifies tracker and code repositories, checkout path, base branch, push remote, allowed PR head repository, and allowed PR author. The allowed PR head repository may be either the in-repository tracker or code repository (including when they are the same repository) or an authorized fork; it must use `owner/repo` format. Commands contain an executable path and argv array. Supported literal substitutions are `{task.issue_number}`, `{task.repository}`, `{task.issue_url}`, `{task.id}`, `{attempt.id}` and `{worktree}`. These are argument templates, not shell: shell expansion/operators are rejected. Worker argv accepts only llxprt-code-rs flags verified from its headless help: value flags `--session`, `--turn`, `--branch`, `--profile`, `--profile-load`, `--cwd`, `-p`/`--prompt`, `--mem-profile`, `--max-tool-calls`, `--turn-time`, `--max-shell-output`, `--max-tool-output`, `--max-turn-output`, `--digest-size-floor`, `--model-params-mode`, `--request-timeout`; switches `--allow-insecure-http`, `--allow-shell`, `--print-config`, `-h`/`--help`, `-V`/`--version`. Header/env injection flags and unknown options are rejected. A value-taking option consumes one following argument or an `--option=value` argument. Keep credentials in the external credential store/environment, never configuration or argv.
+Configuration is a JSON object with `state_root`, `worktree_root`, positive `capacity`, an explicit non-secret `assignment_login` (the configured issue assignee, independent of the allowed PR author), non-empty `sources` and `mappings`, and `initial`/`resume` command templates. Each source has a Project ID, repository names (`owner/repo`), one `ready_marker`, and optional exact `milestone`. A marker is either `{ "kind": "label", "name": "..." }` or `{ "kind": "project_field", "name": "...", "value": "..." }`. Each mapping identifies tracker and code repositories, checkout path, base branch, push remote, allowed PR head repository, and allowed PR author. The allowed PR head repository may be either the in-repository tracker or code repository (including when they are the same repository) or an authorized fork; it must use `owner/repo` format. Commands contain an executable path and argv array. Supported literal substitutions are `{task.issue_number}`, `{task.repository}`, `{task.issue_url}`, `{task.id}`, `{attempt.id}` and `{worktree}`. These are argument templates, not shell: argv is exec'd directly, so shell metacharacters in an argument are ordinary text. Luthor does not validate worker flags, flag/value pairing or flag values; the worker validates its own command line and Luthor does not mirror its rules. Template syntax (known variables only, balanced braces), the executable path and credential-bearing arguments are still checked. Keep credentials in the external credential store/environment, never configuration or argv.
 
 Synthetic example (all paths, IDs and names are illustrative; no key is present):
 
@@ -70,13 +70,12 @@ processes/groups/descendants must agree. The new launch intent, audit evidence a
 reservation commit together under the coordinator lock. Failures before that
 transaction create no attempt; launch uncertainty afterwards retains the slot.
 
-Luthor validates the observed native `--max-tool-calls` boundary: exactly one
-literal value, `-1` or `1..512`, in either separated or inline form. Unknown flags,
-credential-bearing arguments, bad templates and shell operators remain rejected.
-Other native flag value semantics, profile contents, executable availability and
-provider behavior belong to the configured worker. Revalidate its help when
-changing worker builds. Stored historical snapshots are not rewritten or rejected
-merely because they contain the old unsupported budget; the current private
+Luthor does not validate worker flags or their values, including `--max-tool-calls`;
+the worker reports its own CLI errors. Credential-bearing arguments and bad
+templates remain rejected. Operator entry points print the fixed validation reason
+for an invalid configuration, never serde input. Profile contents, executable availability and
+provider behavior belong to the configured worker. Stored historical snapshots are not rewritten or rejected
+merely because they contain flags the worker later rejects; the current private
 configuration must pass validation. Both its templates must be valid.
 
 Normal stop/resume invariants and stored-selection semantics are unchanged. A

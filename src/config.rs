@@ -125,6 +125,18 @@ fn render_argument(argument: &str, values: &TaskValues) -> Result<String, Config
     Ok(rendered)
 }
 
+impl ConfigError {
+    /// Bounded message for operator entry points. Validation reasons are fixed
+    /// strings that never carry configuration values, whereas serde errors can
+    /// echo input bytes, so those are reduced to the subject alone.
+    pub fn operator_message(&self, subject: &str) -> String {
+        match self {
+            Self::Invalid(reason) => format!("{subject} configuration invalid: {reason}"),
+            Self::Json(_) => format!("{subject} configuration invalid"),
+        }
+    }
+}
+
 impl Config {
     pub fn from_json(json: &str) -> Result<Self, ConfigError> {
         let config: Self = serde_json::from_str(json)?;
@@ -370,63 +382,7 @@ fn sensitive_argument(value: &str) -> bool {
         || contains_credential(value)
 }
 
-// Flags verified against the llxprt-code-rs headless CLI help. Value-taking flags
-// consume exactly one following argv item; flag values remain ordinary task-template text.
-const WORKER_FLAGS_WITH_VALUE: &[&str] = &[
-    "--session",
-    "--turn",
-    "--branch",
-    "--profile",
-    "--profile-load",
-    "--cwd",
-    "-p",
-    "--prompt",
-    "--mem-profile",
-    "--max-tool-calls",
-    "--turn-time",
-    "--max-shell-output",
-    "--max-tool-output",
-    "--max-turn-output",
-    "--digest-size-floor",
-    "--model-params-mode",
-    "--request-timeout",
-];
-const WORKER_FLAGS_WITHOUT_VALUE: &[&str] = &[
-    "--allow-insecure-http",
-    "--allow-shell",
-    "--localoauth",
-    "--print-config",
-    "-h",
-    "--help",
-    "-V",
-    "--version",
-];
-
-fn validate_tool_budget(command: &CommandTemplate) -> Result<(), ConfigError> {
-    let mut count = 0;
-    for (index, arg) in command.args.iter().enumerate() {
-        let value = if arg == "--max-tool-calls" {
-            command.args.get(index + 1).map(String::as_str)
-        } else {
-            arg.strip_prefix("--max-tool-calls=")
-        };
-        if arg == "--max-tool-calls" || arg.starts_with("--max-tool-calls=") {
-            count += 1;
-            let valid = value
-                .and_then(|v| v.parse::<i64>().ok())
-                .is_some_and(|v| v == -1 || (1..=512).contains(&v));
-            if !valid || count > 1 {
-                return Err(ConfigError::Invalid(
-                    "--max-tool-calls requires exactly one value: -1 or 1..512".into(),
-                ));
-            }
-        }
-    }
-    Ok(())
-}
-
 fn validate_command(command: &CommandTemplate) -> Result<(), ConfigError> {
-    validate_tool_budget(command)?;
     if command.executable.as_os_str().is_empty() {
         return Err(ConfigError::Invalid(
             "command executable is required".into(),
@@ -437,81 +393,16 @@ fn validate_command(command: &CommandTemplate) -> Result<(), ConfigError> {
             "credential-bearing command executable is forbidden".into(),
         ));
     }
-    let mut expects_value = false;
-    for (index, arg) in command.args.iter().enumerate() {
-        if expects_value
-            && arg == "-1"
-            && index > 0
-            && command.args[index - 1] == "--max-tool-calls"
-        {
-            expects_value = false;
-            continue;
-        }
-        validate_worker_option(arg, &mut expects_value)?;
-        validate_argument_template(arg)?;
-    }
-    if expects_value {
-        return Err(ConfigError::Invalid(
-            "worker option value is missing".into(),
-        ));
-    }
-    Ok(())
-}
-
-fn validate_worker_option(arg: &str, expects_value: &mut bool) -> Result<(), ConfigError> {
-    if matches!(arg, "--header" | "-H" | "--env" | "-e")
-        || arg.starts_with("--header=")
-        || arg.starts_with("--env=")
-    {
-        return Err(ConfigError::Invalid(
-            "forbidden worker argument option".into(),
-        ));
-    }
-    if arg.starts_with('-') {
-        let flag = arg.split_once('=').map_or(arg, |(flag, _)| flag);
-        let inline_value = arg.contains('=');
-        let takes_value = WORKER_FLAGS_WITH_VALUE.contains(&flag);
-        if !takes_value && !WORKER_FLAGS_WITHOUT_VALUE.contains(&flag) {
-            return Err(ConfigError::Invalid(
-                "unrecognized worker argument option".into(),
-            ));
-        }
-        if *expects_value {
-            return Err(ConfigError::Invalid(
-                "worker option value is missing".into(),
-            ));
-        }
-        if takes_value && !inline_value {
-            *expects_value = true;
-        } else if !takes_value && inline_value {
-            return Err(ConfigError::Invalid(
-                "worker option does not accept a value".into(),
-            ));
-        }
-    } else if *expects_value {
-        *expects_value = false;
-    } else if arg.is_empty() {
-        return Err(ConfigError::Invalid("invalid worker argument".into()));
-    }
-    Ok(())
+    command
+        .args
+        .iter()
+        .try_for_each(|arg| validate_argument_template(arg))
 }
 
 fn validate_argument_template(arg: &str) -> Result<(), ConfigError> {
     if sensitive_argument(arg) {
         return Err(ConfigError::Invalid(
             "credential-bearing command argument is forbidden".into(),
-        ));
-    }
-    if arg.contains("${")
-        || arg.contains("$(")
-        || arg.contains('`')
-        || arg.contains(';')
-        || arg.contains('|')
-        || arg.contains('>')
-        || arg.contains('<')
-    {
-        return Err(ConfigError::Invalid(
-            "shell interpolation/operators are forbidden in argv templates".into(),
         ));
     }
     let mut rest = arg;
