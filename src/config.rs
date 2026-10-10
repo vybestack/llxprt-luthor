@@ -394,6 +394,7 @@ const WORKER_FLAGS_WITH_VALUE: &[&str] = &[
 const WORKER_FLAGS_WITHOUT_VALUE: &[&str] = &[
     "--allow-insecure-http",
     "--allow-shell",
+    "--localoauth",
     "--print-config",
     "-h",
     "--help",

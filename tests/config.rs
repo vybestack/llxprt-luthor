@@ -573,6 +573,22 @@ mod validation_characterization {
     }
 
     #[test]
+    fn localoauth_is_a_no_value_flag_and_oauth_login_stays_rejected() {
+        for resume in [false, true] {
+            let args = ["--localoauth", "--prompt", "literal"];
+            with_worker_args(resume, &args).validate().unwrap();
+            assert_invalid(
+                &with_worker_args(resume, &["--localoauth=x"]),
+                "worker option does not accept a value",
+            );
+            assert_invalid(
+                &with_worker_args(resume, &["--oauth-login"]),
+                "unrecognized worker argument option",
+            );
+        }
+    }
+
+    #[test]
     fn initial_and_resume_budgets_keep_exact_errors_and_run_first() {
         let error = "--max-tool-calls requires exactly one value: -1 or 1..512";
         for resume in [false, true] {
