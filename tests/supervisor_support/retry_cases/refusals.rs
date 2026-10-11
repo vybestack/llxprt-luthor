@@ -90,10 +90,7 @@ fn apply_refusal(
         | "receipt_contradiction"
         | "supervisor_error" => apply_process_refusal(refusal, config, store, db),
         "invalid_config" => {
-            config
-                .resume
-                .args
-                .extend(["--max-tool-calls".into(), "1024".into()]);
+            config.resume.args.push("{unsupported.variable}".into());
         }
         _ => unreachable!(),
     }
