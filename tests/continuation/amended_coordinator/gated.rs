@@ -5,13 +5,7 @@ use luthor::{
     state::{NeverDispatchedContext, StateStore},
     supervisor::{self, LaunchPlan, Reconciliation, SupervisorError},
 };
-use std::{
-    fs,
-    os::unix::fs::PermissionsExt,
-    path::Path,
-    thread,
-    time::{Duration, Instant},
-};
+use std::{fs, os::unix::fs::PermissionsExt, path::Path};
 
 struct Gated;
 impl AmendedSupervisorLauncher for Gated {
@@ -61,17 +55,7 @@ fn executable_case() -> Case {
 }
 
 fn await_receipt(case: &Case) {
-    let root = case.lane.f.store.root();
-    let receipt = root.join("attempts/attempt-task-a.receipt.json");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !receipt.exists() && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(20));
-    }
-    assert!(
-        receipt.exists(),
-        "{:?}",
-        fs::read_to_string(root.join("attempts/attempt-task-a.supervisor.log"))
-    );
+    crate::coordinator::waiting::receipt(case.lane.f.store.root(), &case.lane.plan.attempt_id);
 }
 
 #[test]
@@ -87,6 +71,7 @@ fn amended_coordinator_real_gated_worker_gets_only_audited_effective_argv() {
         ContinuationResult::Dispatched(Box::new(effective.clone()))
     );
     await_receipt(&case);
+    crate::coordinator::waiting::owner_release(case.lane.f.store.root(), &case.lane.plan.task_id);
     let root = case.lane.f.store.root();
     let artifact: LaunchPlan =
         serde_json::from_slice(&fs::read(root.join("attempts/attempt-task-a.plan.json")).unwrap())

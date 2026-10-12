@@ -14,13 +14,7 @@ use luthor::{
     state::verify_amended_worker_plan,
     supervisor::{self, LaunchPlan, Reconciliation, RecoveryInspection},
 };
-use std::{
-    fs,
-    os::unix::fs::PermissionsExt,
-    path::Path,
-    thread,
-    time::{Duration, Instant},
-};
+use std::{fs, os::unix::fs::PermissionsExt, path::Path};
 
 fn dispatch_count(lane: &Lane) -> usize {
     database(lane)
@@ -79,25 +73,7 @@ fn launch(lane: &mut Lane, binary: &Path) -> Result<(), supervisor::SupervisorEr
 }
 
 fn await_receipt(lane: &Lane) {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let path = lane
-        .f
-        .store
-        .root()
-        .join("attempts/attempt-task-a.receipt.json");
-    while !path.exists() && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(20));
-    }
-    assert!(
-        path.exists(),
-        "supervisor log: {:?}",
-        fs::read_to_string(
-            lane.f
-                .store
-                .root()
-                .join("attempts/attempt-task-a.supervisor.log")
-        )
-    );
+    crate::coordinator::waiting::receipt(lane.f.store.root(), &lane.plan.attempt_id);
 }
 
 #[test]

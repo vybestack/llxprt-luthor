@@ -6,8 +6,10 @@ mod coordinator {
     pub(crate) mod dispatch_scenarios;
     mod fakes;
     mod fixture;
+    mod isolation;
     pub(crate) mod resume_scenarios;
     pub(crate) mod scheduling_scenarios;
+    pub(crate) mod waiting;
 
     pub(crate) use fakes::{FakeGithub, FakeLauncher, FakePr, FakeWriter, FixedIds};
     pub(crate) use fixture::{Fixture, git};
