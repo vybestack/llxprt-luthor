@@ -75,6 +75,34 @@ fn create_checkout(path: &Path) {
             String::from_utf8_lossy(&result.stderr)
         );
     }
+    let remote = path.parent().unwrap().join("remote.git");
+    let output = Command::new("git")
+        .args(["clone", "--bare"])
+        .arg(path)
+        .arg(&remote)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let ssh = remote.join("fixture-ssh");
+    fs::write(
+        &ssh,
+        format!("#!/bin/sh\nexec git-upload-pack '{}'\n", remote.display()),
+    )
+    .unwrap();
+    for (key, value) in [
+        ("core.sshCommand", format!("sh '{}'", ssh.display())),
+        ("ssh.variant", "ssh".into()),
+    ] {
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(path)
+                .args(["config", key, &value])
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
 }
 
 fn project_item(number: u64) -> serde_json::Value {

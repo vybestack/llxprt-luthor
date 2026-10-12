@@ -1,4 +1,5 @@
 mod continuation;
+mod git_fixture;
 mod preflight;
 
 mod coordinator {
@@ -162,4 +163,47 @@ fn occupied_owner_prevents_dispatch_before_persisting_or_claiming_task() {
     assert_eq!(github.prs.lookups, 0);
     assert!(launcher.plans.is_empty());
     drop(owner);
+}
+
+#[test]
+fn remote_base_fetch_failure_holds_dispatch_without_launch_or_stale_worktree() {
+    let mut f = Fixture::new(1);
+    fs::remove_dir_all(f.dir.path().join("remote.git")).unwrap();
+    let c = f.candidate.clone();
+    let mut github = FakeGithub::new(&c);
+    let mut writer = FakeWriter::default();
+    let mut launcher = FakeLauncher::default();
+    assert!(matches!(
+        f.run("task-fetch", &c, &mut github, &mut writer, &mut launcher),
+        Err(DispatchError::Worktree(
+            luthor::worktree::WorktreeError::BaseFetch
+        ))
+    ));
+    assert!(launcher.plans.is_empty());
+    assert!(!f.config.worktree_root.exists());
+    assert_eq!(
+        luthor::state::task_records::task_phase(&f.store, "task-fetch")
+            .unwrap()
+            .as_deref(),
+        Some("held")
+    );
+    assert_eq!(
+        luthor::state::scheduling::reservation_count(&f.store).unwrap(),
+        0
+    );
+    assert!(
+        luthor::state::task_records::latest_attempt(&f.store, "task-fetch")
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        luthor::state::worktree_records::worktree_record(&f.store, "task-fetch")
+            .unwrap()
+            .is_none()
+    );
+    let db = rusqlite::Connection::open(f.config.state_root.join("state.sqlite3")).unwrap();
+    let reason: String = db.query_row(
+        "SELECT payload FROM evidence WHERE task_id=?1 AND kind='held_reason' ORDER BY sequence DESC LIMIT 1",
+        ["task-fetch"], |row| row.get(0)).unwrap();
+    assert_eq!(reason, "remote base fetch failed");
 }

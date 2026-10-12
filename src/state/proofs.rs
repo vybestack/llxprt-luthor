@@ -147,6 +147,7 @@ pub(crate) fn validate_pr_identity(
     if intent.branch != identity.branch
         || intent.repository != identity.repository
         || intent.base != identity.base
+        || intent.base_commit != identity.base_commit
         || identity.branch.is_empty()
         || identity.head.is_empty()
         || identity.repository != mapping.code_repository

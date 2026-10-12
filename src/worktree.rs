@@ -20,6 +20,8 @@ pub enum WorktreeError {
     Conflict(&'static str),
     #[error("git operation failed: {0}")]
     Git(&'static str),
+    #[error("remote base fetch failed; dispatch held (no stale local fallback)")]
+    BaseFetch,
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]
@@ -99,6 +101,7 @@ pub fn verify_record(
         || expected.path != record.intent.path
         || expected.branch != record.intent.branch
         || expected.base != record.intent.base
+        || expected.base_commit != record.intent.base_commit
         || expected.repository != record.intent.repository
     {
         return Err(WorktreeError::Conflict(
@@ -145,6 +148,7 @@ pub fn verify_snapshot(expected: &WorktreeIdentity) -> Result<(), WorktreeError>
             path: expected.path.clone(),
             branch: expected.branch.clone(),
             base: expected.base.clone(),
+            base_commit: expected.base_commit.clone(),
             repository: expected.repository.clone(),
         },
         &expected.git_directory,
@@ -266,12 +270,17 @@ fn validate_checkout(mapping: &Mapping) -> Result<(PathBuf, PathBuf, String), Wo
             "push remote differs from mapped repositories",
         ));
     }
-    let base_ref = format!("refs/heads/{}", mapping.base_branch);
-    if !git(&checkout, &["show-ref", "--verify", "--quiet", &base_ref])?
-        .status
-        .success()
+    if !git(
+        &checkout,
+        &[
+            "check-ref-format",
+            &format!("refs/heads/{}", mapping.base_branch),
+        ],
+    )?
+    .status
+    .success()
     {
-        return Err(WorktreeError::Conflict("base branch is absent"));
+        return Err(WorktreeError::Conflict("invalid base branch ref"));
     }
     Ok((checkout, git_dir, remote))
 }
@@ -360,6 +369,7 @@ fn identity(
         inode,
         branch: intent.branch.clone(),
         base: intent.base.clone(),
+        base_commit: intent.base_commit.clone(),
         head,
         repository: intent.repository.clone(),
         git_directory: actual_git_dir,
@@ -429,6 +439,7 @@ pub fn preflight(
             path: root.join(task_id),
             branch: format!("luthor/{task_id}"),
             base: mapping.base_branch.clone(),
+            base_commit: None,
             repository: mapping.code_repository.clone(),
         },
     )
@@ -458,10 +469,11 @@ pub fn ensure_worktree_with_hooks(
     validate_task_id(task_id)?;
     verify_selected_mapping(store, task_id, worktree_root, mapping)?;
     let root = check_root(worktree_root)?;
-    let intent = WorktreeIntent {
+    let mut intent = WorktreeIntent {
         path: root.join(task_id),
         branch: format!("luthor/{task_id}"),
         base: mapping.base_branch.clone(),
+        base_commit: None,
         repository: mapping.code_repository.clone(),
     };
     let (checkout, git_dir, remote) = validate_checkout(mapping)?;
@@ -469,6 +481,13 @@ pub fn ensure_worktree_with_hooks(
         return reuse_worktree(store, task_id, record, &intent, &git_dir, &remote);
     }
     check_new_worktree(&checkout, &intent)?;
+    intent.base_commit = Some(match fetch_base(&checkout, mapping, task_id) {
+        Ok(commit) => commit,
+        Err(error) => {
+            task_records::hold_task(store, task_id, "remote base fetch failed")?;
+            return Err(error);
+        }
+    });
     before_intent(store);
     worktree_records::begin_worktree(store, task_id, &intent)?;
     let outcome = (|| {
@@ -516,7 +535,9 @@ fn reuse_worktree(
     git_dir: &Path,
     remote: &str,
 ) -> Result<WorktreeResult, WorktreeError> {
-    if record.intent != *intent {
+    let mut saved_intent = record.intent.clone();
+    saved_intent.base_commit = None;
+    if saved_intent != *intent {
         return Err(WorktreeError::Conflict(
             "worktree intent differs from mapping",
         ));
@@ -527,7 +548,7 @@ fn reuse_worktree(
             "unfinished worktree intent requires inspection",
         ));
     };
-    let result = identity(&intent.path, intent, git_dir, remote);
+    let result = identity(&intent.path, &record.intent, git_dir, remote);
     match result {
         Ok(actual) if matches_snapshot(&expected, &actual)? => {
             Ok(WorktreeResult::Existing(expected))
@@ -571,11 +592,44 @@ fn add_worktree(checkout: &Path, intent: &WorktreeIntent) -> Result<(), Worktree
                 .path
                 .to_str()
                 .ok_or(WorktreeError::Conflict("non-UTF8 worktree path"))?,
-            &intent.base,
+            intent
+                .base_commit
+                .as_deref()
+                .ok_or(WorktreeError::Conflict(
+                    "new worktree has no fetched base commit",
+                ))?,
         ],
     )?;
     if !output.status.success() {
         return Err(WorktreeError::Git("worktree add failed"));
     }
     Ok(())
+}
+
+/// Pin each task's fetch in its own ref: FETCH_HEAD and remote-tracking refs can
+/// be changed by another dispatch. Never update the operator's local base branch.
+fn fetch_base(checkout: &Path, mapping: &Mapping, task_id: &str) -> Result<String, WorktreeError> {
+    let source = format!("refs/heads/{}", mapping.base_branch);
+    let target = format!("refs/luthor/task-bases/{task_id}");
+    let refspec = format!("+{source}:{target}");
+    let output = git(
+        checkout,
+        &[
+            "fetch",
+            "--no-tags",
+            "--no-write-fetch-head",
+            "--",
+            &mapping.push_remote,
+            &refspec,
+        ],
+    )
+    .map_err(|_| WorktreeError::BaseFetch)?;
+    if !output.status.success() {
+        return Err(WorktreeError::BaseFetch);
+    }
+    read_git(
+        checkout,
+        &["rev-parse", "--verify", &format!("{target}^{{commit}}")],
+    )
+    .map_err(|_| WorktreeError::BaseFetch)
 }

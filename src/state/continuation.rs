@@ -341,6 +341,7 @@ fn validate_worktree_plan(
     if intent.path != wt.path
         || intent.branch != wt.branch
         || intent.base != wt.base
+        || intent.base_commit != wt.base_commit
         || intent.repository != wt.repository
         || wt.base != mapping.base_branch
         || wt.repository != mapping.code_repository

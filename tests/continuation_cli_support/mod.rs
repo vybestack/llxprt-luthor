@@ -94,6 +94,7 @@ impl Fixture {
         fs::write(checkout.join("README"), "fixture").unwrap();
         git(&checkout, &["add", "README"]);
         git(&checkout, &["commit", "-m", "initial"]);
+        crate::git_fixture::remote(&checkout);
         let marker = root.join("worker-runs");
         let worker_name = if native {
             "llxprt-code-rs".into()

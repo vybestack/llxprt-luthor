@@ -79,6 +79,7 @@ pub(crate) fn source_reconcile_partial_worktree_and_source_errors_stay_held() {
             path: std::fs::canonicalize(&root).unwrap().join("task"),
             branch: "luthor/task".into(),
             base: "main".into(),
+            base_commit: None,
             repository: "org/code".into(),
         },
     )
@@ -137,6 +138,7 @@ pub(crate) fn fully_recorded_source_without_attempt_still_blocks_new_selection()
             path: path.clone(),
             branch: "luthor/task".into(),
             base: "main".into(),
+            base_commit: None,
             repository: "org/code".into(),
         },
     )
@@ -150,6 +152,7 @@ pub(crate) fn fully_recorded_source_without_attempt_still_blocks_new_selection()
             inode: 1,
             branch: "luthor/task".into(),
             base: "main".into(),
+            base_commit: None,
             head: "bogus".into(),
             repository: "org/code".into(),
             git_directory: root,

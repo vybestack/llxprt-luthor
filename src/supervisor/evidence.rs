@@ -63,6 +63,7 @@ pub(crate) fn reconciliation_plan_evidence(
                 || r.intent.path != worktree.path
                 || r.intent.branch != worktree.branch
                 || r.intent.base != worktree.base
+                || r.intent.base_commit != worktree.base_commit
                 || r.intent.repository != worktree.repository
         })
     {

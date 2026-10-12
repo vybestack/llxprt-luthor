@@ -50,6 +50,7 @@ fn mapping(dir: &Path) -> Mapping {
     fs::write(checkout.join("README"), "fixture").unwrap();
     git(&checkout, &["add", "README"]);
     git(&checkout, &["commit", "-m", "fixture"]);
+    crate::git_fixture::remote(&checkout);
     Mapping {
         tracker_repository: "org/tracker".into(),
         code_repository: "org/code".into(),
