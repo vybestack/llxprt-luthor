@@ -1,3 +1,5 @@
+#[cfg(target_os = "macos")]
+mod git_fixture;
 use luthor::platform::{ProcessStatError, parse_linux_process_stat};
 
 fn stat_fixture(name: &str, state: char, start: &str) -> String {

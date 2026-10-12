@@ -69,7 +69,12 @@ fn worktree_preflight_failures_precede_assignment_and_attempts() {
         let mut f = Fixture::new(1);
         let checkout = f.candidate.mapping.checkout.clone();
         match failure {
-            "base" => git(&checkout, &["branch", "-m", "missing-base"]),
+            // Local base absence is now valid: new worktrees use the fetched
+            // remote tip. Invalid mapped refs must still fail before claiming.
+            "base" => {
+                f.config.mappings[0].base_branch = "main:refs/heads/other".into();
+                f.candidate.mapping = f.config.mappings[0].clone();
+            }
             "origin" => git(
                 &checkout,
                 &[

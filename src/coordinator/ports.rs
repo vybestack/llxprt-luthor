@@ -55,6 +55,7 @@ pub(crate) fn dispatch_failure_reason(
     // Keep the reason bounded to a stage/type: external error strings may carry credentials.
     match error {
         DispatchError::Claim(_) => "claim failed",
+        DispatchError::Worktree(WorktreeError::BaseFetch) => "remote base fetch failed",
         DispatchError::Worktree(_) => "worktree failed",
         DispatchError::ChangedClaim => "prelaunch claim changed",
         DispatchError::ExistingPr => "prelaunch PR present",

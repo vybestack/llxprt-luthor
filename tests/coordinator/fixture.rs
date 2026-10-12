@@ -197,6 +197,7 @@ fn fixture_checkout(dir: &tempfile::TempDir) -> std::path::PathBuf {
     fs::write(checkout.join("README"), "test").unwrap();
     git(&checkout, &["add", "README"]);
     git(&checkout, &["commit", "-m", "initial"]);
+    crate::git_fixture::remote(&checkout);
     checkout
 }
 

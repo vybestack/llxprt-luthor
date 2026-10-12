@@ -1,4 +1,5 @@
 #![cfg(unix)]
+mod git_fixture;
 use luthor::state::{journal, launches, scheduling, task_records};
 mod continuation_cli_support;
 use continuation_cli_support::{Fixture, git, wait_for};

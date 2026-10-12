@@ -42,6 +42,9 @@ pub struct WorktreeIntent {
     pub path: PathBuf,
     pub branch: String,
     pub base: String,
+    /// Fetched commit pinned before creation; absent only on pre-refresh records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_commit: Option<String>,
     pub repository: String,
 }
 
@@ -52,6 +55,9 @@ pub struct WorktreeIdentity {
     pub inode: u64,
     pub branch: String,
     pub base: String,
+    /// Immutable original base, retained when the worker advances HEAD.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_commit: Option<String>,
     pub head: String,
     pub repository: String,
     pub git_directory: PathBuf,

@@ -129,6 +129,7 @@ fn recovery_plan_evidence(
                 || r.intent.path != worktree.path
                 || r.intent.branch != worktree.branch
                 || r.intent.base != worktree.base
+                || r.intent.base_commit != worktree.base_commit
                 || r.intent.repository != worktree.repository
         })
         || !worktree::matches_snapshot(&worktree, &plan.expected_worktree).unwrap_or(false)

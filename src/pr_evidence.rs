@@ -68,6 +68,7 @@ pub fn expected_for_task<Q: PullRequestReader>(
         || worktree.intent.base != mapping.base_branch
         || identity.base != mapping.base_branch
         || identity.branch.is_empty()
+        || identity.base_commit != worktree.intent.base_commit
         || identity.head.is_empty()
         || identity.repository.is_empty()
     {

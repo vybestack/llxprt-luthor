@@ -1,4 +1,5 @@
 #![cfg(unix)]
+mod git_fixture;
 mod worker_exit;
 use luthor::state::journal::evidence_payloads;
 use luthor::state::launches::launch_intent;
@@ -180,6 +181,7 @@ fn fixture_checkout(root: &Path) -> std::path::PathBuf {
     fs::write(checkout.join("README"), "fixture").unwrap();
     git(&checkout, &["add", "README"]);
     git(&checkout, &["commit", "-m", "initial"]);
+    crate::git_fixture::remote(&checkout);
     checkout
 }
 

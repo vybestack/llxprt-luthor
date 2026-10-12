@@ -196,6 +196,7 @@ impl Harness {
                     .success()
             );
         }
+        crate::git_fixture::remote(checkout);
     }
     fn launch_worker(&self, store: &mut StateStore) {
         let plan = prepare_initial(store, "task", "running-attempt").unwrap();

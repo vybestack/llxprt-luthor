@@ -1,3 +1,4 @@
+mod git_fixture;
 use luthor::{
     claim::{AssignmentError, AssignmentWriter},
     config::{CommandTemplate, Config, Mapping, Marker, Source},

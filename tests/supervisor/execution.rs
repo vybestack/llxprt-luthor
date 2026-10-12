@@ -25,6 +25,7 @@ pub(crate) fn direct_snapshot(root: &Path) -> WorktreeIdentity {
         inode: meta.ino(),
         branch: "main".into(),
         base: "main".into(),
+        base_commit: None,
         head: String::from_utf8(head).unwrap().trim().into(),
         repository: "org/code".into(),
         git_directory: fs::canonicalize(root.join(".git")).unwrap(),

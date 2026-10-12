@@ -130,7 +130,12 @@ pub fn finish_worktree(
         || intent.path != identity.path
         || intent.branch != identity.branch
         || intent.base != identity.base
+        || intent.base_commit != identity.base_commit
         || intent.repository != identity.repository
+        || intent
+            .base_commit
+            .as_ref()
+            .is_some_and(|commit| commit != &identity.head)
     {
         return Err(StateError::InvalidSelection);
     }

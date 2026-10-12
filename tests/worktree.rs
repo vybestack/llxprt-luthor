@@ -1,3 +1,7 @@
+mod git_fixture;
+mod worktree {
+    mod remote_base;
+}
 use luthor::state::{journal, task_records, worktree_records};
 use luthor::{
     config::{CommandTemplate, Config, Mapping, Marker, Source},
@@ -44,6 +48,7 @@ impl Fixture {
         fs::write(checkout.join("README"), "test").unwrap();
         git(&checkout, &["add", "README"]);
         git(&checkout, &["commit", "-m", "initial"]);
+        crate::git_fixture::remote(&checkout);
         let config = Config {
             state_root: dir.path().join("state"),
             worktree_root: dir.path().join("private"),
@@ -281,6 +286,15 @@ fn restart_accepts_descendant_commit_but_partial_intent_holds_without_retry() {
     git(&identity.path, &["add", "change"]);
     git(&identity.path, &["commit", "-m", "changed"]);
     verify_snapshot(&identity).unwrap();
+    assert_eq!(
+        identity.base_commit.as_deref(),
+        Some(identity.head.as_str())
+    );
+    let saved = worktree_records::worktree_record(&f.store, "task-1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.intent.base_commit, identity.base_commit);
+    assert_eq!(saved.identity, Some(identity.clone()));
     drop(f.store);
     let mut store = StateStore::open(&f.config.state_root, 1).unwrap();
     assert_eq!(
@@ -303,6 +317,7 @@ fn restart_accepts_descendant_commit_but_partial_intent_holds_without_retry() {
             path: root.join("task-2"),
             branch: "luthor/task-2".into(),
             base: "main".into(),
+            base_commit: None,
             repository: "org/code".into(),
         },
     )
@@ -321,6 +336,14 @@ fn rewound_or_unrelated_head_is_not_adopted() {
     fs::write(checkout.join("second"), "second").unwrap();
     git(checkout, &["add", "second"]);
     git(checkout, &["commit", "-m", "second"]);
+    git(
+        checkout,
+        &[
+            "push",
+            f.dir.path().join("remote.git").to_str().unwrap(),
+            "main",
+        ],
+    );
     f.task("task-1", 1, true);
     let WorktreeResult::Created(identity) = f.create("task-1").unwrap() else {
         panic!()

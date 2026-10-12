@@ -112,6 +112,7 @@ pub(super) fn claimed_for_mapping(store: &mut StateStore, config: &Config, candi
     fs::write(checkout.join("README"), "fixture").unwrap();
     git(checkout, &["add", "README"]);
     git(checkout, &["commit", "-m", "initial"]);
+    crate::git_fixture::remote(checkout);
     ensure_worktree(store, "task", &config.worktree_root, &candidate.mapping).unwrap();
 }
 

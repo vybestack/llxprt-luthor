@@ -1,4 +1,5 @@
 #![cfg(unix)]
+mod git_fixture;
 
 use serde_json::{Value, json};
 use std::{
@@ -176,6 +177,7 @@ fn differing_assignment_principal_claims_issue_with_acoliver_write_account() {
             String::from_utf8_lossy(&result.stderr)
         );
     }
+    crate::git_fixture::remote(&checkout);
     let result = run(&config, &path, &["--issues", "7", "--execute"]);
     let calls = fs::read_to_string(dir.path().join("calls")).unwrap();
     assert!(calls.contains("api user --jq .login"));
@@ -275,6 +277,7 @@ fn preview_assigned_target_fails_without_mutating_persisted_state() {
             String::from_utf8_lossy(&result.stderr)
         );
     }
+    crate::git_fixture::remote(&checkout);
     let first = run(&config, &path, &["--issues", "7", "--execute"]);
     assert!(!first.status.success());
     assert!(dir.path().join("assigned").exists());

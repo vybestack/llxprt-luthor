@@ -17,6 +17,24 @@ Synthetic example (all paths, IDs and names are illustrative; no key is present)
 }
 ```
 
+### Remote base for new task worktrees
+
+Before creating a new task worktree, Luthor fetches `refs/heads/<base_branch>`
+from the mapping's `push_remote` (a configured remote name or explicit URL).
+The fetched tip is pinned in `refs/luthor/task-bases/<task_id>` and its commit
+ID is persisted as `base_commit` in the task's `worktree_create` intent and
+`worktree_created` evidence. Worktree creation uses that commit ID, not the
+local branch, `FETCH_HEAD`, or a shared remote-tracking ref. The checkout's
+local base branch is neither required nor moved.
+
+A failed fetch (including a missing remote base) holds the task with
+`remote base fetch failed`; no task branch, worktree, or worker launch is
+created and there is no stale-ref fallback. Task assignment may already have
+been verified, so a held task still requires operator inspection. Reusing or
+inspecting an existing worktree never fetches or changes its recorded base.
+Older persisted worktrees without `base_commit` remain inspectable under the
+existing identity and ancestry checks; all newly created worktrees record it.
+
 The initial launch and every continuation use the task ID as the worker session ID. Each continuation gets a new attempt ID in its prompt, while keeping the issue URL and verified worktree. The supervisor adds its mandatory issue-to-PR instructions to each rendered prompt and rejects a resume that changes the session, worktree, or prompt from its predecessor. These command templates are parsed by `Config::from_json`, rendered as argv (without a shell), then checked by the production launch preparation path.
 
 ## Local operator commands

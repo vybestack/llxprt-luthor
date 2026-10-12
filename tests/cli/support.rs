@@ -60,6 +60,7 @@ impl Fixture {
                 inode: 1,
                 branch: "luthor/task".into(),
                 base: "main".into(),
+                base_commit: None,
                 head: "abc".into(),
                 repository: "org/code".into(),
                 git_directory: PathBuf::from("/checkout/.git"),
