@@ -2,6 +2,9 @@ use serde::{Deserialize, Serialize};
 use std::{collections::HashSet, path::PathBuf};
 use thiserror::Error;
 
+mod required_checks;
+pub use required_checks::{CheckRule, RequiredChecks};
+
 #[derive(Debug, Error)]
 pub enum ConfigError {
     #[error("invalid JSON configuration: {0}")]
@@ -95,6 +98,8 @@ pub struct Mapping {
     pub push_remote: String,
     pub allowed_pr_head_repository: String,
     pub allowed_pr_author: String,
+    #[serde(default, skip_serializing_if = "RequiredChecks::is_default")]
+    pub required_checks: RequiredChecks,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -290,6 +295,10 @@ fn validate_mapping_fields(mapping: &Mapping) -> Result<(), ConfigError> {
             "mapping checkout and base_branch are required".into(),
         ));
     }
+    mapping
+        .required_checks
+        .validate()
+        .map_err(|reason| ConfigError::Invalid(reason.into()))?;
     validate_push_remote(&mapping.push_remote)?;
     validate_repository(&mapping.allowed_pr_head_repository)?;
     if mapping.allowed_pr_author.trim().is_empty()

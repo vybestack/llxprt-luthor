@@ -502,7 +502,12 @@ impl PrHealthReader for LaggingSearch<'_> {
     fn failed_job_logs(&mut self, a: &str, b: u64) -> Result<String, LookupError> {
         self.open.failed_job_logs(a, b)
     }
-    fn health(&mut self, a: &str, b: u64) -> Result<PrHealth, LookupError> {
-        self.open.health(a, b)
+    fn health(
+        &mut self,
+        a: &str,
+        b: u64,
+        checks: &luthor::config::RequiredChecks,
+    ) -> Result<PrHealth, LookupError> {
+        self.open.health(a, b, checks)
     }
 }

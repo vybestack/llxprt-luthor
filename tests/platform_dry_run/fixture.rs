@@ -59,6 +59,7 @@ fn mapping(dir: &Path) -> Mapping {
         push_remote: "origin".into(),
         allowed_pr_head_repository: "org/code".into(),
         allowed_pr_author: "operator".into(),
+        required_checks: Default::default(),
     }
 }
 fn source() -> Source {

@@ -208,8 +208,13 @@ impl PrHealthReader for GhPullRequestReader {
     fn failed_job_logs(&mut self, repository: &str, job_id: u64) -> Result<String, LookupError> {
         super::job_reader::logs(&self.executable, repository, job_id)
     }
-    fn health(&mut self, repository: &str, number: u64) -> Result<PrHealth, LookupError> {
-        observe_health(repository, number, |args| self.api(args))
+    fn health(
+        &mut self,
+        repository: &str,
+        number: u64,
+        checks: &crate::config::RequiredChecks,
+    ) -> Result<PrHealth, LookupError> {
+        observe_health(repository, number, checks, |args| self.api(args))
     }
 }
 

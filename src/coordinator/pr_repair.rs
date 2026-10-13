@@ -262,7 +262,11 @@ fn inspect_open_pr<P: ProjectReader, Q: PrHealthReader, L: SupervisorLauncher, I
         return Err(supervisor::SupervisorError::Conflict.into());
     }
     verify_completion_claim(projects, &selection)?;
-    let health = prs.health(&saved.repository, saved.number)?;
+    let health = prs.health(
+        &saved.repository,
+        saved.number,
+        &selection.candidate.mapping.required_checks,
+    )?;
     if health.id != observed.id || health.head != observed.head_commit_sha {
         return Err(supervisor::SupervisorError::Conflict.into());
     }

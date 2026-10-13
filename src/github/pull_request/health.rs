@@ -11,6 +11,8 @@ pub struct PrHealth {
     pub required_checks_pending: bool,
     pub failed_jobs: Vec<FailedJob>,
     pub required_jobs: Vec<FailedJob>,
+    #[serde(default = "RequiredChecksSource::unknown")]
+    pub required_checks_source: RequiredChecksSource,
 }
 
 impl PrHealth {
@@ -25,4 +27,21 @@ pub struct FailedJob {
     pub run_id: u64,
     pub run_attempt: u64,
     pub job_id: u64,
+}
+
+/// Unknown is reserved for historical health evidence without a recorded source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RequiredChecksSource {
+    Unknown,
+    Github,
+    ConfiguredList,
+    ConfiguredAll,
+    None,
+}
+
+impl RequiredChecksSource {
+    pub fn unknown() -> Self {
+        Self::Unknown
+    }
 }

@@ -22,6 +22,7 @@ struct RepairPr {
     pending: bool,
     rerun_error: bool,
     logs_error: bool,
+    gh_health: Option<luthor::github::pull_request::GhPullRequestReader>,
 }
 impl PullRequestReader for RepairPr {
     fn authenticated_identity(&mut self) -> Result<String, LookupError> {
@@ -43,8 +44,11 @@ impl PullRequestReader for RepairPr {
     }
 }
 impl PrHealthReader for RepairPr {
-    fn rerun_failed_jobs(&mut self, _: &str, _: u64, _: &str) -> Result<(), LookupError> {
+    fn rerun_failed_jobs(&mut self, repo: &str, run: u64, head: &str) -> Result<(), LookupError> {
         self.reruns += 1;
+        if let Some(gh) = &mut self.gh_health {
+            return gh.rerun_failed_jobs(repo, run, head);
+        }
         if self.rerun_error {
             return Err(LookupError {
                 category: ErrorCategory::Transport,
@@ -54,7 +58,10 @@ impl PrHealthReader for RepairPr {
         }
         Ok(())
     }
-    fn failed_job_logs(&mut self, _: &str, _: u64) -> Result<String, LookupError> {
+    fn failed_job_logs(&mut self, repo: &str, job: u64) -> Result<String, LookupError> {
+        if let Some(gh) = &mut self.gh_health {
+            return gh.failed_job_logs(repo, job);
+        }
         if self.logs_error {
             return Err(LookupError {
                 category: ErrorCategory::Transport,
@@ -64,7 +71,15 @@ impl PrHealthReader for RepairPr {
         }
         Ok("assertion failed: expected behavior preserved".into())
     }
-    fn health(&mut self, _: &str, _: u64) -> Result<PrHealth, LookupError> {
+    fn health(
+        &mut self,
+        repo: &str,
+        number: u64,
+        checks: &luthor::config::RequiredChecks,
+    ) -> Result<PrHealth, LookupError> {
+        if let Some(gh) = &mut self.gh_health {
+            return gh.health(repo, number, checks);
+        }
         if self.health_error {
             return Err(LookupError {
                 category: ErrorCategory::Transport,
@@ -82,6 +97,7 @@ impl PrHealthReader for RepairPr {
             conflicting: self.conflict,
             failed_required_checks: self.failures.clone(),
             required_checks_pending: self.pending,
+            required_checks_source: luthor::github::pull_request::RequiredChecksSource::Github,
             required_jobs: vec![luthor::github::pull_request::FailedJob {
                 name: "quality gates".into(),
                 run_id: 123,
@@ -112,7 +128,10 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
-        let (dir, config, mut store) = dispatched_fixture(0);
+        Self::with_checks(Default::default())
+    }
+    fn with_checks(checks: luthor::config::RequiredChecks) -> Self {
+        let (dir, config, mut store) = execution::dispatched_fixture_with_checks(0, checks);
         let selection = task_records::selection_evidence(&store, "task")
             .unwrap()
             .unwrap();
@@ -137,6 +156,7 @@ impl Fixture {
             pending: false,
             rerun_error: false,
             logs_error: false,
+            gh_health: None,
         };
         let mut projects = OtherProject(selection.candidate, 1);
         assert!(matches!(
@@ -728,6 +748,7 @@ fn unacknowledged_job_rerun_intent_holds_instead_of_repeating_post() {
     );
 }
 
+mod configured_checks;
 mod history;
 mod retirement;
 

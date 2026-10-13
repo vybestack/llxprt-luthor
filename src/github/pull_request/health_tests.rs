@@ -5,17 +5,26 @@ use serde_json::{Value, json};
 fn observe(
     repository: &str,
     number: u64,
+    pages: impl FnMut(&[&str]) -> Result<Value, LookupError>,
+) -> Result<super::health::PrHealth, LookupError> {
+    observe_with_checks(repository, number, &Default::default(), pages)
+}
+
+fn observe_with_checks(
+    repository: &str,
+    number: u64,
+    checks: &crate::config::RequiredChecks,
     mut pages: impl FnMut(&[&str]) -> Result<Value, LookupError>,
 ) -> Result<super::health::PrHealth, LookupError> {
     let mut job = Value::Null;
-    health_reader::observe(repository, number, |args| {
+    health_reader::observe(repository, number, checks, |args| {
         if args[1].contains("/actions/jobs/") {
             return Ok(job.clone());
         }
         let response = pages(args)?;
         if let Some(nodes) = response.pointer("/data/repository/pullRequest/commits/nodes/0/commit/statusCheckRollup/contexts/nodes").and_then(Value::as_array) {
             for node in nodes {
-                if node["isRequired"] == true && node["status"] == "COMPLETED" {
+                if node["status"] == "COMPLETED" {
                     job = json!({"id":34,"run_id":12,"head_sha":"a".repeat(40),"name":node["name"],"status":"completed","run_attempt":node["checkSuite"]["workflowRun"]["runAttempt"]});
                 }
             }
@@ -132,7 +141,7 @@ fn rerun_new_check_replaces_old_failure_even_across_pages() {
 
 #[test]
 fn old_job_does_not_become_repeat_failure_when_suite_attempt_advances() {
-    let health = health_reader::observe("org/code", 7, |args| {
+    let health = health_reader::observe("org/code", 7, &Default::default(), |args| {
         if args[1].contains("/actions/jobs/") {
             return Ok(json!({"id":34,"run_id":12,"head_sha":"a".repeat(40),"name":"required","status":"completed","run_attempt":1}));
         }
@@ -146,7 +155,7 @@ fn old_job_does_not_become_repeat_failure_when_suite_attempt_advances() {
 #[test]
 fn actions_job_read_must_match_graphql_identity() {
     for field in ["id", "run_id", "head_sha", "name", "status", "run_attempt"] {
-        let result = health_reader::observe("org/code", 7, |args| {
+        let result = health_reader::observe("org/code", 7, &Default::default(), |args| {
             if args[1].contains("/actions/jobs/") {
                 let mut job = json!({"id":34,"run_id":12,"head_sha":"a".repeat(40),"name":"required","status":"completed","run_attempt":2});
                 job[field] = Value::Null;
@@ -157,3 +166,5 @@ fn actions_job_read_must_match_graphql_identity() {
         assert!(result.is_err(), "{field}");
     }
 }
+
+mod selection;
