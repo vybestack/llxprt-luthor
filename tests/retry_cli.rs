@@ -256,6 +256,7 @@ fn dispatch_and_capture(fixture: &CliFixture, historical: bool) -> ExistingAttem
         String::from_utf8_lossy(&out.stderr)
     );
     let dispatched: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(dispatched["disk_space"]["available_bytes"].is_u64());
     let task = dispatched["task_id"].as_str().unwrap();
     let previous = dispatched["attempt_id"].as_str().unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
