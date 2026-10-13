@@ -30,3 +30,5 @@ mod ownership;
 pub use ownership::{OwnershipError, WorktreeOwner, WorktreeOwnerProtocol};
 
 pub mod pr_repair;
+
+pub mod worker_build;

@@ -209,3 +209,29 @@ fn assert_exact_retry_audit_required(config: &Config, store: &mut StateStore) {
         }
     }
 }
+
+#[test]
+fn worker_pin_retry_prefers_original_build_even_when_current_template_is_new() {
+    let (_dir, mut config, mut store) = retry_fixture();
+    let original: luthor::supervisor::LaunchPlan =
+        serde_json::from_str(&launch_intent(&store, "attempt-real").unwrap().unwrap()).unwrap();
+    config.resume.executable = config
+        .worktree_root
+        .parent()
+        .unwrap()
+        .join("new-worker-not-selected");
+    let selection = selection_evidence(&store, "task").unwrap().unwrap();
+    let mut launcher = OtherLauncher::default();
+    let next = retry(
+        &mut store,
+        &config,
+        &mut OtherProject(selection.candidate, 1),
+        &mut ExitPr::default(),
+        &mut launcher,
+    )
+    .unwrap();
+    assert_eq!(next.worker_build, original.worker_build);
+    assert_eq!(next.executable, original.worker_build.unwrap().path);
+    assert_ne!(next.executable, config.resume.executable);
+    assert_eq!(launcher.0, 1);
+}

@@ -68,7 +68,7 @@ pub(crate) fn natural_stop_race_fixture() -> (
         .join(&config.state_root)
         .join("release-natural-exit");
     fs::write(
-        &plan.executable,
+        plan.executable.with_extension("behavior"),
         format!(
             "#!/bin/sh
 echo started > '{}'

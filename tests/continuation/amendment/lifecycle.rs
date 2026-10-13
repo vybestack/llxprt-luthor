@@ -32,8 +32,19 @@ fn executable_lane() -> Lane {
 
 fn executable_lane_from(mut lane: Lane) -> Lane {
     let executable = lane.f.dir.path().join("llxprt-code-rs");
-    fs::write(&executable, "#!/bin/sh\nprintf '%s\\000' \"$@\"\nexit 17\n").unwrap();
+    fs::write(
+        executable.with_extension("behavior"),
+        "#!/bin/sh\nprintf '%s\\000' \"$@\"\nexit 17\n",
+    )
+    .unwrap();
+    fs::write(
+        &executable,
+        "#!/bin/sh\nexec /bin/sh \"$0.behavior\" \"$@\"\n",
+    )
+    .unwrap();
     fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    lane.plan.worker_build =
+        Some(luthor::worker_build::WorkerBuild::capture(&executable, &lane.plan.worktree).unwrap());
     lane.plan.executable = executable.clone();
     lane.f.config.initial.executable = executable.clone();
     let db = database(&lane);

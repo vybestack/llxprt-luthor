@@ -52,6 +52,7 @@ pub(crate) fn fake_plan(root: &Path, attempt: &str, code: i32) -> luthor::superv
         session_id: "session".into(),
         worktree: root.into(),
         expected_worktree: direct_snapshot(root),
+        worker_build: Some(luthor::worker_build::WorkerBuild::capture(&executable, root).unwrap()),
         executable,
         args: vec![],
         config_revision: "rev".into(),
@@ -92,7 +93,8 @@ pub(crate) fn prepared_fake_worker_with_resume_prompt(
     config.resume.args[5] = resume_prompt.into();
     let marker = dir.path().join("worker-started");
     let worker = dir.path().join("worker");
-    fs::write(&worker, format!("#!/bin/sh\necho started > '{}'\nprintf 'worker stdout\\n'\nprintf 'worker stderr\\n' >&2\n", marker.display())).unwrap();
+    fs::write(worker.with_extension("behavior"), format!("#!/bin/sh\necho started > '{}'\nprintf 'worker stdout\\n'\nprintf 'worker stderr\\n' >&2\n", marker.display())).unwrap();
+    fs::write(&worker, "#!/bin/sh\nexec /bin/sh \"$0.behavior\" \"$@\"\n").unwrap();
     fs::set_permissions(&worker, fs::Permissions::from_mode(0o700)).unwrap();
     config.resume.executable = worker.clone();
     config.initial.executable = worker;
@@ -108,7 +110,7 @@ pub(crate) fn dispatched_fixture(code: i32) -> (tempfile::TempDir, Config, State
     let (config, mut store, plan, _) = prepared_fake_worker(&dir);
     if code != 0 {
         fs::write(
-            &plan.executable,
+            plan.executable.with_extension("behavior"),
             format!(
                 "#!/bin/sh\nprintf 'worker stdout\\n'\nprintf 'worker stderr\\n' >&2\nexit {code}\n"
             ),
@@ -189,7 +191,7 @@ pub(crate) fn pause_proof(config: &Config) -> PausePrEvidence {
 pub(crate) fn running_worker(script: &str) -> (tempfile::TempDir, Config, StateStore) {
     let dir = tempfile::tempdir().unwrap();
     let (config, mut store, plan, _) = prepared_fake_worker(&dir);
-    fs::write(&plan.executable, script).unwrap();
+    fs::write(plan.executable.with_extension("behavior"), script).unwrap();
     let owner = WorktreeOwner::acquire(store.root(), &plan.task_id).unwrap();
     execute_with_binary(
         &mut store,

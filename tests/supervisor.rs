@@ -74,6 +74,7 @@ mod supervisor {
     pub(super) mod stop_identity;
     pub(super) mod stop_race;
     pub(super) mod stop_races;
+    mod worker_pin;
 }
 mod worker_exit;
 

@@ -227,8 +227,12 @@ fn fixture_config(
         allowed_pr_head_repository: "org/code".into(),
         allowed_pr_author: "bot".into(),
     };
+    let worker = dir.path().join("worker");
+    fs::write(&worker, "#!/bin/sh\nexit 0\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&worker, fs::Permissions::from_mode(0o700)).unwrap();
     let command = CommandTemplate {
-        executable: "/bin/worker".into(),
+        executable: worker,
         args: vec![
             "--session".into(),
             "{task.id}".into(),

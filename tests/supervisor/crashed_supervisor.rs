@@ -27,7 +27,7 @@ pub(crate) fn registered_shim_stays_gated_and_survives_supervisor_crash_after_re
     let dir = tempfile::tempdir().unwrap();
     let (config, mut store, plan, marker) = prepared_fake_worker(&dir);
     fs::write(
-        &plan.executable,
+        plan.executable.with_extension("behavior"),
         format!(
             "#!/bin/sh\necho started > '{}'\nexec /bin/sleep 30\n",
             marker.display()

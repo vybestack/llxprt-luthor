@@ -202,3 +202,30 @@ pub(crate) fn terminal(
         .map(Some)
         .ok_or(CliError::Database)
 }
+
+pub(crate) fn worker_build(conn: &Connection, task: &str) -> Result<Value, CliError> {
+    let payload: Option<String> = conn.query_row(
+        "SELECT i.detail FROM attempts a JOIN intents i ON i.task_id=a.task_id AND i.attempt_id=a.id AND i.kind='launch' WHERE a.task_id=?1 ORDER BY a.rowid LIMIT 1",
+        [task], |row| row.get(0),
+    ).optional().map_err(|_| CliError::Database)?;
+    let Some(payload) = payload else {
+        return Ok(Value::Null);
+    };
+    let plan: LaunchPlan = serde_json::from_str(&payload).map_err(|_| CliError::Database)?;
+    let format: Option<String> = conn.query_row(
+        "SELECT payload FROM evidence WHERE task_id=?1 AND kind='session_state_format' ORDER BY sequence DESC LIMIT 1",
+        [task], |row| row.get(0),
+    ).optional().map_err(|_| CliError::Database)?;
+    let format: Option<Value> = format
+        .map(|text| serde_json::from_str(&text))
+        .transpose()
+        .map_err(|_| CliError::Database)?;
+    let mut summary = match plan.worker_build {
+        Some(build) => json!({"path":build.path,"sha256":build.sha256,"pin_status":"pinned"}),
+        None => json!({"path":plan.executable,"sha256":null,"pin_status":"legacy_unrecorded"}),
+    };
+    if let Some(format) = format {
+        summary["reported_session_state_version"] = format["version"].clone();
+    }
+    Ok(summary)
+}

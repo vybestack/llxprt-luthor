@@ -9,7 +9,7 @@ pub(crate) fn completion_fixture() -> (tempfile::TempDir, Config, StateStore) {
     let dir = tempfile::tempdir().unwrap();
     let (config, mut store, plan, _) = prepared_fake_worker(&dir);
     fs::write(
-        &plan.executable,
+        plan.executable.with_extension("behavior"),
         "#!/bin/sh\nprintf 'worker stdout\\n'\nprintf 'worker stderr\\n' >&2\nexit 7\n",
     )
     .unwrap();

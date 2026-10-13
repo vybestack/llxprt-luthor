@@ -11,6 +11,8 @@ mod launch;
 mod log_failure;
 mod planning;
 mod pr_repair;
+mod session_exit;
+mod worker_pin;
 pub(crate) use pr_repair::{prepare_pr_repair, repair_result};
 mod processes;
 #[cfg(unix)]

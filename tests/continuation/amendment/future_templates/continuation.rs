@@ -141,8 +141,11 @@ fn future_template_issue331_new_selection_uses_corrected_templates_without_worke
         .unwrap();
     let corrected = &context.amendment().unwrap().current_config;
     let mut f = crate::Fixture::new(1);
+    let worker = f.config.initial.executable.clone();
     f.config.initial = corrected.initial.clone();
+    f.config.initial.executable = worker.clone();
     f.config.resume = corrected.resume.clone();
+    f.config.resume.executable = worker;
     f.candidate.issue_number = 331;
     f.candidate.issue_url = "https://github.com/org/tracker/issues/331".into();
     f.pause();

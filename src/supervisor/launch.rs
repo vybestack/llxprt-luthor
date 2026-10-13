@@ -45,6 +45,7 @@ pub fn execute_with_binary(
     if serde_json::from_str::<LaunchPlan>(&serialized)? != *plan {
         return Err(SupervisorError::Conflict);
     }
+    super::worker_pin::verify(plan)?;
     let root = store.root().to_path_buf();
     ownership
         .verify_binding(&root, &plan.task_id)
@@ -98,6 +99,7 @@ pub fn execute_amended_with_binary(
 ) -> Result<(), SupervisorError> {
     let proof = store.amended_dispatch_proof(context, config, revision)?;
     let plan = &proof.effective_plan;
+    super::worker_pin::verify(plan)?;
     validate_stop_socket_path(store.root(), &plan.attempt_id)?;
     if super::inspect_never_dispatched_storage(store.root(), &plan.attempt_id)?
         || !plan.session_environment.matches_current()?

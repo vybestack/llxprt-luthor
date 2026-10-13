@@ -9,7 +9,7 @@ use luthor::state::worktree_records::worktree_record;
 pub(crate) fn live_running_lost_claim_requests_stop_and_holds_reservation_until_exit() {
     let dir = tempfile::tempdir().unwrap();
     let (config, mut store, plan, _) = prepared_fake_worker(&dir);
-    fs::write(&plan.executable, "#!/bin/sh\nexec /bin/sleep 15\n").unwrap();
+    sleeping_behavior(&plan);
     let child_path = config.state_root.join("attempts/attempt-real.child.json");
     let _guard = FixtureGroupGuard(child_path);
     let owner = WorktreeOwner::acquire(store.root(), &plan.task_id).unwrap();
@@ -99,7 +99,7 @@ fn launch_active_pr_worker(
 pub(crate) fn live_matching_pr_requests_stop_but_waits_for_exit_and_independent_rechecks() {
     let dir = tempfile::tempdir().unwrap();
     let (config, mut store, plan, _) = prepared_fake_worker(&dir);
-    fs::write(&plan.executable, "#!/bin/sh\nexec /bin/sleep 15\n").unwrap();
+    sleeping_behavior(&plan);
     let _worker_guard = launch_active_pr_worker(&config, &mut store, &plan);
 
     assert_eq!(
@@ -208,4 +208,12 @@ fn assert_independent_pr_recheck(
         Some("pr_complete")
     );
     assert_eq!(reservation_count(store).unwrap(), 0);
+}
+
+fn sleeping_behavior(plan: &luthor::supervisor::LaunchPlan) {
+    fs::write(
+        plan.executable.with_extension("behavior"),
+        "#!/bin/sh\nexec /bin/sleep 15\n",
+    )
+    .unwrap();
 }
