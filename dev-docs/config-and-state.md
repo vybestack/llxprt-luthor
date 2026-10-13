@@ -52,8 +52,14 @@ The schema is unchanged. A `cleanup` intent records policy, targets, immutable
 worktree identity, fresh merged/closed PR evidence and observation time before
 any deletion. `cleanup_removed` records each removed absolute path;
 `cleanup_complete` prevents repeat cleanup across restarts and policy changes.
-`cleanup_failed` is a bounded operator-visible failure. An unfinished intent
-requires inspection, never automatic retries. `show` displays removed paths and
+`cleanup_failed` preserves a specific non-secret reason for each skipped task.
+Task-local failures do not stop cleanup or unrelated scheduling; the cycle JSON
+includes `cleanup.skipped` entries with `task_id` and `reason`, and status/show
+include `cleanup_failure`. A successful cleanup clears the displayed failure
+without erasing history. Whole-worktree cleanup may remove ignored, entirely
+untracked fixture repositories under confined `tmp/`; tracked submodules and
+all other nested repositories (including artifact-only targets) remain refused.
+An unfinished intent requires inspection, never automatic retries. `show` displays removed paths and
 completion/failure events without exposing prompts or config. See the
 [operator cleanup guide](../README.md#terminal-task-cleanup-and-disk-space-dispatch-holds)
 for operational boundaries.

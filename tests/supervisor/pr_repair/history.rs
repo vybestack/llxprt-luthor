@@ -242,3 +242,44 @@ fn restoration_leaves_everything_it_cannot_prove_finished_held() {
         assert!(!evidence_rows(&f).contains(&"pr_hold_restored".into()));
     }
 }
+
+#[test]
+fn cleanup_skipped_task_is_reported_without_inspection_and_can_repair_next_cycle() {
+    let mut f = Fixture::new();
+    let before = evidence_rows(&f);
+    let reason = "cleanup owner unavailable";
+    let cleanup = luthor::cleanup::CleanupReport {
+        skipped: vec![luthor::cleanup::CleanupSkip {
+            task_id: "task".into(),
+            reason: reason.into(),
+        }],
+        ..Default::default()
+    };
+    // Any attempted PR health inspection would hold this otherwise repairable
+    // task. The cleanup exclusion must prevent both the inspection and hold.
+    f.prs.health_error = true;
+    let outcome = luthor::coordinator::repair_verified_prs_after_cleanup(
+        &mut f.store,
+        &f.config,
+        &mut f.projects,
+        &mut f.prs,
+        &mut OtherLauncher::default(),
+        &mut f.ids,
+        &cleanup,
+    )
+    .unwrap();
+    assert!(outcome.launched.is_empty() && outcome.held.is_empty());
+    assert_eq!(
+        outcome.skipped,
+        [luthor::coordinator::TaskNote {
+            task_id: "task".into(),
+            reason: reason.into(),
+        }]
+    );
+    assert_eq!(phase(&f).as_deref(), Some("pr_complete"));
+    assert_eq!(evidence_rows(&f), before);
+    f.prs.health_error = false;
+    let next = f.repair_outcome();
+    assert!(next.skipped.is_empty() && next.held.is_empty());
+    assert_eq!(next.launched.len(), 1);
+}

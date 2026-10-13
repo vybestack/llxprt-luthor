@@ -174,3 +174,15 @@ pub(crate) fn attempt_history(
     }
     Ok((attempts, session))
 }
+
+/// Latest cleanup result, independent of launch/claim holds. A subsequent
+/// successful cleanup supersedes the failure in status without erasing history.
+pub(crate) fn cleanup_failure(conn: &Connection, task: &str) -> Result<Option<String>, CliError> {
+    let result: Option<(String, String)> = conn.query_row(
+        "SELECT kind,payload FROM evidence WHERE task_id=?1 AND kind IN ('cleanup_failed','cleanup_complete') ORDER BY sequence DESC LIMIT 1",
+        [task], |row| Ok((row.get(0)?, row.get(1)?)),
+    ).optional().map_err(|_| CliError::Database)?;
+    Ok(result
+        .filter(|(kind, _)| kind == "cleanup_failed")
+        .map(|(_, reason)| reason))
+}

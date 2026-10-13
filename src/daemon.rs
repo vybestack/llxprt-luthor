@@ -233,13 +233,14 @@ fn cycle_with_dependencies<L: SupervisorLauncher, I: IdCreator>(
         print_schedule_report(&report, &cleanup);
         return Ok(Some(report));
     }
-    let repair = crate::coordinator::repair_verified_prs(
+    let repair = crate::coordinator::repair_verified_prs_after_cleanup(
         &mut store,
         config,
         &mut projects,
         &mut prs,
         launcher,
         ids,
+        &cleanup,
     )
     .map_err(|_| "PR repair could not record task state; inspect local task state")?;
     let selected = candidates(

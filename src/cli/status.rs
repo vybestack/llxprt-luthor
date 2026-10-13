@@ -98,6 +98,7 @@ fn present_task(conn: &Connection, root: &Path, saved: &mut StatusTask) -> Resul
     let reason_sequence = saved.reason_sequence;
     let active_attempt = &saved.active_attempt;
     let task = &mut saved.output;
+    task["cleanup_failure"] = json!(super::history::cleanup_failure(conn, task_id)?);
     task["verified_pr"] = Value::Null;
     if task["phase"] == "pr_complete" {
         let verified_pr = cached_verified_pr(conn, task_id)?;

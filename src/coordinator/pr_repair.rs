@@ -67,8 +67,42 @@ pub fn repair_verified_prs<
     launcher: &mut L,
     ids: &mut I,
 ) -> Result<RepairOutcome, DispatchError> {
+    repair_verified_prs_after_cleanup(
+        store,
+        config,
+        projects,
+        prs,
+        launcher,
+        ids,
+        &Default::default(),
+    )
+}
+
+/// Do not retry a failed cleanup task in PR repair during the same cycle: its
+/// ownership, historical configuration or upstream proof may be unavailable.
+pub fn repair_verified_prs_after_cleanup<
+    P: ProjectReader,
+    Q: PrHealthReader,
+    L: SupervisorLauncher,
+    I: IdCreator,
+>(
+    store: &mut StateStore,
+    config: &crate::config::Config,
+    projects: &mut P,
+    prs: &mut Q,
+    launcher: &mut L,
+    ids: &mut I,
+    cleanup: &crate::cleanup::CleanupReport,
+) -> Result<RepairOutcome, DispatchError> {
     let mut outcome = RepairOutcome::default();
     for task in pr_repair::candidates(store)? {
+        if let Some(skip) = cleanup.skipped.iter().find(|skip| skip.task_id == task) {
+            outcome.skipped.push(TaskNote {
+                task_id: task,
+                reason: skip.reason.clone(),
+            });
+            continue;
+        }
         match inspect_task(store, config, &task, projects, prs, launcher, ids) {
             Ok(Inspection::Launched(plan)) => outcome.launched.push(*plan),
             Ok(Inspection::Idle) => {}

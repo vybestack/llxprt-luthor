@@ -1,7 +1,7 @@
 use super::cleanup_fixture::*;
 use super::*;
+use luthor::config::CleanupPolicy;
 use luthor::state::journal;
-use luthor::{cleanup::clean_terminal_tasks, config::CleanupPolicy};
 use std::os::unix::fs::symlink;
 
 #[test]
@@ -10,14 +10,24 @@ fn cleanup_symlink_artifacts_and_tracked_paths_cannot_escape_worktree() {
     close(&mut prs, true);
     let worktree = root(&config);
     symlink(&config.mappings[0].checkout, worktree.join("target/escape")).unwrap();
-    assert!(clean_terminal_tasks(&mut store, &config, &mut prs).is_err());
+    assert_skipped(
+        &mut store,
+        &config,
+        &mut prs,
+        "cleanup tree contains symlink, mount or special file",
+    );
     assert!(worktree.join("target/debug/artifact").exists());
     assert!(config.mappings[0].checkout.join("README").exists());
     fs::remove_file(worktree.join("target/escape")).unwrap();
     config.cleanup = CleanupPolicy::Artifacts {
         paths: vec!["README".into()],
     };
-    assert!(clean_terminal_tasks(&mut store, &config, &mut prs).is_err());
+    assert_skipped(
+        &mut store,
+        &config,
+        &mut prs,
+        "cleanup artifact must be ignored and untracked",
+    );
     assert!(worktree.join("README").exists());
     assert!(
         !journal::evidence_kinds(&store, "task")
@@ -32,12 +42,22 @@ fn cleanup_whole_worktree_refuses_unsaved_files_and_changed_tip() {
     config.cleanup = CleanupPolicy::Worktree;
     close(&mut prs, true);
     fs::write(root(&config).join("unsaved"), "operator work").unwrap();
-    assert!(clean_terminal_tasks(&mut store, &config, &mut prs).is_err());
+    assert_skipped(
+        &mut store,
+        &config,
+        &mut prs,
+        "cleanup worktree contains unsaved files",
+    );
     fs::remove_file(root(&config).join("unsaved")).unwrap();
     fs::write(root(&config).join("README"), "operator commit").unwrap();
     git(&root(&config), &["add", "README"]);
     git(&root(&config), &["commit", "-m", "unpublished change"]);
-    assert!(clean_terminal_tasks(&mut store, &config, &mut prs).is_err());
+    assert_skipped(
+        &mut store,
+        &config,
+        &mut prs,
+        "cleanup worktree tip differs from verified PR tip",
+    );
     assert!(root(&config).join("target").exists());
 }
 
@@ -55,7 +75,12 @@ fn cleanup_unfinished_intent_is_not_automatically_repeated() {
     )
     .unwrap();
     let reads = prs.reads;
-    assert!(clean_terminal_tasks(&mut store, &config, &mut prs).is_err());
+    assert_skipped(
+        &mut store,
+        &config,
+        &mut prs,
+        "unfinished cleanup intent requires operator inspection",
+    );
     assert_eq!(prs.reads, reads);
     assert!(root(&config).join("target/debug/artifact").exists());
     assert!(
@@ -82,7 +107,12 @@ fn cleanup_live_tracked_descendant_refuses_before_github_or_deletion() {
         .to_string(),
     )
     .unwrap();
-    assert!(clean_terminal_tasks(&mut store, &config, &mut prs).is_err());
+    assert_skipped(
+        &mut store,
+        &config,
+        &mut prs,
+        "cleanup process quiescence unproven",
+    );
     assert_eq!(prs.reads, reads);
     assert!(root(&config).join("target").exists());
 }
@@ -98,7 +128,12 @@ fn cleanup_replaced_worktree_and_reserved_task_refuse() {
             [],
         )
         .unwrap();
-    assert!(clean_terminal_tasks(&mut store, &config, &mut prs).is_err());
+    assert_skipped(
+        &mut store,
+        &config,
+        &mut prs,
+        "cleanup terminal task proof invalid",
+    );
     connection
         .execute(
             "UPDATE reservations SET status='released' WHERE task_id='task'",
@@ -108,7 +143,12 @@ fn cleanup_replaced_worktree_and_reserved_task_refuse() {
     fs::rename(root(&config), config.worktree_root.join("moved")).unwrap();
     fs::create_dir(root(&config)).unwrap();
     fs::write(root(&config).join("foreign"), "foreign data").unwrap();
-    assert!(clean_terminal_tasks(&mut store, &config, &mut prs).is_err());
+    assert_skipped(
+        &mut store,
+        &config,
+        &mut prs,
+        "worktree repository, path or branch changed",
+    );
     assert!(root(&config).join("foreign").exists());
     assert!(
         config
@@ -124,11 +164,21 @@ fn cleanup_nested_repository_and_symlink_parent_fail_before_any_removal() {
     close(&mut prs, true);
     let worktree = root(&config);
     fs::create_dir(worktree.join("target/.git")).unwrap();
-    assert!(clean_terminal_tasks(&mut store, &config, &mut prs).is_err());
+    assert_skipped(
+        &mut store,
+        &config,
+        &mut prs,
+        "cleanup tree contains another repository",
+    );
     fs::remove_dir(worktree.join("target/.git")).unwrap();
     fs::rename(worktree.join("tmp"), worktree.join("tmp-saved")).unwrap();
     symlink(&config.mappings[0].checkout, worktree.join("tmp")).unwrap();
-    assert!(clean_terminal_tasks(&mut store, &config, &mut prs).is_err());
+    assert_skipped(
+        &mut store,
+        &config,
+        &mut prs,
+        "cleanup path contains symlink",
+    );
     assert!(worktree.join("target/debug/artifact").exists());
     assert!(config.mappings[0].checkout.join("README").exists());
 }

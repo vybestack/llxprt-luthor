@@ -2,7 +2,9 @@ use crate::state::{launches, scheduling, task_records};
 mod active;
 mod failed_checks;
 mod pr_repair;
-pub use pr_repair::{PrRepairReport, RepairOutcome, TaskNote, repair_verified_prs};
+pub use pr_repair::{
+    PrRepairReport, RepairOutcome, TaskNote, repair_verified_prs, repair_verified_prs_after_cleanup,
+};
 mod pr_restore;
 pub use pr_restore::{RestoreReport, restore_wrongly_held_prs};
 mod reconciliation;

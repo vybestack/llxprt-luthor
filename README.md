@@ -134,7 +134,11 @@ historical boot-identity uncertainty do not acquire new proof through cleanup.
 
 Artifact paths must be non-empty, non-overlapping relative paths outside
 `.git`, ignored by Git and entirely untracked. Cleanup refuses symlinks,
-nested repositories, special files, and filesystem boundaries. Whole-worktree
+nested repositories, special files, and filesystem boundaries. The one nested
+repository exception is whole-worktree cleanup of ignored, entirely untracked
+fixture repositories under the worker's confined `tmp/` directory; these are
+disposable build output. Tracked submodules are always refused, including
+uninitialized ones. Artifact-only cleanup still refuses all nested repositories. Whole-worktree
 cleanup also requires no unsaved tracked/untracked files and a local tip equal
 to the freshly observed PR head; ignored build output may be removed. It uses
 Git worktree removal to remove registration, but retains the task branch,
@@ -144,9 +148,18 @@ Checkouts and state directories cannot overlap deletion targets.
 The task records a durable `cleanup` intent (policy, targets, worktree and
 terminal PR proof), one `cleanup_removed` event per removed path, then
 `cleanup_complete`. `show TASK` exposes removed paths and completion/failure
-events. Successful cleanup is not repeated after restart or policy changes.
+events. Both `status` and `show TASK` expose the latest `cleanup_failure` (null
+after successful cleanup); history is retained. Each execute cycle's JSON
+`cleanup` report includes `cleaned`, `retained`, and `skipped`, where each skipped
+entry contains `task_id` and its specific, non-secret `reason`. A task-local
+cleanup failure leaves its data untouched (or its unfinished intent intact if
+removal began), records the reason, and skips that task while continuing cleanup
+and dispatch of unrelated work. Historical ownership/configuration mismatches
+are skips, not fatal cycle errors. Global configuration/database or failure to
+persist evidence still fails the cycle rather than hiding infrastructure errors.
+Successful cleanup is not repeated after restart or policy changes.
 An interrupted deletion remains an unfinished intent and **is not retried or
-inferred complete**; failures stop the pass and require operator inspection.
+inferred complete**; that task is skipped and requires operator inspection.
 Never delete journal or lock records to make it run again.
 
 Execute daemon cycles also watch finished (`pr_complete`) tasks for a
