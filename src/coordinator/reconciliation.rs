@@ -33,9 +33,9 @@ pub fn reconcile_with_pr<P: ProjectReader, Q: PullRequestReader>(
             reason: format!("task is retired ({phase})"),
         });
     }
-    let result = supervisor::reconcile_attempt(store, task_id, attempt_id)?;
+    let mut result = supervisor::reconcile_attempt(store, task_id, attempt_id)?;
     if matches!(result, supervisor::Reconciliation::Running) {
-        return monitor_running_attempt(store, task_id, attempt_id, projects, prs);
+        result = monitor_running_attempt(store, task_id, attempt_id, projects, prs)?;
     }
     if !matches!(result, supervisor::Reconciliation::Completed { .. }) {
         return Ok(result);

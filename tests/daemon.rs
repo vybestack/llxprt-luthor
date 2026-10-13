@@ -1,4 +1,5 @@
 #![cfg(unix)]
+mod daemon_completion;
 mod git_fixture;
 
 use serde_json::{Value, json};

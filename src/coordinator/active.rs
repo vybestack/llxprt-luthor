@@ -33,11 +33,24 @@ pub(crate) fn monitor_running_attempt<P: ProjectReader, Q: PullRequestReader>(
 ) -> Result<supervisor::Reconciliation, SupervisorError> {
     let selection =
         task_records::selection_evidence(store, task_id)?.ok_or(StateError::InvalidSelection)?;
-    let claim = match observe_claim(projects, &selection) {
+    let claim = observe_claim(projects, &selection);
+    let pr = if claim.is_ok() {
+        Some(observe_pr(store, task_id, attempt_id, &selection, prs)?)
+    } else {
+        None
+    };
+    // GitHub reads can outlive the worker. Never apply an active-stage
+    // observation to an exited attempt: account for its receipt/processes
+    // first, then let reconciliation perform a fresh completion lookup.
+    let result = supervisor::reconcile_attempt(store, task_id, attempt_id)?;
+    if !matches!(result, supervisor::Reconciliation::Running) {
+        return Ok(result);
+    }
+    let claim = match claim {
         Ok(claim) => claim,
         Err(reason) => return record_hold(store, task_id, attempt_id, reason),
     };
-    let pr = observe_pr(store, task_id, attempt_id, &selection, prs)?;
+    let pr = pr.expect("owned or lost claim has a PR observation");
     let reason = match (claim, pr) {
         (_, ActivePr::Held(reason)) => return record_hold(store, task_id, attempt_id, reason),
         (ActiveClaim::Lost, ActivePr::Matching) => "active claim lost and matching PR observed",
