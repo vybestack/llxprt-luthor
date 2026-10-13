@@ -31,6 +31,38 @@ pub fn reconcile_with_pr<P: ProjectReader, Q: PullRequestReader>(
     if !matches!(result, supervisor::Reconciliation::Completed { .. }) {
         return Ok(result);
     }
+    if journal::evidence_payload(store, task_id, Some(attempt_id), "pr_repair_blocked")?.is_some() {
+        return Ok(supervisor::Reconciliation::Held {
+            reason: "PR repair requires a person".into(),
+        });
+    }
+    // A completed PR proof is already committed atomically with the lookup.
+    // Reconciliation rechecks process accounting, not a second completion write.
+    if task_records::task_phase(store, task_id)?.as_deref() == Some("pr_complete") {
+        return Ok(result);
+    }
+    match supervisor::repair_result(store, task_id, attempt_id) {
+        Ok(Some(crate::pr_repair::PrRepairStatus::SemanticConflict)) => {
+            return Ok(supervisor::Reconciliation::Held {
+                reason: "semantic PR conflict requires a person".into(),
+            });
+        }
+        Ok(_) => {}
+        Err(error) => {
+            journal::record_evidence(
+                store,
+                task_id,
+                Some(attempt_id),
+                "pr_repair_blocked",
+                "PR repair result unavailable or invalid",
+            )?;
+            task_records::hold_task(store, task_id, "PR repair result unavailable or invalid")?;
+            return Err(error);
+        }
+    }
+    if crate::state::pr_repair::authorization(&store.connection, task_id, attempt_id)?.is_some() {
+        return finish_pr_repair(store, task_id, attempt_id, projects, prs, result);
+    }
     if exit_observation::stopped_exit_for_pause(store, task_id, attempt_id)? {
         return finish_verified_stopped_attempt_with_pr(
             store, task_id, attempt_id, projects, prs, result,
@@ -42,6 +74,68 @@ pub fn reconcile_with_pr<P: ProjectReader, Q: PullRequestReader>(
         );
     }
     Ok(result)
+}
+
+fn finish_pr_repair<P: ProjectReader, Q: PullRequestReader>(
+    store: &mut StateStore,
+    task: &str,
+    attempt: &str,
+    projects: &mut P,
+    prs: &mut Q,
+    result: supervisor::Reconciliation,
+) -> Result<supervisor::Reconciliation, SupervisorError> {
+    let selection =
+        task_records::selection_evidence(store, task)?.ok_or(StateError::InvalidSelection)?;
+    let found = lookup(
+        prs,
+        &selection.candidate.mapping.code_repository,
+        &selection.candidate.issue_url,
+    );
+    let proof = ExitPrEvidence {
+        observed_at_unix_secs: observation_time()?,
+        repository: selection.candidate.mapping.code_repository.clone(),
+        status: lookup_status(&found),
+    };
+    // Never use ordinary absent-PR phase transitions for an existing-PR repair.
+    journal::record_evidence(
+        store,
+        task,
+        Some(attempt),
+        "pr_repair_pr_lookup",
+        &serde_json::to_string(&proof)?,
+    )?;
+    let outcome = match found {
+        Ok(LookupResult::OpenPreexisting(pr)) => verify_and_record_open_pr(
+            store,
+            task,
+            attempt,
+            projects,
+            prs,
+            (*pr, proof.observed_at_unix_secs),
+            result,
+        ),
+        _ => Ok(supervisor::Reconciliation::Held {
+            reason: "repair PR missing, ambiguous or unreadable".into(),
+        }),
+    };
+    match outcome {
+        Ok(done @ supervisor::Reconciliation::Completed { .. }) => Ok(done),
+        other => {
+            journal::record_evidence(
+                store,
+                task,
+                Some(attempt),
+                "pr_repair_blocked",
+                "post-repair PR or claim verification failed",
+            )?;
+            task_records::hold_task(
+                store,
+                task,
+                "post-repair PR or claim verification failed; requires a person",
+            )?;
+            other
+        }
+    }
 }
 
 fn finish_verified_stopped_attempt_with_pr<P: ProjectReader, Q: PullRequestReader>(

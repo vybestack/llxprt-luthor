@@ -1,5 +1,8 @@
 use crate::state::{launches, scheduling, task_records};
 mod active;
+mod failed_checks;
+mod pr_repair;
+pub use pr_repair::repair_verified_prs;
 mod reconciliation;
 mod recovery;
 mod recovery_commit;
@@ -31,7 +34,9 @@ use crate::{
 };
 pub use ports::{DispatchError, SupervisorLauncher};
 pub use retry::{RetryDependencies, retry_one};
-use std::{collections::HashSet, io::Read};
+use std::collections::HashSet;
+mod ids;
+pub use ids::{IdCreator, OsIdCreator};
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -102,20 +107,6 @@ pub fn startup_reconcile_all<P: ProjectReader, Q: PullRequestReader>(
         .map(|(task_id, kind)| SourceHold { task_id, kind })
         .collect();
     Ok(report)
-}
-
-pub trait IdCreator {
-    fn create(&mut self) -> Result<String, std::io::Error>;
-}
-
-pub struct OsIdCreator;
-
-impl IdCreator for OsIdCreator {
-    fn create(&mut self) -> Result<String, std::io::Error> {
-        let mut bytes = [0u8; 16];
-        std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
-        Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
-    }
 }
 
 pub struct ProductionLauncher;

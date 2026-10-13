@@ -10,6 +10,8 @@ mod launch;
 #[cfg(unix)]
 mod log_failure;
 mod planning;
+mod pr_repair;
+pub(crate) use pr_repair::{prepare_pr_repair, repair_result};
 mod processes;
 #[cfg(unix)]
 mod readiness;

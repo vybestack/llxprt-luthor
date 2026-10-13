@@ -55,6 +55,7 @@ mod supervisor {
     pub(super) mod operator_rollback;
     pub(super) mod pr_identity;
     pub(super) mod pr_readers;
+    mod pr_repair;
     pub(super) mod process_observation;
     pub(super) mod quiescence;
     pub(super) mod receipt_integrity;

@@ -1,15 +1,24 @@
 use serde_json::Value;
 
 mod checks;
+mod health;
+mod health_reader;
+pub use health::{FailedJob, PrHealth};
 mod evidence;
+mod job_reader;
 mod reader;
 mod types;
 
 #[cfg(test)]
 mod evidence_tests;
+#[cfg(test)]
+mod health_tests;
+#[cfg(all(test, unix))]
+mod job_tests;
 
 use evidence::parse_evidence;
 pub use reader::GhPullRequestReader;
+pub use types::PrHealthReader;
 use types::error;
 pub use types::{ErrorCategory, LookupError, LookupResult, PullRequestEvidence, PullRequestReader};
 

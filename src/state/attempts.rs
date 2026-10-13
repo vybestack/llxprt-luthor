@@ -76,6 +76,11 @@ pub(crate) fn attempt_selection(
     if !consistent {
         return Err(StateError::LaunchBlocked);
     }
+    if let Some(audit) =
+        super::pr_repair::authorization(connection, &plan.task_id, &plan.attempt_id)?
+    {
+        return repair_selection(connection, plan, &audit);
+    }
     let audits: Vec<String> = connection.prepare(
         "SELECT payload FROM evidence WHERE task_id=?1 AND attempt_id=?2 AND kind='retry_authorized'",
     )?.query_map(params![plan.task_id, plan.attempt_id], |row| row.get(0))?
@@ -277,4 +282,22 @@ fn retry_audit_identity_matches(
         || audit.pr.repository != selection.candidate.mapping.code_repository
         || !same_task_config(&selection.effective_config, &audit.config)
         || plan.config_revision.trim().is_empty())
+}
+
+fn repair_selection(
+    db: &Connection,
+    plan: &LaunchPlan,
+    audit: &crate::pr_repair::PrRepairAuthorization,
+) -> Result<SelectionEvidence, StateError> {
+    let prior: String = db.query_row("SELECT i.detail FROM attempts a JOIN intents i ON i.task_id=a.task_id AND i.attempt_id=a.id AND i.kind='launch' WHERE a.task_id=?1 AND a.rowid=(SELECT MAX(rowid) FROM attempts WHERE task_id=?1 AND rowid<(SELECT rowid FROM attempts WHERE id=?2))", params![plan.task_id, plan.attempt_id], |row| row.get(0))?;
+    let prior: LaunchPlan = serde_json::from_str(&prior)?;
+    let selection = attempt_selection(db, &prior)?;
+    super::pr_repair::validate(audit, &selection)?;
+    if audit.plan != *plan
+        || audit.previous_plan != prior
+        || plan.config_revision != selection.config_revision
+    {
+        return Err(StateError::LaunchBlocked);
+    }
+    Ok(selection)
 }
