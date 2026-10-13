@@ -20,6 +20,13 @@ use std::{
 pub struct CleanupReport {
     pub cleaned: Vec<String>,
     pub retained: Vec<String>,
+    pub skipped: Vec<CleanupSkip>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CleanupSkip {
+    pub task_id: String,
+    pub reason: String,
 }
 
 pub fn clean_terminal_tasks<Q: PullRequestReader>(
@@ -40,15 +47,13 @@ pub fn clean_terminal_tasks<Q: PullRequestReader>(
             Ok(true) => report.cleaned.push(task),
             Ok(false) => report.retained.push(task),
             Err(error) => {
+                let reason = error.operator_reason();
                 // Fixed reason only: upstream stderr/API data never enters operator evidence.
-                journal::record_evidence(
-                    store,
-                    &task,
-                    None,
-                    "cleanup_failed",
-                    "cleanup validation or removal failed; inspect cleanup intent",
-                )?;
-                return Err(error);
+                journal::record_evidence(store, &task, None, "cleanup_failed", &reason)?;
+                report.skipped.push(CleanupSkip {
+                    task_id: task,
+                    reason,
+                });
             }
         }
     }
@@ -67,16 +72,7 @@ fn clean_one<Q: PullRequestReader>(
         ));
     }
     let saved = cleanup_records::verified_pr(store, task)?;
-    let selection =
-        task_records::selection_evidence(store, task)?.ok_or(StateError::InvalidSelection)?;
-    if selection.effective_config.worktree_root != config.worktree_root
-        || selection.effective_config.state_root != config.state_root
-        || !config.mappings.contains(&selection.candidate.mapping)
-    {
-        return Err(CleanupError::Conflict(
-            "cleanup configuration differs from task ownership",
-        ));
-    }
+    verify_configuration(store, config, task)?;
     let owner = match WorktreeOwner::acquire_existing(store.root(), task) {
         Ok(owner) => owner,
         Err(OwnershipError::Busy) => return Ok(false),
@@ -130,6 +126,28 @@ fn clean_one<Q: PullRequestReader>(
         &json!({"policy":config.cleanup,"observed_at_unix_secs":observed_at}).to_string(),
     )?;
     Ok(true)
+}
+
+fn verify_configuration(
+    store: &StateStore,
+    config: &Config,
+    task: &str,
+) -> Result<(), CleanupError> {
+    let selection =
+        task_records::selection_evidence(store, task)?.ok_or(StateError::InvalidSelection)?;
+    if selection.effective_config.worktree_root != config.worktree_root
+        || selection.effective_config.state_root != config.state_root
+        || selection.effective_config.assignment_login != config.assignment_login
+        || selection.effective_config.sources != config.sources
+        || selection.effective_config.mappings != config.mappings
+        || selection.effective_config.initial != config.initial
+        || selection.effective_config.resume != config.resume
+    {
+        return Err(CleanupError::Conflict(
+            "cleanup configuration differs from task ownership",
+        ));
+    }
+    Ok(())
 }
 
 fn remove_targets(

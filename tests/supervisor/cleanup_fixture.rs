@@ -5,6 +5,7 @@ use serde_json::{Value, json};
 
 pub(super) struct TerminalPr {
     pub(super) detail: Value,
+    pub(super) login: String,
     pub(super) reads: usize,
     pub(super) replacement: bool,
     pub(super) fail: bool,
@@ -12,14 +13,16 @@ pub(super) struct TerminalPr {
 }
 impl PullRequestReader for TerminalPr {
     fn authenticated_identity(&mut self) -> Result<String, LookupError> {
-        Ok("operator".into())
+        Ok(self.login.clone())
     }
     fn repository_identity(&mut self, _: &str) -> Result<u64, LookupError> {
         Ok(10)
     }
     fn page(&mut self, _: &str, _: u32) -> Result<Vec<Value>, LookupError> {
         if !self.closed || self.replacement {
-            Ok(vec![json!({"number":42,"body":self.detail["body"]})])
+            Ok(vec![
+                json!({"number":self.detail["number"],"body":self.detail["body"]}),
+            ])
         } else {
             Ok(vec![])
         }
@@ -60,6 +63,7 @@ pub(super) fn fixture() -> (tempfile::TempDir, Config, StateStore, TerminalPr) {
     assert!(head.status.success());
     let sha = String::from_utf8(head.stdout).unwrap().trim().to_owned();
     let mut prs = TerminalPr {
+        login: "operator".into(),
         detail: json!({
             "id":4242,"number":42,"state":"open","merged":false,
             "html_url":"https://github.com/org/code/pull/42",
@@ -130,4 +134,46 @@ pub(super) fn clean(
     prs: &mut TerminalPr,
 ) -> luthor::cleanup::CleanupReport {
     clean_terminal_tasks(store, config, prs).unwrap()
+}
+
+/// A refusal is task-local, but must still preserve its exact diagnostic and
+/// must not claim any removal/completion.
+pub(super) fn assert_skipped(
+    store: &mut StateStore,
+    config: &Config,
+    prs: &mut TerminalPr,
+    reason: &str,
+) {
+    let report = clean(store, config, prs);
+    assert!(report.cleaned.is_empty());
+    assert!(report.retained.is_empty());
+    assert_eq!(
+        serde_json::to_value(&report).unwrap()["skipped"],
+        json!([{"task_id":"task","reason":reason}])
+    );
+    let shown: Value = serde_json::from_str(
+        &luthor::cli::execute(&config.state_root, &["show".into(), "task".into()]).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(shown["cleanup_failure"], reason);
+    assert!(
+        shown["evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["kind"] == "cleanup_failed" && row["detail"] == reason)
+    );
+    assert!(
+        !shown["evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["kind"] == "cleanup_removed" || row["kind"] == "cleanup_complete")
+    );
+    let status: Value = serde_json::from_str(
+        &luthor::cli::execute(&config.state_root, &["status".into()]).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(status["tasks"][0]["cleanup_failure"], reason);
+    assert_eq!(status["tasks"][0]["phase"], "pr_complete");
 }

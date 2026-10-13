@@ -36,7 +36,10 @@ mod supervisor {
     use super::*;
     pub(super) mod active_pr;
     mod cleanup_cases;
+    mod cleanup_cycle;
+    mod cleanup_cycle_fixture;
     mod cleanup_fixture;
+    mod cleanup_output;
     mod cleanup_refusals;
     pub(super) mod completed_pr;
     pub(super) mod configuration;

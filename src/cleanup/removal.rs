@@ -29,6 +29,14 @@ pub(crate) fn targets(
                     "cleanup worktree contains unsaved files",
                 ));
             }
+            if git_output(&identity.path, &["ls-files", "--stage"])?
+                .split(|byte| *byte == b'\n')
+                .any(|entry| entry.starts_with(b"160000 "))
+            {
+                return Err(CleanupError::Conflict(
+                    "cleanup worktree contains tracked submodule",
+                ));
+            }
             vec![identity.path.clone()]
         }
     };
@@ -43,7 +51,12 @@ pub(crate) fn targets(
             Err(error) => return Err(error.into()),
         }
         verify_parents(&identity.path, &path)?;
-        inspect_tree(&path, identity.device, &identity.path)?;
+        inspect_tree(
+            &path,
+            identity.device,
+            &identity.path,
+            matches!(policy, CleanupPolicy::Worktree),
+        )?;
         if matches!(policy, CleanupPolicy::Artifacts { .. }) {
             let relative = path
                 .strip_prefix(&identity.path)
@@ -78,9 +91,17 @@ fn verify_parents(root: &Path, path: &Path) -> Result<(), CleanupError> {
     Ok(())
 }
 
-fn inspect_tree(path: &Path, device: u64, worktree: &Path) -> Result<(), CleanupError> {
+fn inspect_tree(
+    path: &Path,
+    device: u64,
+    worktree: &Path,
+    whole: bool,
+) -> Result<(), CleanupError> {
     let meta = fs::symlink_metadata(path)?;
-    if path.file_name().is_some_and(|name| name == ".git") && path != worktree.join(".git") {
+    if path.file_name().is_some_and(|name| name == ".git")
+        && path != worktree.join(".git")
+        && !removable_fixture_repository(path, worktree, whole)?
+    {
         return Err(CleanupError::Conflict(
             "cleanup tree contains another repository",
         ));
@@ -92,10 +113,34 @@ fn inspect_tree(path: &Path, device: u64, worktree: &Path) -> Result<(), Cleanup
     }
     if meta.is_dir() {
         for entry in fs::read_dir(path)? {
-            inspect_tree(&entry?.path(), device, worktree)?;
+            inspect_tree(&entry?.path(), device, worktree, whole)?;
         }
     }
     Ok(())
+}
+
+/// Only whole-worktree cleanup can remove fixture repositories, and only within
+/// the worker's confined tmp/ output. Gitlinks and tracked fixture files refuse.
+fn removable_fixture_repository(
+    path: &Path,
+    worktree: &Path,
+    whole: bool,
+) -> Result<bool, CleanupError> {
+    let repository = path
+        .parent()
+        .ok_or(CleanupError::Conflict("nested repository has no parent"))?;
+    if !whole || !repository.starts_with(worktree.join("tmp")) {
+        return Ok(false);
+    }
+    let relative = repository
+        .strip_prefix(worktree)
+        .map_err(|_| CleanupError::Conflict("nested repository outside worktree"))?
+        .to_str()
+        .ok_or(CleanupError::Conflict("non-UTF8 nested repository path"))?;
+    Ok(
+        git_output(worktree, &["ls-files", "--", relative])?.is_empty()
+            && ignored(worktree, relative)?,
+    )
 }
 
 pub(crate) fn remove(
@@ -104,7 +149,7 @@ pub(crate) fn remove(
     whole: bool,
 ) -> Result<(), CleanupError> {
     verify_parents(&identity.path, path)?;
-    inspect_tree(path, identity.device, &identity.path)?;
+    inspect_tree(path, identity.device, &identity.path, whole)?;
     if whole {
         let path = path
             .to_str()

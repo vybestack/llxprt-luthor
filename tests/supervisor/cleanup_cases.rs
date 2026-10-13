@@ -1,7 +1,7 @@
 use super::cleanup_fixture::*;
 use super::*;
+use luthor::config::CleanupPolicy;
 use luthor::state::{journal, task_records};
-use luthor::{cleanup::clean_terminal_tasks, config::CleanupPolicy};
 use serde_json::json;
 
 #[test]
@@ -116,10 +116,20 @@ fn cleanup_api_failure_and_pr_identity_drift_fail_closed() {
     let (_dir, config, mut store, mut prs) = fixture();
     close(&mut prs, true);
     prs.fail = true;
-    assert!(clean_terminal_tasks(&mut store, &config, &mut prs).is_err());
+    assert_skipped(
+        &mut store,
+        &config,
+        &mut prs,
+        "pull request lookup failed (Transport, offline)",
+    );
     prs.fail = false;
     prs.detail["id"] = json!(9999);
-    assert!(clean_terminal_tasks(&mut store, &config, &mut prs).is_err());
+    assert_skipped(
+        &mut store,
+        &config,
+        &mut prs,
+        "cleanup PR numeric identity changed",
+    );
     assert!(root(&config).join("target/debug/artifact").exists());
     assert!(
         !journal::evidence_kinds(&store, "task")

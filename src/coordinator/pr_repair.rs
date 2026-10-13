@@ -33,8 +33,38 @@ pub fn repair_verified_prs<
     launcher: &mut L,
     ids: &mut I,
 ) -> Result<Vec<supervisor::LaunchPlan>, DispatchError> {
+    repair_verified_prs_after_cleanup(
+        store,
+        config,
+        projects,
+        prs,
+        launcher,
+        ids,
+        &Default::default(),
+    )
+}
+
+/// Do not retry a failed cleanup task in PR repair during the same cycle: its
+/// ownership, historical configuration or upstream proof may be unavailable.
+pub fn repair_verified_prs_after_cleanup<
+    P: ProjectReader,
+    Q: PrHealthReader,
+    L: SupervisorLauncher,
+    I: IdCreator,
+>(
+    store: &mut StateStore,
+    config: &crate::config::Config,
+    projects: &mut P,
+    prs: &mut Q,
+    launcher: &mut L,
+    ids: &mut I,
+    cleanup: &crate::cleanup::CleanupReport,
+) -> Result<Vec<supervisor::LaunchPlan>, DispatchError> {
     let mut launched = Vec::new();
     for task in pr_repair::candidates(store)? {
+        if cleanup.skipped.iter().any(|skip| skip.task_id == task) {
+            continue;
+        }
         match inspect_config(store, config, &task, projects, prs, launcher, ids) {
             Ok(Some(plan)) => launched.push(plan),
             Ok(None) => {}
