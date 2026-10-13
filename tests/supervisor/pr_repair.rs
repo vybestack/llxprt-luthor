@@ -163,9 +163,7 @@ impl Fixture {
             ids: OtherIds::default(),
         }
     }
-    fn repair(
-        &mut self,
-    ) -> Result<Vec<luthor::supervisor::LaunchPlan>, luthor::coordinator::DispatchError> {
+    fn repair_outcome(&mut self) -> luthor::coordinator::RepairOutcome {
         repair_verified_prs(
             &mut self.store,
             &self.config,
@@ -174,6 +172,18 @@ impl Fixture {
             &mut OtherLauncher::default(),
             &mut self.ids,
         )
+        .unwrap()
+    }
+    /// The launched plans, or the notes of the tasks the pass held.
+    fn repair(
+        &mut self,
+    ) -> Result<Vec<luthor::supervisor::LaunchPlan>, Vec<luthor::coordinator::TaskNote>> {
+        let outcome = self.repair_outcome();
+        if outcome.held.is_empty() {
+            Ok(outcome.launched)
+        } else {
+            Err(outcome.held)
+        }
     }
     fn run(&mut self, plan: &luthor::supervisor::LaunchPlan, status: &str) {
         let script = format!(
@@ -569,11 +579,22 @@ fn changed_repair_config_and_missing_previous_receipt_do_not_launch() {
     for config_change in [true, false] {
         let mut f = Fixture::new();
         if config_change {
+            // Issue 51: drift on an open PR is skipped with its reason, not held.
             f.config.assignment_login = "other".into();
+            let outcome = f.repair_outcome();
+            assert!(outcome.launched.is_empty() && outcome.held.is_empty());
+            assert_eq!(outcome.skipped.len(), 1);
+            assert!(outcome.skipped[0].reason.contains("assignment_login"));
+            assert_eq!(
+                task_records::task_phase(&f.store, "task")
+                    .unwrap()
+                    .as_deref(),
+                Some("pr_complete")
+            );
         } else {
             fs::remove_file(receipt_path(&f.config)).unwrap();
+            assert!(f.repair().is_err());
         }
-        assert!(f.repair().is_err());
         assert_eq!(scheduling::reservation_count(&f.store).unwrap(), 0);
     }
 }
@@ -706,3 +727,5 @@ fn unacknowledged_job_rerun_intent_holds_instead_of_repeating_post() {
         Some("held")
     );
 }
+
+mod history;

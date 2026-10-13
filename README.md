@@ -149,6 +149,29 @@ An interrupted deletion remains an unfinished intent and **is not retried or
 inferred complete**; failures stop the pass and require operator inspection.
 Never delete journal or lock records to make it run again.
 
+Execute daemon cycles also watch finished (`pr_complete`) tasks for a
+repairable PR. The pass looks up the saved PR first: a merged or closed PR
+(no open PR) is skipped silently and is never compared with the current
+configuration, held or failed. A task whose PR is still open but whose
+selection-time configuration differs from the current one is skipped without
+any state change, and the cycle's single JSON document reports it under
+`pr_repair.skipped` with its reason, for example
+`selection config differs: cleanup, min_free_space_bytes, initial.args`. An
+unreadable PR lookup is skipped the same way and asked again next cycle. Only a
+genuine safety conflict on an open PR (changed head, author, claim or process
+evidence) holds the task, with a specific `PR repair held: ...` reason listed
+under `pr_repair.held`. One task's problem never stops the rest of the pass,
+reconciliation or dispatch.
+
+Tasks that an earlier release held with exactly the reason
+`PR repair validation or launch failed; inspect task evidence` are returned to
+`pr_complete` automatically, before cleanup and scheduling, once a fresh
+exact-identity read shows the saved PR merged or closed. The move appends a
+`pr_hold_restored` evidence row with the terminal PR proof, keeps every earlier
+row, and is reported under `pr_repair.restored`. Tasks with a live reservation,
+an unfinished attempt, a cleanup intent, a different latest hold reason or a
+PR that is still open stay held (`pr_repair.restore_retained`).
+
 Dispatch reports `disk_space` with available bytes on the filesystem hosting
 `worktree_root`, the configured minimum, and `dispatch_held`. Space below the
 minimum holds scheduling without assigning an issue, creating a task, reserving
