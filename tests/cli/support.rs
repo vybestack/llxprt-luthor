@@ -67,6 +67,7 @@ impl Fixture {
                 remote: "origin".into(),
             },
             executable: PathBuf::from("/bin/worker"),
+            worker_build: None,
             args: vec!["--secret-prompt".into()],
             config_revision: "rev".into(),
             session_environment: luthor::supervisor::SessionEnvironment {

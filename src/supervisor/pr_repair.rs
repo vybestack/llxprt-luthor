@@ -56,6 +56,7 @@ pub(crate) fn prepare_pr_repair(
         &previous,
         "previous PR worker",
     )?;
+    let worker_build = super::worker_pin::continuation(store, &first, &previous, &executable)?;
     append_instructions(
         &mut args,
         attempt,
@@ -70,7 +71,8 @@ pub(crate) fn prepare_pr_repair(
         session_id: previous.session_id.clone(),
         worktree: identity.path.clone(),
         expected_worktree: identity,
-        executable,
+        executable: worker_build.path.clone(),
+        worker_build: Some(worker_build),
         args,
         config_revision: previous.config_revision.clone(),
         session_environment: first.session_environment,

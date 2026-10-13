@@ -237,6 +237,8 @@ pub struct LaunchPlan {
     pub worktree: PathBuf,
     pub expected_worktree: WorktreeIdentity,
     pub executable: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_build: Option<crate::worker_build::WorkerBuild>,
     pub args: Vec<String>,
     pub config_revision: String,
     pub session_environment: SessionEnvironment,

@@ -23,7 +23,7 @@ pub(crate) fn retry_fixture_for_mapping(
     let dir = tempfile::tempdir().unwrap();
     let (mut config, candidate) = prompts::configured_mapping(dir.path(), same_repository);
     let worker = dir.path().join("llxprt-code-rs");
-    fs::write(&worker, r#"#!/bin/sh
+    fs::write(worker.with_extension("behavior"), r#"#!/bin/sh
 session=''
 budget=''
 while test "$#" -gt 0; do
@@ -38,6 +38,7 @@ if test "$budget" = 1024; then
 fi
 exit 2
 "#).unwrap();
+    fs::write(&worker, "#!/bin/sh\nexec /bin/sh \"$0.behavior\" \"$@\"\n").unwrap();
     fs::set_permissions(&worker, fs::Permissions::from_mode(0o700)).unwrap();
     config.initial.executable = worker.clone();
     config.resume.executable = worker;

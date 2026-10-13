@@ -3,9 +3,10 @@ use rusqlite::Connection;
 
 /// An initial-plan amendment does not establish a later attempt's lineage.
 /// Both supported versions stay held until a separate continuation contract exists.
+/// A session-incompatible exit likewise requires explicit migration, never retry.
 pub(crate) fn require_unamended_task(db: &Connection, task: &str) -> Result<(), StateError> {
     let amended: bool = db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM evidence WHERE task_id=?1 AND kind='initial_branch_removed')
+        "SELECT EXISTS(SELECT 1 FROM evidence WHERE task_id=?1 AND kind IN ('initial_branch_removed','session_incompatible'))
          OR EXISTS(SELECT 1 FROM intents WHERE task_id=?1 AND kind='initial_branch_removal_seal')
          OR EXISTS(SELECT 1 FROM intents WHERE task_id=?1 AND kind='supervisor_dispatch'
             AND CASE WHEN json_valid(detail) THEN json_type(detail,'$.amendment_sequence') IS NOT NULL

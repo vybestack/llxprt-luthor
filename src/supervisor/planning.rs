@@ -57,6 +57,7 @@ pub fn prepare_initial(
         command::initial_command(&selection, &identity, task_id, attempt_id)?;
     let worktree = identity.path.clone();
     let session_environment = SessionEnvironment::capture()?;
+    let worker_build = crate::worker_build::WorkerBuild::capture(&executable, &worktree)?;
     let plan = LaunchPlan {
         task_id: task_id.to_owned(),
         attempt_id: attempt_id.to_owned(),
@@ -64,6 +65,7 @@ pub fn prepare_initial(
         worktree,
         expected_worktree: identity,
         executable,
+        worker_build: Some(worker_build),
         args,
         config_revision: selection.config_revision,
         session_environment,
@@ -109,13 +111,15 @@ pub fn prepare_resume(
         &latest,
         "interrupted or canceled turn",
     )?;
+    let worker_build = super::worker_pin::continuation(store, &first, &latest, &executable)?;
     let plan = LaunchPlan {
         task_id: task_id.to_owned(),
         attempt_id: attempt_id.to_owned(),
         session_id: task_id.to_owned(),
         worktree,
         expected_worktree: identity,
-        executable,
+        executable: worker_build.path.clone(),
+        worker_build: Some(worker_build),
         args,
         config_revision: selection.config_revision,
         session_environment: first.session_environment.clone(),
@@ -178,13 +182,15 @@ pub(crate) fn prepare_retry(
         "naturally exited worker",
     )?;
     let worktree = identity.path.clone();
+    let worker_build = super::worker_pin::continuation(store, &first, latest, &executable)?;
     let plan = LaunchPlan {
         task_id: task_id.to_owned(),
         attempt_id: attempt_id.to_owned(),
         session_id: task_id.to_owned(),
         worktree,
         expected_worktree: identity,
-        executable,
+        executable: worker_build.path.clone(),
+        worker_build: Some(worker_build),
         args,
         config_revision: revision.to_owned(),
         session_environment: first.session_environment.clone(),

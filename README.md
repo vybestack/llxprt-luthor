@@ -281,6 +281,33 @@ workers cannot be excluded by a receipt and group probes alone. See
 [terminal startup revalidation](dev-docs/config-and-state.md#darwin-boot-identity-and-terminal-startup-revalidation)
 for the proof and refusal boundaries.
 
+## Worker build pins
+
+The first launch intent records the resolved worker executable path and SHA-256
+of its bytes. `status` and `show` expose this as `worker_build` (including
+`pin_status`). New selections capture the current initial template's build;
+resume, retry and PR repair keep the session's original build even when the
+operator updates executable templates. Authorized argv/prompt corrections do
+not change the pin. A worker-reported top-level JSON `session_state_version`
+is saved as `session_state_format` evidence and shown as
+`reported_session_state_version`; Luthor never guesses a format from a binary.
+
+Keep old executables at their recorded paths until their tasks finish. Luthor
+checks the hash before dispatch and at the worker gate. A missing or replaced
+build holds continuation rather than trying a new binary. Existing dispatched
+sessions whose plans predate build pins show `legacy_unrecorded` and cannot
+silently acquire the current binary's identity. There is no automatic copying,
+rebuilding, repinning or session migration; restore the pinned build or use a
+separately authorized migration workflow (not provided by this change).
+
+A naturally failing worker's structured `error.message` reporting
+`unsupported state version N`, or `error.code` of `session_incompatible` /
+`session-incompatible`, is classified as `session_incompatible`. Equivalent
+plain `error:` / `corrupt session state:` diagnostics are recognized too.
+Durable evidence names the pinned and attempted builds and the rejected version
+when reported. The task stays held after process/receipt accounting releases
+its slot; no PR completion or new retry is authorized for that session.
+
 ## Rust quality gates
 
 From the repository root, use **`cargo xtask ci`** for the same offline, locked

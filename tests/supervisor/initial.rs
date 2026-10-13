@@ -74,7 +74,8 @@ pub(crate) fn intent_and_slot_survive_restart_and_failed_dispatch_stays_held() {
         )
         .is_err()
     );
-    assert!(!plan.executable.exists());
+    assert!(plan.executable.exists());
+    assert!(plan.worker_build.is_some());
     drop(store);
 
     let mut store = StateStore::open(&config.state_root, 1).unwrap();
@@ -188,4 +189,23 @@ pub(crate) fn partial_ready_handshake_times_out_and_keeps_reserved_slot() {
     ));
     assert!(started.elapsed() < Duration::from_secs(7));
     assert_eq!(scheduling::reservation_count(&store).unwrap(), 1);
+}
+
+#[test]
+fn worker_pin_new_selection_captures_upgraded_worker_not_previous_build() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut config, candidate) = configured(dir.path());
+    let old =
+        luthor::worker_build::WorkerBuild::capture(&config.initial.executable, dir.path()).unwrap();
+    let upgraded = dir.path().join("upgraded-worker");
+    fs::write(&upgraded, "#!/bin/sh\nexit 7\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&upgraded, fs::Permissions::from_mode(0o700)).unwrap();
+    config.initial.executable = upgraded.clone();
+    let mut store = StateStore::open(&config.state_root, 1).unwrap();
+    claimed(&mut store, &config, &candidate, dir.path());
+    let plan = prepare_initial(&mut store, "task", "upgraded-attempt").unwrap();
+    let build = plan.worker_build.unwrap();
+    assert_eq!(build.path, upgraded);
+    assert_ne!(build.sha256, old.sha256);
 }

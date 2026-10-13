@@ -69,6 +69,7 @@ pub(crate) fn validate(
         || plan.session_id != prior.session_id
         || plan.session_id != plan.task_id
         || plan.worktree != prior.worktree
+        || plan.worker_build != prior.worker_build
         || plan.session_environment != prior.session_environment
         || plan.config_revision != prior.config_revision
         || audit.saved_pr.attempt_id != prior.attempt_id

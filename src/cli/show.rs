@@ -79,6 +79,7 @@ pub(crate) fn show(conn: &Connection, root: &Path, task: &str) -> Result<Value, 
     } else {
         output["terminal"] = Value::Null;
     }
+    output["worker_build"] = super::history::worker_build(conn, task)?;
     output["cleanup_failure"] = json!(super::history::cleanup_failure(conn, task)?);
     log_observation(
         &mut output,

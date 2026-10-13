@@ -180,7 +180,14 @@ pub fn worker_gate(plan_path: &Path) -> Result<(), SupervisorError> {
     }
     worktree::verify_snapshot(&plan.expected_worktree)?;
     verify_post_gate_state(plan_path, &plan, root, production_layout, &_ownership)?;
-    let mut command = Command::new(&plan.executable);
+    super::worker_pin::verify(&plan)?;
+    let mut command = Command::new(
+        &plan
+            .worker_build
+            .as_ref()
+            .ok_or(SupervisorError::Conflict)?
+            .path,
+    );
     command.args(&plan.args).current_dir(&plan.worktree);
     configure_session(&mut command, &plan.session_environment);
     Err(command.exec().into())

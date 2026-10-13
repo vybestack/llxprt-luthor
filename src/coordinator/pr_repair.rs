@@ -179,6 +179,9 @@ fn hold_reason(error: &DispatchError) -> String {
             "issue claim changed or could not be re-read".into()
         }
         DispatchError::Worktree(_) => "worktree identity or tip did not verify".into(),
+        DispatchError::Supervisor(supervisor::SupervisorError::WorkerBuildHeld(reason)) => {
+            reason.clone()
+        }
         DispatchError::Supervisor(_) => {
             "PR, process, receipt or ownership evidence did not verify".into()
         }
@@ -221,9 +224,10 @@ fn inspect_task<P: ProjectReader, Q: PrHealthReader, L: SupervisorLauncher, I: I
     };
     let (previous, _) = pr_repair::context(store, task)?;
     let selection = crate::state::selection_for_attempt(store, &previous)?;
-    let drift = selection
-        .effective_config
-        .differing_fields(&crate::model::EffectiveConfigSnapshot::from(config));
+    let mut comparable = crate::model::EffectiveConfigSnapshot::from(config);
+    comparable.initial.executable = selection.effective_config.initial.executable.clone();
+    comparable.resume.executable = selection.effective_config.resume.executable.clone();
+    let drift = selection.effective_config.differing_fields(&comparable);
     if !drift.is_empty() {
         return Ok(Inspection::Skipped(format!(
             "selection config differs: {}",

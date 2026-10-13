@@ -19,8 +19,9 @@ pub(crate) fn configured(root: &Path) -> (Config, Candidate) {
         },
         milestone: None,
     };
+    let worker = fixture_worker(root);
     let initial = CommandTemplate {
-        executable: root.join("worker-that-must-not-run"),
+        executable: worker,
         args: vec![
             "--session".into(),
             "{task.id}".into(),
@@ -126,4 +127,12 @@ pub(crate) fn claimed(
     git(checkout, &["commit", "-m", "initial"]);
     crate::git_fixture::remote(checkout);
     ensure_worktree(store, "task", &config.worktree_root, &candidate.mapping).unwrap();
+}
+
+fn fixture_worker(root: &Path) -> std::path::PathBuf {
+    let worker = root.join("worker-that-must-not-run");
+    fs::write(&worker, "#!/bin/sh\nexit 0\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&worker, fs::Permissions::from_mode(0o700)).unwrap();
+    worker
 }

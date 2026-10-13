@@ -458,6 +458,10 @@ where
             DispatchError::State(_) => "resume state transition failed",
             DispatchError::Worktree(_) => "resume worktree failed",
         };
+        let reason = match error {
+            DispatchError::Supervisor(SupervisorError::WorkerBuildHeld(detail)) => detail.as_str(),
+            _ => reason,
+        };
         task_records::hold_task(store, task_id, reason)?;
     }
     result

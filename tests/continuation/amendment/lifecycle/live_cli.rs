@@ -28,7 +28,7 @@ impl LiveLane {
         fs::write(&config, serde_json::to_vec(&lane.f.config).unwrap()).unwrap();
         let started = lane.f.dir.path().join("worker-started");
         fs::write(
-            &lane.plan.executable,
+            lane.plan.executable.with_extension("behavior"),
             format!(
                 "#!/bin/sh\nprintf '%s\\000' \"$@\"\ntouch '{}'\nwhile [ ! -f '{}' ]; do /bin/sleep 0.1; done\nexit 17\n",
                 started.display(), release.display()

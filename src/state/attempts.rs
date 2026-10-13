@@ -59,6 +59,7 @@ pub(crate) fn attempt_selection(
         |row| row.get(0),
     )?;
     let mut selection: SelectionEvidence = serde_json::from_str(&selection)?;
+    verify_worker_lineage(connection, plan)?;
     let candidate = &selection.candidate;
     let consistent: bool = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM tasks WHERE id=?1 AND tracker_repo_id=?2
@@ -300,4 +301,25 @@ fn repair_selection(
         return Err(StateError::LaunchBlocked);
     }
     Ok(selection)
+}
+
+fn verify_worker_lineage(db: &Connection, plan: &LaunchPlan) -> Result<(), StateError> {
+    let payload: String = db.query_row(
+        "SELECT i.detail FROM attempts a JOIN intents i ON i.task_id=a.task_id AND i.attempt_id=a.id AND i.kind='launch' WHERE a.task_id=?1 ORDER BY a.rowid LIMIT 1",
+        [&plan.task_id], |row| row.get(0),
+    )?;
+    let first: LaunchPlan = serde_json::from_str(&payload)?;
+    if plan.worker_build != first.worker_build
+        || (plan.attempt_id != first.attempt_id
+            && plan.worker_build.is_some()
+            && plan.executable
+                != first
+                    .worker_build
+                    .as_ref()
+                    .ok_or(StateError::LaunchBlocked)?
+                    .path)
+    {
+        return Err(StateError::LaunchBlocked);
+    }
+    Ok(())
 }

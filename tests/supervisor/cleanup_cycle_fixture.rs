@@ -107,8 +107,8 @@ fn wait_for_exit(store: &StateStore, config: &Config, task: &str, attempt: &str)
 pub(super) fn config(dir: &Path) -> Config {
     let (mut config, _) = configured(dir);
     config.mappings[0].allowed_pr_author = "acoliver".into();
-    config.initial.executable = "/bin/true".into();
-    config.resume.executable = "/bin/true".into();
+    config.initial.executable = "/usr/bin/true".into();
+    config.resume.executable = "/usr/bin/true".into();
     config.cleanup = luthor::config::CleanupPolicy::Worktree;
     let checkout = &config.mappings[0].checkout;
     fs::create_dir(checkout).unwrap();

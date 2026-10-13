@@ -18,6 +18,9 @@ pub(crate) fn gate_eof_never_spawns_and_does_not_write_receipt() {
         session_id: "s".into(),
         worktree: dir.path().into(),
         expected_worktree: direct_snapshot(dir.path()),
+        worker_build: Some(
+            luthor::worker_build::WorkerBuild::capture(&executable, dir.path()).unwrap(),
+        ),
         executable,
         args: vec![],
         config_revision: "rev".into(),

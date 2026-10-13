@@ -25,6 +25,9 @@ pub(crate) fn safe_error_stage(error: &crate::coordinator::DispatchError) -> &st
         DispatchError::ChangedClaim => "claim changed",
         DispatchError::ExistingPr => "pull request exists",
         DispatchError::PullRequest(_) => "pull request lookup failed",
+        DispatchError::Supervisor(crate::supervisor::SupervisorError::WorkerBuildHeld(reason)) => {
+            reason
+        }
         DispatchError::Supervisor(_) => "worker launch failed",
         // Retry reasons originate from fixed reconciliation messages, never
         // supplied identities, paths, argv, or external error text.

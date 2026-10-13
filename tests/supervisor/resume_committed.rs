@@ -7,7 +7,7 @@ pub(crate) fn committed_worker_resumes_same_session_and_worktree_after_verified_
     let dir = tempfile::tempdir().unwrap();
     let (config, mut store, first, _) = prepared_fake_worker(&dir);
     fs::write(
-        &first.executable,
+        first.executable.with_extension("behavior"),
         r#"#!/bin/sh
 case "$*" in
   *attempt-real*)

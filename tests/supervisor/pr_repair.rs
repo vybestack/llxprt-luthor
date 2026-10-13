@@ -190,7 +190,7 @@ impl Fixture {
             "#!/bin/sh\nprintf '%s\\n' '{{\"attempt_id\":\"{}\",\"status\":\"{status}\"}}' > {REPAIR_RESULT_FILE}\n",
             plan.attempt_id
         );
-        fs::write(&plan.executable, script).unwrap();
+        fs::write(plan.executable.with_extension("behavior"), script).unwrap();
         let owner = luthor::WorktreeOwner::acquire_existing(self.store.root(), "task").unwrap();
         execute_with_binary(
             &mut self.store,
@@ -502,7 +502,7 @@ fn active_repair_worker_is_not_stopped_by_its_existing_pr() {
     let mut f = Fixture::new();
     let plan = f.repair().unwrap().remove(0);
     let release = plan.worktree.join("release-worker");
-    fs::write(&plan.executable, format!("#!/bin/sh\nwhile ! test -f '{}'; do sleep 0.05; done\nprintf '%s\\n' '{{\"attempt_id\":\"{}\",\"status\":\"repaired\"}}' > {REPAIR_RESULT_FILE}\n", release.display(), plan.attempt_id)).unwrap();
+    fs::write(plan.executable.with_extension("behavior"), format!("#!/bin/sh\nwhile ! test -f '{}'; do sleep 0.05; done\nprintf '%s\\n' '{{\"attempt_id\":\"{}\",\"status\":\"repaired\"}}' > {REPAIR_RESULT_FILE}\n", release.display(), plan.attempt_id)).unwrap();
     let owner = luthor::WorktreeOwner::acquire_existing(f.store.root(), "task").unwrap();
     execute_with_binary(
         &mut f.store,
@@ -648,7 +648,7 @@ fn active_repair_with_disappearing_pr_is_held_and_capacity_retained() {
     let mut f = Fixture::new();
     let plan = f.repair().unwrap().remove(0);
     let release = plan.worktree.join("release-worker");
-    fs::write(&plan.executable, format!("#!/bin/sh\nwhile ! test -f '{}'; do sleep 0.05; done\nprintf '%s\\n' '{{\"attempt_id\":\"{}\",\"status\":\"repaired\"}}' > {REPAIR_RESULT_FILE}\n", release.display(), plan.attempt_id)).unwrap();
+    fs::write(plan.executable.with_extension("behavior"), format!("#!/bin/sh\nwhile ! test -f '{}'; do sleep 0.05; done\nprintf '%s\\n' '{{\"attempt_id\":\"{}\",\"status\":\"repaired\"}}' > {REPAIR_RESULT_FILE}\n", release.display(), plan.attempt_id)).unwrap();
     let owner = luthor::WorktreeOwner::acquire_existing(f.store.root(), "task").unwrap();
     execute_with_binary(
         &mut f.store,
@@ -730,3 +730,29 @@ fn unacknowledged_job_rerun_intent_holds_instead_of_repeating_post() {
 
 mod history;
 mod retirement;
+
+#[test]
+fn worker_pin_repair_keeps_build_after_operator_updates_templates() {
+    let mut f = Fixture::new();
+    let original: luthor::supervisor::LaunchPlan = serde_json::from_str(
+        &luthor::state::launches::launch_intent(&f.store, "attempt-real")
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    f.config.initial.executable = f
+        .config
+        .worktree_root
+        .parent()
+        .unwrap()
+        .join("upgraded-worker");
+    f.config.resume.executable = f.config.initial.executable.clone();
+    let outcome = f.repair_outcome();
+    assert!(outcome.skipped.is_empty() && outcome.held.is_empty());
+    assert_eq!(outcome.launched.len(), 1);
+    assert_eq!(outcome.launched[0].worker_build, original.worker_build);
+    assert_eq!(
+        outcome.launched[0].executable,
+        original.worker_build.unwrap().path
+    );
+}

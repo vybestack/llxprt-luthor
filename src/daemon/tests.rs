@@ -172,13 +172,16 @@ esac
 }
 
 fn create_config(root: &Path, checkout: &Path) -> Config {
+    let worker = root.join("fixture-worker");
+    fs::write(&worker, "#!/bin/sh\nexit 99\n").unwrap();
+    fs::set_permissions(&worker, fs::Permissions::from_mode(0o700)).unwrap();
     Config::from_json(&json!({
         "state_root": root.join("state"), "worktree_root": root.join("worktrees"), "capacity": 2,
         "assignment_login": "fixture-agent",
         "sources": [{"project_id":"PROJECT","repositories":["org/tracker"],"ready_marker":{"kind":"label","name":"ready"},"milestone":null}],
         "mappings": [{"tracker_repository":"org/tracker","code_repository":"org/code","checkout":checkout,"base_branch":"main","push_remote":"origin","allowed_pr_head_repository":"org/code","allowed_pr_author":"acoliver"}],
-        "initial": {"executable": root.join("nonexistent-worker"), "args": ["--session", "{task.id}", "--cwd", "{worktree}", "--prompt", "Continue issue"]},
-        "resume": {"executable": root.join("nonexistent-worker"), "args": ["--session", "{task.id}", "--cwd", "{worktree}", "--prompt", "Continue issue"]}
+        "initial": {"executable": root.join("fixture-worker"), "args": ["--session", "{task.id}", "--cwd", "{worktree}", "--prompt", "Continue issue"]},
+        "resume": {"executable": root.join("fixture-worker"), "args": ["--session", "{task.id}", "--cwd", "{worktree}", "--prompt", "Continue issue"]}
     }).to_string()).unwrap()
 }
 
@@ -236,9 +239,9 @@ impl Fixture {
         assert!(gh.is_absolute());
         assert_eq!(
             config.initial.executable,
-            root.path().join("nonexistent-worker")
+            root.path().join("fixture-worker")
         );
-        assert!(!config.initial.executable.exists());
+        assert!(config.initial.executable.exists());
         assert_eq!(config.resume.executable, config.initial.executable);
         Self {
             root,
@@ -491,7 +494,7 @@ fn assert_direct_cycle_schedules_331(f: &Fixture, original: &str, before: &Histo
     assert_eq!(launcher.plans.len(), 1);
     assert_eq!(launcher.plans[0].task_id, "task-fixture-id");
     assert_eq!(launcher.plans[0].executable, f.config.initial.executable);
-    assert!(!launcher.plans[0].executable.exists());
+    assert!(launcher.plans[0].worker_build.is_some());
     assert!(f.assigned.exists() && f.assigned12.exists());
     let calls = fs::read_to_string(&f.calls).unwrap();
     assert_eq!(
@@ -610,7 +613,7 @@ fn long_real_private_state_root_refuses_daemon_before_claim_or_reservation() {
     assert!(calls.contains("issues/331"));
     assert!(!calls.contains("issues/12"));
     assert!(!calls.contains("-X POST"));
-    assert!(!config.initial.executable.exists());
+    assert!(config.initial.executable.exists());
     assert!(!config.worktree_root.exists());
     assert!(!config.state_root.join("attempts").exists());
     assert_real_private_root(&config.state_root);

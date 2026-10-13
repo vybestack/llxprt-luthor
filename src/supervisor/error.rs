@@ -15,6 +15,8 @@ pub enum SupervisorError {
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
+    #[error("worker build held: {0}")]
+    WorkerBuildHeld(String),
     #[error("launch plan does not match verified task or worktree")]
     Conflict,
     #[error(

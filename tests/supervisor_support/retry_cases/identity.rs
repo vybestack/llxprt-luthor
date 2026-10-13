@@ -57,7 +57,7 @@ fn exercise_retry_identity(revision: &str, authorized: bool) {
     assert_ne!(third.args, second.args);
     let marker = third.worktree.join("third-worker-ran");
     fs::write(
-        &config.resume.executable,
+        config.resume.executable.with_extension("behavior"),
         "#!/bin/sh\nprintf '%s\\n' \"$*\" > third-worker-ran\nexit 2\n",
     )
     .unwrap();

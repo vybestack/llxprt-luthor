@@ -80,7 +80,7 @@ fn reconcile_attempt_inner(
         Ok(processes) => processes,
         Err(reason) => return Ok(held(reason)),
     };
-    reconcile_receipt(
+    let result = reconcile_receipt(
         store,
         task_id,
         attempt_id,
@@ -92,7 +92,16 @@ fn reconcile_attempt_inner(
             terminal_exit,
             revalidate_terminal_exit,
         },
-    )
+    )?;
+    if matches!(result, Reconciliation::Completed { .. }) {
+        let receipt = validated_receipt(&attempts, attempt_id, &processes.child)
+            .map_err(|_| SupervisorError::Conflict)?;
+        super::session_exit::record_format(store, &plan, &receipt)?;
+        if let Some(held) = super::session_exit::hold_incompatible(store, &plan, &receipt)? {
+            return Ok(held);
+        }
+    }
+    Ok(result)
 }
 #[cfg(unix)]
 fn owner_busy_reconciliation(
