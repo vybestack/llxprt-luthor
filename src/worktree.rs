@@ -108,6 +108,7 @@ pub fn verify_record(
             "persisted worktree identity differs from disk",
         ));
     }
+    verify_path_identity(expected)?;
     let (_, git_dir, remote) = validate_checkout(mapping)?;
     let actual = identity(&record.intent.path, &record.intent, &git_dir, &remote)?;
     if !matches_snapshot(expected, &actual)? {
@@ -142,6 +143,7 @@ pub fn matches_snapshot(
 
 /// Check the live Git identity against an immutable launch snapshot without writing to Git.
 pub fn verify_snapshot(expected: &WorktreeIdentity) -> Result<(), WorktreeError> {
+    verify_path_identity(expected)?;
     let actual = identity(
         &expected.path,
         &WorktreeIntent {
@@ -340,6 +342,20 @@ fn file_identity(path: &Path) -> Result<(u64, u64), WorktreeError> {
     use std::os::unix::fs::MetadataExt;
     let metadata = fs::metadata(path)?;
     Ok((metadata.dev(), metadata.ino()))
+}
+
+/// Reject a replaced directory before asking Git to discover its repository.
+/// Otherwise Git may fail generically or discover an unrelated parent checkout.
+#[cfg(unix)]
+fn verify_path_identity(expected: &WorktreeIdentity) -> Result<(), WorktreeError> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = fs::symlink_metadata(&expected.path)?;
+    if !metadata.is_dir() || metadata.dev() != expected.device || metadata.ino() != expected.inode {
+        return Err(WorktreeError::Conflict(
+            "worktree repository, path or branch changed",
+        ));
+    }
+    Ok(())
 }
 
 fn identity(

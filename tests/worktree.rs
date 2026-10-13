@@ -510,3 +510,48 @@ fn existing_worktree_does_not_change_root_permissions() {
         0o750
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn replaced_worktree_reports_identity_conflict_before_git_discovery() {
+    let mut f = Fixture::new();
+    f.task("task-1", 1, true);
+    let WorktreeResult::Created(identity) = f.create("task-1").unwrap() else {
+        panic!("fixture worktree was not created")
+    };
+    let record = worktree_records::worktree_record(&f.store, "task-1")
+        .unwrap()
+        .unwrap();
+    let moved = f.dir.path().join("moved");
+    fs::rename(&identity.path, &moved).unwrap();
+    fs::create_dir(&identity.path).unwrap();
+    fs::write(identity.path.join("foreign"), "foreign data").unwrap();
+    // Invalid Git metadata makes discovery fail even inside a parent checkout.
+    // The immutable filesystem identity must be checked before that read.
+    fs::write(identity.path.join(".git"), "not a git directory pointer").unwrap();
+    for result in [
+        luthor::worktree::verify_record(
+            &record,
+            &f.config.mappings[0],
+            &f.config.worktree_root,
+            "task-1",
+        )
+        .map(|_| ()),
+        verify_snapshot(&identity),
+    ] {
+        assert!(
+            matches!(
+                result,
+                Err(WorktreeError::Conflict(
+                    "worktree repository, path or branch changed"
+                ))
+            ),
+            "{result:?}"
+        );
+    }
+    assert_eq!(
+        fs::read_to_string(identity.path.join("foreign")).unwrap(),
+        "foreign data"
+    );
+    assert!(moved.join("README").exists());
+}

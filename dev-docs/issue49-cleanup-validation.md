@@ -2,12 +2,13 @@
 
 Tracker-Issue: https://github.com/vybestack/llxprt-luthor/issues/49
 
-**Latest disposition:** PR #55 repaired by merging mapped base `d634469`.
-All conflicts resolved preserving issue 49 cleanup isolation and issue 51 PR
-repair reporting/restoration. The unchanged full Rust 1.98.0 gate now **passes**
-(exit 0), including all-target tests, docs and every required contract. Earlier
-attempt failures below are retained as historical evidence. Hosted CI remains
-required before any merge.
+**Latest disposition:** PR #55 repaired after hosted platform failures in the
+replaced-worktree diagnostic regression. Ownership verification now checks the
+saved filesystem identity before Git discovery. The existing exact cleanup
+assertion is unchanged, and a new verification regression covers invalid Git
+metadata. The unchanged full Rust 1.98.0 gate **passes** (exit 0), including
+all-target tests, docs and every required contract. Earlier failures below are
+historical evidence. Hosted CI remains required before merge.
 
 Continued after attempt `attempt-4c029d7e4bcc93837330dc4d5b7f780c` in task
 worktree `/Volumes/XS1000/lwself/task-1d5a2ed060a62e0caf60efaa02f3d06a`,
@@ -261,3 +262,49 @@ Validation with the documented absolute confined Cargo/TMPDIR environment:
 
 Update the existing PR only; OCR review remains skipped per Andrew 2026-10-09.
 Hosted CI must run on the repaired merge commit and pass before any merge.
+
+
+## Required-check repair: attempt-570cc5bf19fb6f752998411bdeacd54a
+
+Inspected preserved worktree at `babf370`, status, tests and logs; re-read issue
+49 and PR #55; verified GitHub identity `acoliver` before writes. Fetched mapped
+base over SSH and attempted the required merge: **already up to date**, so no
+new merge commit was needed. No conflicts or vendored patch/pin changes apply.
+
+Fetched failed hosted run **38398155917** via `gh run view --log-failed`.
+Both Ubuntu and macOS failed only
+`supervisor::cleanup_refusals::cleanup_replaced_worktree_and_reserved_task_refuse`:
+expected `worktree repository, path or branch changed`, received `read failed`.
+Evidence: `tmp/issue49/hosted-failure.log`. The supplied aggregate-job excerpt
+only indicated matrix failure; these matrix logs identified the actual bug.
+
+A renamed/replaced worker directory could reach Git discovery before its saved
+device/inode was compared. Depending on whether the enclosing checkout's branch
+was discoverable, it produced a specific conflict or generic Git failure. Fixed
+`verify_record` and `verify_snapshot` to reject a non-directory, symlink or
+changed device/inode before invoking Git. IO/Git errors still propagate: no
+catch-and-relabel fallback, error swallowing or weakened verification. The
+existing cleanup assertion and no-deletion checks remain unchanged. Added
+`replaced_worktree_reports_identity_conflict_before_git_discovery` for both
+verification entry points with deliberately invalid replacement `.git` data;
+asserts the exact reason and preservation of foreign/moved files.
+
+Validation in the documented confined absolute Cargo/TMPDIR environment:
+
+- Initially the offline check reported missing `proc-macro2` after the cache had
+  been cleared between attempts. The documented deliberate `cargo +1.98.0
+  fetch --locked` stage succeeded (`check-repair-dependencies.log`), populating
+  only ignored worktree Cargo storage; no lockfile/dependency changes.
+- Worktree tests: **20 passed** (`check-repair-worktree.log`).
+- Focused cleanup/integration tests: **18 passed**
+  (`check-repair-cleanup.log`), including the unchanged hosted-failing assertion.
+- **Full unchanged `cargo +1.98.0 xtask ci`: PASS, exit 0**, one shell call with
+  timeout 5400 (`check-repair-ci.log`, `check-repair-ci.exit`). Includes policy,
+  formatting, gate fixtures, strict Clippy, build, all-target serial tests,
+  docs and all 31 exact required contracts.
+- Reviewed `git status` and `git diff HEAD`; `git diff --check` passed.
+
+No tests, thresholds, timeout, required check, contract, branch protection or
+safety rule was weakened. OCR remains skipped per Andrew 2026-10-09. Update
+existing PR #55 only and require hosted checks on the repaired commit before
+any merge.
