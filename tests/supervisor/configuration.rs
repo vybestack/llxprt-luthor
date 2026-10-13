@@ -40,6 +40,8 @@ pub(crate) fn configured(root: &Path) -> (Config, Candidate) {
         },
         worktree_root: root.join("worktrees"),
         capacity: 1,
+        cleanup: luthor::config::CleanupPolicy::disabled(),
+        min_free_space_bytes: 0,
         assignment_login: "operator".into(),
         sources: vec![source.clone()],
         mappings: vec![mapping.clone()],

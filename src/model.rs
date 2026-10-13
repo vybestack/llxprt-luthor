@@ -1,5 +1,5 @@
 use crate::{
-    config::{CommandTemplate, Config, Mapping, Source},
+    config::{CleanupPolicy, CommandTemplate, Config, Mapping, Source},
     eligibility::Candidate,
     github::pull_request::ErrorCategory,
 };
@@ -21,6 +21,8 @@ pub enum StateError {
     Capacity { reserved: usize, capacity: usize },
     #[error("capacity must be positive")]
     InvalidCapacity,
+    #[error("dispatch held: available space {available} bytes is below required {required} bytes")]
+    LowDiskSpace { available: u64, required: u64 },
     #[error("invalid configuration")]
     InvalidConfig,
     #[error("invalid explicit target")]
@@ -75,6 +77,10 @@ pub struct EffectiveConfigSnapshot {
     pub state_root: PathBuf,
     pub worktree_root: PathBuf,
     pub capacity: usize,
+    #[serde(default = "CleanupPolicy::disabled")]
+    pub cleanup: CleanupPolicy,
+    #[serde(default)]
+    pub min_free_space_bytes: u64,
     pub assignment_login: String,
     pub sources: Vec<Source>,
     pub mappings: Vec<Mapping>,
@@ -126,6 +132,8 @@ impl From<&Config> for EffectiveConfigSnapshot {
             state_root: config.state_root.clone(),
             worktree_root: config.worktree_root.clone(),
             capacity: config.capacity,
+            cleanup: config.cleanup.clone(),
+            min_free_space_bytes: config.min_free_space_bytes,
             assignment_login: config.assignment_login.clone(),
             sources: config.sources.clone(),
             mappings: config.mappings.clone(),

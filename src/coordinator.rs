@@ -176,6 +176,7 @@ where
         launcher,
     } = dependencies;
     scheduling::ensure_dispatch_capacity(store)?;
+    crate::disk::inspect(&config.worktree_root, config.min_free_space_bytes)?.enforce()?;
     let ownership = crate::ownership::WorktreeOwner::acquire(store.root(), task_id)
         .map_err(|_| SupervisorError::Conflict)?;
     task_records::create_task(store, task_id, candidate, config_revision, config)?;
@@ -237,6 +238,7 @@ pub struct ScheduleReport {
     pub launched: Vec<LaunchPlan>,
     pub skipped_existing: Vec<(String, String)>,
     pub capacity_full: bool,
+    pub disk_space: Option<crate::disk::DiskSpace>,
 }
 
 /// Selected candidates are finite; no held or previously selected issue is
@@ -314,6 +316,9 @@ where
             }
             Err(error) => return Err(error.into()),
         }
+        if record_dispatch_space(config, &mut report)? {
+            break;
+        }
         let task_id = format!("task-{}", ids.create()?);
         let attempt_id = format!("attempt-{}", ids.create()?);
         let plan = dispatch_one(
@@ -333,6 +338,16 @@ where
         report.launched.push(plan);
     }
     Ok(report)
+}
+
+fn record_dispatch_space(
+    config: &Config,
+    report: &mut ScheduleReport,
+) -> Result<bool, DispatchError> {
+    let space = crate::disk::inspect(&config.worktree_root, config.min_free_space_bytes)?;
+    let held = space.dispatch_held;
+    report.disk_space = Some(space);
+    Ok(held)
 }
 
 pub struct ResumeDependencies<'a, P, Q, L> {

@@ -75,6 +75,10 @@ pub(crate) fn dispatch(args: Vec<String>) -> Result<(), Box<dyn std::error::Erro
     let mut projects = GhProjectReader::new(PathBuf::from("gh"));
     let mut prs = GhPullRequestReader::new(PathBuf::from("gh"));
     reconcile_before_dispatch(&mut store, &mut projects, &mut prs)?;
+    crate::cleanup::clean_terminal_tasks(&mut store, &config, &mut prs)
+        .map_err(|_| "cleanup failed; inspect local task state")?;
+    let space = crate::disk::inspect(&config.worktree_root, config.min_free_space_bytes)?;
+    space.enforce()?;
     let mut projects = GhProjectReader::new(PathBuf::from("gh"));
     let candidates = eligibility::select_target(
         &mut projects,
@@ -111,7 +115,7 @@ pub(crate) fn dispatch(args: Vec<String>) -> Result<(), Box<dyn std::error::Erro
             launcher: &mut launcher,
         },
     );
-    report_dispatch(&store, &task_id, &attempt_id, result.map(|_| ()))?;
+    report_dispatch(&store, &task_id, &attempt_id, &space, result.map(|_| ()))?;
     Ok(())
 }
 
@@ -142,12 +146,13 @@ fn report_dispatch(
     store: &StateStore,
     task_id: &str,
     attempt_id: &str,
+    space: &crate::disk::DiskSpace,
     result: Result<(), crate::coordinator::DispatchError>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match result {
         Ok(_) => println!(
             "{}",
-            json!({"task_id": task_id, "attempt_id": attempt_id, "status": "dispatched"})
+            json!({"task_id": task_id, "attempt_id": attempt_id, "status": "dispatched", "disk_space": space})
         ),
         Err(error) => {
             let status = if task_records::task_phase(store, task_id)?.as_deref() == Some("held") {
@@ -157,7 +162,7 @@ fn report_dispatch(
             };
             println!(
                 "{}",
-                json!({"task_id": task_id, "attempt_id": attempt_id, "status": status})
+                json!({"task_id": task_id, "attempt_id": attempt_id, "status": status, "disk_space": space})
             );
             return Err(format!("dispatch {status}: {}", safe_error_stage(&error)).into());
         }

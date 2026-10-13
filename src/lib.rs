@@ -1,8 +1,11 @@
 pub mod claim;
+pub mod cleanup;
+mod cleanup_error;
 pub mod cli;
 pub mod config;
 pub mod coordinator;
 pub mod daemon;
+pub mod disk;
 pub mod eligibility;
 pub mod platform;
 pub mod pr_evidence;

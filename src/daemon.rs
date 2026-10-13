@@ -195,6 +195,18 @@ fn cycle_with_dependencies<L: SupervisorLauncher, I: IdCreator>(
         println!("{}", json!({"mode":"execute", "blocked":true}));
         return Err("startup reconciliation blocked scheduling".into());
     }
+    let cleanup = crate::cleanup::clean_terminal_tasks(&mut store, config, &mut prs)
+        .map_err(|_| "cleanup failed; inspect local task state")?;
+    let disk_space = crate::disk::inspect(&config.worktree_root, config.min_free_space_bytes)?;
+    if disk_space.dispatch_held {
+        let report = ScheduleReport {
+            startup,
+            disk_space: Some(disk_space),
+            ..Default::default()
+        };
+        print_schedule_report(&report, &cleanup);
+        return Ok(Some(report));
+    }
     let selected = candidates(
         &mut projects,
         config,
@@ -221,7 +233,7 @@ fn cycle_with_dependencies<L: SupervisorLauncher, I: IdCreator>(
     );
     // Keep task and attempt identities visible without echoing prompts, shell stderr or API responses.
     let report = result.map_err(|_| "daemon scheduling failed; inspect local task state")?;
-    print_schedule_report(&report);
+    print_schedule_report(&report, &cleanup);
     if report
         .startup
         .attempts
@@ -233,7 +245,7 @@ fn cycle_with_dependencies<L: SupervisorLauncher, I: IdCreator>(
     Ok(Some(report))
 }
 
-fn print_schedule_report(report: &ScheduleReport) {
+fn print_schedule_report(report: &ScheduleReport, cleanup: &crate::cleanup::CleanupReport) {
     let attempts = report
         .startup
         .attempts
@@ -250,10 +262,10 @@ fn print_schedule_report(report: &ScheduleReport) {
         .collect::<Vec<_>>();
     println!(
         "{}",
-        json!({"mode":"execute", "reconciliation":attempts,
+        json!({"mode":"execute", "cleanup":cleanup, "reconciliation":attempts,
         "source_holds":report.startup.source_holds.iter().map(|hold| json!({"task_id":hold.task_id,"kind":hold.kind})).collect::<Vec<_>>(),
         "launched":report.launched.iter().map(|plan| json!({"task_id":plan.task_id,"attempt_id":plan.attempt_id})).collect::<Vec<_>>(),
-        "skipped_existing":report.skipped_existing.len(), "capacity_full":report.capacity_full})
+        "skipped_existing":report.skipped_existing.len(), "capacity_full":report.capacity_full,"disk_space":report.disk_space})
     );
 }
 

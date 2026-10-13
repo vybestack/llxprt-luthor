@@ -214,10 +214,7 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        let root = tempfile::Builder::new()
-            .prefix("d28-")
-            .tempdir_in("/private/var/tmp")
-            .unwrap();
+        let root = tempfile::Builder::new().prefix("d28-").tempdir().unwrap();
         let checkout = root.path().join("checkout");
         create_checkout(&checkout);
         let calls = root.path().join("calls");
@@ -227,7 +224,12 @@ impl Fixture {
         fs::write(&gh, gh_script(&calls, &assigned, &assigned12)).unwrap();
         fs::set_permissions(&gh, fs::Permissions::from_mode(0o700)).unwrap();
         validate_gh_fixture(&gh);
-        let config = create_config(root.path(), &checkout);
+        let mut config = create_config(root.path(), &checkout);
+        config.state_root = root
+            .path()
+            .strip_prefix(std::env::current_dir().unwrap())
+            .unwrap()
+            .join("state");
         assert!(gh.is_absolute());
         assert_eq!(
             config.initial.executable,
@@ -440,9 +442,15 @@ fn assert_alias_refuses_cycle(f: &Fixture, original: &str, before: &History) {
         (direct_db.dev(), direct_db.ino()),
         (alias_db.dev(), alias_db.ino())
     );
-    assert_eq!(fs::canonicalize(&alias).unwrap(), f.config.state_root);
+    assert_eq!(
+        fs::canonicalize(&alias).unwrap(),
+        fs::canonicalize(&f.config.state_root).unwrap()
+    );
     let mut config = f.config.clone();
-    config.state_root = alias;
+    config.state_root = alias
+        .strip_prefix(std::env::current_dir().unwrap())
+        .unwrap()
+        .to_path_buf();
     crate::supervisor::validate_stop_socket_path(&config.state_root, "attempt-fixture-id").unwrap();
     fs::write(&f.calls, "").unwrap();
     let mut launcher = RecordingLauncher::default();
@@ -545,14 +553,22 @@ fn assert_real_private_root(root: &Path) {
     assert!(metadata.file_type().is_dir());
     assert_eq!(metadata.uid(), unsafe { libc::geteuid() });
     assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
-    assert_eq!(fs::canonicalize(root).unwrap(), root);
+    assert_eq!(
+        fs::canonicalize(root).unwrap(),
+        std::env::current_dir().unwrap().join(root)
+    );
 }
 
 fn initialize_long_state_root(f: &Fixture) -> Config {
     use std::os::unix::{ffi::OsStrExt, fs::DirBuilderExt};
 
     let mut config = f.config.clone();
-    config.state_root = f.root.path().join("s".repeat(100));
+    config.state_root = f
+        .root
+        .path()
+        .strip_prefix(std::env::current_dir().unwrap())
+        .unwrap()
+        .join("s".repeat(100));
     fs::DirBuilder::new()
         .mode(0o700)
         .create(&config.state_root)
@@ -643,4 +659,23 @@ fn long_real_private_state_root_refuses_daemon_before_claim_or_reservation() {
     for rows in &history(&store, None)[1..4] {
         assert!(rows.is_empty());
     }
+}
+
+#[test]
+fn low_space_daemon_cycle_reports_hold_without_candidate_reads_claims_or_launch() {
+    let f = Fixture::new();
+    let mut config = f.config.clone();
+    config.min_free_space_bytes = u64::MAX;
+    fs::write(&f.calls, "").unwrap();
+    let mut launcher = RecordingLauncher::default();
+    let report = f.cycle(&config, &mut launcher).unwrap().unwrap();
+    assert!(report.disk_space.unwrap().dispatch_held);
+    assert!(report.launched.is_empty());
+    assert!(launcher.plans.is_empty());
+    assert!(!f.assigned.exists());
+    assert!(!config.worktree_root.exists());
+    assert_eq!(fs::read_to_string(&f.calls).unwrap(), "");
+    let store = StateStore::open(&config.state_root, config.capacity).unwrap();
+    assert_eq!(task_records::task_count(&store).unwrap(), 0);
+    assert_eq!(scheduling::reservation_count(&store).unwrap(), 0);
 }

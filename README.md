@@ -106,6 +106,60 @@ Capacity counts reserved attempts, including uncertain attempts. A slot is not r
 
 A worker process exit does not complete a task. Completion requires a verified matching open PR in the mapped code repository, with the exact tracker issue linkage, expected base and allowed head repository, and authorized identity. Draft status and pending or failing checks are reported, but do not by themselves negate a verified matching open PR. An absent, ambiguous, or unreadable PR result does not establish completion. Luthor does not automatically retry work, review or repair a PR, merge, or unassign an issue.
 
+## Terminal-task cleanup and disk-space dispatch holds
+
+Cleanup is **disabled by default**. Set the optional top-level `cleanup` policy
+in the current configuration to opt in:
+
+```json
+"cleanup": {"kind": "artifacts", "paths": ["target", "tmp/build"]},
+"min_free_space_bytes": 53687091200
+```
+
+Alternatively use `{"kind":"worktree"}` to remove the whole worktree, or
+`{"kind":"disabled"}` to retain everything. `min_free_space_bytes` is an
+unsigned byte count (the example holds below 50 GiB); it defaults to zero.
+
+Execute daemon cycles and explicit dispatch run cleanup after startup
+reconciliation and **before** measuring disk space or selecting new work.
+Preview, discovery, status, show, and reconcile do not delete files. Cleanup
+only considers `pr_complete` tasks with completed, released attempts. It holds
+the existing worktree-owner lock, rechecks receipt/process/group absence and
+worktree identity, and reads the exact previously verified PR from GitHub.
+Only a freshly verified **merged or closed** PR authorizes deletion. An open,
+reopened, or replacement matching open PR retains the worktree. Running,
+reserved, held, paused, and attention tasks are never cleaned. Tasks with
+missing ownership or quiescence proof fail closed; telemetry-loss and
+historical boot-identity uncertainty do not acquire new proof through cleanup.
+
+Artifact paths must be non-empty, non-overlapping relative paths outside
+`.git`, ignored by Git and entirely untracked. Cleanup refuses symlinks,
+nested repositories, special files, and filesystem boundaries. Whole-worktree
+cleanup also requires no unsaved tracked/untracked files and a local tip equal
+to the freshly observed PR head; ignored build output may be removed. It uses
+Git worktree removal to remove registration, but retains the task branch,
+fetch pin, private task state, logs, session and ownership-lock evidence.
+Checkouts and state directories cannot overlap deletion targets.
+
+The task records a durable `cleanup` intent (policy, targets, worktree and
+terminal PR proof), one `cleanup_removed` event per removed path, then
+`cleanup_complete`. `show TASK` exposes removed paths and completion/failure
+events. Successful cleanup is not repeated after restart or policy changes.
+An interrupted deletion remains an unfinished intent and **is not retried or
+inferred complete**; failures stop the pass and require operator inspection.
+Never delete journal or lock records to make it run again.
+
+Dispatch reports `disk_space` with available bytes on the filesystem hosting
+`worktree_root`, the configured minimum, and `dispatch_held`. Space below the
+minimum holds scheduling without assigning an issue, creating a task, reserving
+an attempt or starting a worker. Daemon polling can continue and admit work
+once space recovers. Each new dispatch and initial/resume/retry preparation
+rechecks space; unreadable space or invalid roots fail rather than dispatching
+with unknown capacity. If the root does not exist, its nearest existing
+ancestor supplies the filesystem measurement, without creating the directory.
+This is a preflight guard, not a disk reservation: configure sufficient margin
+for all concurrent builds, since other processes can consume space afterward.
+
 ## Inspect and control tasks
 
 The read-only inspection commands open the local state database in read-only mode. They do not perform fresh GitHub reads. `status` reports task phases, reserved versus configured capacity, output-silence warnings, and stored evidence. `show` displays a task's attempts, worktree, events, and stored evidence. `logs` reads safe local attempt log files.

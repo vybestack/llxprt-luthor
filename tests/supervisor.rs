@@ -35,6 +35,9 @@ use std::{
 mod supervisor {
     use super::*;
     pub(super) mod active_pr;
+    mod cleanup_cases;
+    mod cleanup_fixture;
+    mod cleanup_refusals;
     pub(super) mod completed_pr;
     pub(super) mod configuration;
     pub(super) mod crashed_supervisor;

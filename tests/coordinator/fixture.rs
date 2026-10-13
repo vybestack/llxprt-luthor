@@ -246,6 +246,8 @@ fn fixture_config(
             .join("state"),
         worktree_root: dir.path().join("private"),
         capacity,
+        cleanup: luthor::config::CleanupPolicy::disabled(),
+        min_free_space_bytes: 0,
         assignment_login: "bot".into(),
         sources: vec![source.clone()],
         mappings: vec![mapping.clone()],
