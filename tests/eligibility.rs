@@ -64,6 +64,7 @@ fn issue(state: &str, labels: Vec<&str>, assignees: Vec<&str>, milestone: Option
         number: 7,
         url: "https://github.com/org/tracker/issues/7".into(),
         state: state.into(),
+        closed_at: None,
         assignees: assignees.into_iter().map(str::to_string).collect(),
         labels: labels.into_iter().map(str::to_string).collect(),
         milestone: milestone.map(str::to_string),

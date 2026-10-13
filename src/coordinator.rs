@@ -1,14 +1,18 @@
 use crate::state::{launches, scheduling, task_records};
 mod active;
 mod failed_checks;
+mod notes;
+pub use notes::TaskNote;
 mod pr_repair;
 pub use pr_repair::{
-    PrRepairReport, RepairOutcome, TaskNote, repair_verified_prs, repair_verified_prs_after_cleanup,
+    PrRepairReport, RepairOutcome, repair_verified_prs, repair_verified_prs_after_cleanup,
 };
 mod pr_restore;
 pub use pr_restore::{RestoreReport, restore_wrongly_held_prs};
 mod reconciliation;
 mod recovery;
+mod retirement;
+pub use retirement::{RetiredTask, RetirementReport, abandon_task, retire_finished_tasks};
 mod recovery_commit;
 mod source_observation;
 pub use reconciliation::reconcile_with_pr;
@@ -73,6 +77,22 @@ pub struct StartupReport {
 }
 
 impl StartupReport {
+    /// Forget what reconciliation reported for tasks retired afterwards, and
+    /// recompute the source holds their retirement may have cleared.
+    pub fn settle_retired(
+        &mut self,
+        store: &StateStore,
+        retired: &[RetiredTask],
+    ) -> Result<(), StateError> {
+        self.attempts
+            .retain(|attempt| !retired.iter().any(|task| task.task_id == attempt.task_id));
+        self.source_holds = scheduling::unresolved_sources(store)?
+            .into_iter()
+            .map(|(task_id, kind)| SourceHold { task_id, kind })
+            .collect();
+        Ok(())
+    }
+
     pub fn scheduling_blocked(&self) -> bool {
         !self.source_holds.is_empty()
             || self

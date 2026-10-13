@@ -1,11 +1,11 @@
-use super::database::StateStore;
+use super::{database::StateStore, retirement::RETIRED_PHASES_SQL};
 use crate::model::StateError;
 use rusqlite::params;
 
 /// Nonterminal attempts must each be inspected on startup, including attempts
 /// without a launch intent (an inconsistent durable state is not safe to skip).
 pub fn pending_attempts(store: &StateStore) -> Result<Vec<(String, String)>, StateError> {
-    let mut statement = store.connection.prepare(
+    let mut statement = store.connection.prepare(&format!(
         "SELECT a.task_id,a.id FROM attempts a WHERE NOT (
              a.lifecycle='telemetry_lost' AND a.outcome IS NULL
              AND EXISTS (SELECT 1 FROM tasks t WHERE t.id=a.task_id AND t.state='pr_complete')
@@ -28,8 +28,9 @@ pub fn pending_attempts(store: &StateStore) -> Result<Vec<(String, String)>, Sta
              (EXISTS (SELECT 1 FROM evidence e WHERE e.task_id=a.task_id AND e.attempt_id=a.id AND e.kind='attempt_exit')
               AND NOT EXISTS (SELECT 1 FROM evidence e WHERE e.task_id=a.task_id AND e.attempt_id=a.id AND e.kind=CASE WHEN EXISTS
                  (SELECT 1 FROM intents i WHERE i.task_id=a.task_id AND i.attempt_id=a.id AND i.kind='stop') THEN 'pause_pr_lookup' ELSE 'exit_pr_lookup' END)))
+             AND NOT EXISTS (SELECT 1 FROM tasks rt WHERE rt.id=a.task_id AND rt.state IN ({RETIRED_PHASES_SQL}))
              ORDER BY a.rowid",
-    )?;
+    ))?;
     Ok(statement
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
         .collect::<Result<_, _>>()?)
@@ -55,14 +56,14 @@ pub(crate) fn active_attempt_reservation(
 /// Persisted source operations without their proof block new selections.
 /// Also include preparing tasks where the process died before the first intent.
 pub fn unresolved_sources(store: &StateStore) -> Result<Vec<(String, String)>, StateError> {
-    let mut statement = store.connection.prepare(
+    let mut statement = store.connection.prepare(&format!(
         "SELECT t.id, 'selection' FROM tasks t WHERE t.state='preparing'
              UNION ALL
-             SELECT t.id, 'prelaunch' FROM tasks t WHERE t.state NOT IN ('preparing','completed')
+             SELECT t.id, 'prelaunch' FROM tasks t WHERE t.state NOT IN ('preparing','completed',{RETIRED_PHASES_SQL})
                AND NOT EXISTS (SELECT 1 FROM attempts a WHERE a.task_id=t.id)
              UNION ALL
              SELECT i.task_id, i.kind FROM intents i JOIN tasks t ON t.id=i.task_id
-             WHERE t.state!='completed' AND (
+             WHERE t.state NOT IN ('completed',{RETIRED_PHASES_SQL}) AND (
                (i.kind='claim_assignment' AND NOT EXISTS
                  (SELECT 1 FROM evidence e WHERE e.task_id=i.task_id AND e.kind='claim_verified'))
                OR (i.kind='worktree_create' AND NOT EXISTS
@@ -94,7 +95,7 @@ pub fn unresolved_sources(store: &StateStore) -> Result<Vec<(String, String)>, S
                        json_type(e.payload,'$.id')='integer' AND json_extract(e.payload,'$.id')>0 ELSE 0 END)=1
                  ))
              ) ORDER BY 1,2",
-    )?;
+    ))?;
     Ok(statement
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
         .collect::<Result<_, _>>()?)
@@ -176,7 +177,7 @@ pub fn reservation_count(store: &StateStore) -> Result<usize, StateError> {
 
 fn unresolved_task_count(connection: &rusqlite::Connection) -> Result<usize, StateError> {
     Ok(connection.query_row(
-        "SELECT COUNT(DISTINCT t.id) FROM tasks t WHERE t.state!='completed'
+        &format!("SELECT COUNT(DISTINCT t.id) FROM tasks t WHERE t.state NOT IN ('completed',{RETIRED_PHASES_SQL})
              AND NOT (t.state='pr_complete'
                AND NOT EXISTS (SELECT 1 FROM reservations r WHERE r.task_id=t.id AND r.status='reserved')
                AND (SELECT COUNT(*) FROM evidence e WHERE e.task_id=t.id AND e.attempt_id=(SELECT id FROM attempts WHERE task_id=t.id ORDER BY rowid DESC LIMIT 1) AND e.kind='verified_open_pr'
@@ -237,7 +238,7 @@ fn unresolved_task_count(connection: &rusqlite::Connection) -> Result<usize, Sta
                    AND (SELECT COUNT(*) FROM intents WHERE task_id=t.id AND attempt_id=a.id AND kind='launch')=1
                    AND (SELECT COUNT(*) FROM evidence WHERE task_id=t.id AND kind='claim_verified')=1
                    AND (SELECT COUNT(*) FROM evidence WHERE task_id=t.id AND kind='worktree_created')=1
-                   AND (SELECT COUNT(*) FROM attempts WHERE task_id=t.id AND (lifecycle!='completed' OR outcome IS NULL))=0)))",
+                   AND (SELECT COUNT(*) FROM attempts WHERE task_id=t.id AND (lifecycle!='completed' OR outcome IS NULL))=0)))"),
         [],
         |row| row.get(0),
     )?)

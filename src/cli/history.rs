@@ -186,3 +186,19 @@ pub(crate) fn cleanup_failure(conn: &Connection, task: &str) -> Result<Option<St
         .filter(|(kind, _)| kind == "cleanup_failed")
         .map(|(_, reason)| reason))
 }
+
+/// The record of why a retired task reached its terminal phase. Every retired
+/// task has one; a missing record is damaged state, not an absent value.
+pub(crate) fn terminal(
+    conn: &Connection,
+    task: &str,
+    phase: &str,
+) -> Result<Option<Value>, CliError> {
+    if crate::state::retirement::RetiredPhase::parse(phase).is_none() {
+        return Ok(None);
+    }
+    crate::state::retirement::latest(conn, task)
+        .map_err(|_| CliError::Database)?
+        .map(Some)
+        .ok_or(CliError::Database)
+}

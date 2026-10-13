@@ -33,6 +33,7 @@ impl ProjectReader for OtherProject {
             number: c.issue_number,
             url: c.issue_url.clone(),
             state: "open".into(),
+            closed_at: None,
             assignees: if self.1 == 1 {
                 vec![]
             } else {

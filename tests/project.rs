@@ -325,6 +325,41 @@ fn direct_issue_caches_repository_and_validates_identity_and_urls() {
 }
 
 #[test]
+fn direct_issue_reports_when_it_was_closed_and_rejects_a_malformed_close_time() {
+    use luthor::github::project::{ProjectItem, ReadCategory};
+
+    let item = ProjectItem {
+        item_id: "PVTI1".into(),
+        issue_node_id: "ISSUE1".into(),
+        repository: "org/tracker".into(),
+        tracker_repo_id: "REPO1".into(),
+        issue_number: 7,
+        fields: vec![],
+        unsupported_fields: Vec::new(),
+    };
+    let read = |state: &str| {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("gh");
+        let issue = format!(
+            r#"{{"node_id":"ISSUE1","repository_url":"https://api.github.com/repos/org/tracker","number":7,"html_url":"https://github.com/org/tracker/issues/7",{state},"assignees":[],"labels":[],"milestone":null}}"#
+        );
+        let script = format!(
+            "#!/bin/sh\ncase \"$*\" in *'repos/org/tracker/issues/7'*) printf '%s' '{issue}' ;; *) printf '%s' '{{\"node_id\":\"REPO1\"}}' ;; esac\n"
+        );
+        fs::write(&path, script).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        GhProjectReader::new(path).issue(&item)
+    };
+    let open = read(r#""state":"open","closed_at":null"#).unwrap();
+    assert_eq!((open.state.as_str(), open.closed_at), ("open", None));
+    let closed = read(r#""state":"closed","closed_at":"2026-02-01T00:00:03Z""#).unwrap();
+    assert_eq!(closed.state, "closed");
+    assert_eq!(closed.closed_at.as_deref(), Some("2026-02-01T00:00:03Z"));
+    let malformed = read(r#""state":"closed","closed_at":7"#).unwrap_err();
+    assert_eq!(malformed.category, ReadCategory::Malformed);
+}
+
+#[test]
 fn direct_issue_rejects_repository_id_and_renamed_repository_urls() {
     use luthor::github::project::{ProjectItem, ReadCategory};
 
@@ -495,6 +530,7 @@ impl ProjectReader for FakeTargetReader {
                 item.repository, item.issue_number
             ),
             state: "open".into(),
+            closed_at: None,
             assignees: vec![],
             labels: vec![],
             milestone: None,

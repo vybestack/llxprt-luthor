@@ -7,7 +7,7 @@ const TRACKER_ISSUE: &str = "https://github.com/org/tracker/issues/12";
 const LIST_ROUTE: &str =
     "\"repos/org/code/pulls?state=open&per_page=100&page=1\") printf '%s\\n' '[]' ;;";
 
-fn pr_detail(open: bool) -> serde_json::Value {
+pub(super) fn pr_detail(open: bool) -> serde_json::Value {
     let mut detail = json!({
         "id":4242,"number":42,"state":"open","draft":false,"merged":false,
         "html_url":"https://github.com/org/code/pull/42",
@@ -28,14 +28,19 @@ fn pr_detail(open: bool) -> serde_json::Value {
 
 /// The hermetic `gh` serves PR 42 as open, or as merged with no open PR listed.
 fn serve_pr_42(f: &Fixture, open: bool) {
-    let list = if open {
+    serve_pr_42_with(f, open, open);
+}
+
+/// The open-PR search and the read by id can disagree while GitHub catches up.
+pub(super) fn serve_pr_42_with(f: &Fixture, listed_open: bool, detail_open: bool) {
+    let list = if listed_open {
         json!([{"number":42,"body":format!("Tracker-Issue: {TRACKER_ISSUE}")}])
     } else {
         json!([])
     };
     let routes = format!(
         "\"repos/org/code/pulls?state=open&per_page=100&page=1\") printf '%s\\n' '{list}' ;;\n  repos/org/code/pulls/42) printf '%s\\n' '{}' ;;",
-        pr_detail(open)
+        pr_detail(detail_open)
     );
     let script = fs::read_to_string(&f.gh).unwrap();
     assert!(script.contains(LIST_ROUTE));
@@ -43,7 +48,7 @@ fn serve_pr_42(f: &Fixture, open: bool) {
 }
 
 /// Issue 12 as an earlier release left it: worker finished, PR verified.
-fn seed_finished_issue12(f: &Fixture) {
+pub(super) fn seed_finished_issue12(f: &Fixture) {
     let mut store = StateStore::open(&f.config.state_root, 2).unwrap();
     let mut projects = GhProjectReader::new(f.gh.clone());
     let mut prs = GhPullRequestReader::new(f.gh.clone());
@@ -111,21 +116,21 @@ fn seed_finished_issue12(f: &Fixture) {
 }
 
 /// The cycle's configuration differs from the one task-12 was selected under.
-fn newer_config(f: &Fixture) -> Config {
+pub(super) fn newer_config(f: &Fixture) -> Config {
     let mut config = f.config.clone();
     config.min_free_space_bytes = 1;
     config.initial.args[5] = "Continue issue, newer prompt".into();
     config
 }
 
-fn phase_of_12(config: &Config) -> String {
+pub(super) fn phase_of_12(config: &Config) -> String {
     let store = StateStore::open(&config.state_root, 2).unwrap();
     task_records::task_phase(&store, "task-12")
         .unwrap()
         .unwrap()
 }
 
-fn assert_only_331_dispatched(launcher: &RecordingLauncher, report: &ScheduleReport) {
+pub(super) fn assert_only_331_dispatched(launcher: &RecordingLauncher, report: &ScheduleReport) {
     assert_eq!(launcher.plans.len(), 1);
     assert_eq!(launcher.plans[0].task_id, "task-fixture-id");
     assert_eq!(report.launched, launcher.plans);

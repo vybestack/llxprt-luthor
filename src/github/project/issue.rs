@@ -50,6 +50,7 @@ pub(crate) fn parse_issue(
         number: identity.number,
         url: identity.url,
         state,
+        closed_at: parse_closed_at(value)?,
         assignees: collections.assignees,
         labels: collections.labels,
         milestone,
@@ -135,5 +136,13 @@ fn parse_milestone(value: &Value) -> Result<(Option<String>, Option<String>), Pr
             )?),
         )),
         None => Err("invalid-issue-milestone".to_owned().into()),
+    }
+}
+
+fn parse_closed_at(value: &Value) -> Result<Option<String>, ProjectReadError> {
+    match value.get("closed_at") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(at)) => Ok(Some(at.clone())),
+        Some(_) => Err("invalid-issue-closed-at".to_owned().into()),
     }
 }

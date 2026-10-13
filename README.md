@@ -33,12 +33,13 @@ Usage: luthor discover --config <path>
        luthor resume TASK --config <path> --execute
        luthor retry TASK --attempt ID --config PATH --config-revision REV --actor LOGIN --reason TEXT [--revalidate-terminal-exit] --execute
        luthor recover TASK --attempt ID --config PATH --actor LOGIN --reason TEXT --execute
+       luthor abandon TASK --config PATH --actor LOGIN --reason TEXT --execute
        luthor status --config <path>
        luthor show TASK --config <path>
        luthor logs TASK [--attempt ATTEMPT] --config <path>
 ```
 
-`pause` and `reconcile` are also implemented operator commands; their exact syntax is shown under [Inspect and control tasks](#inspect-and-control-tasks). `recover` is a narrow audited recovery operation for missing receipts, not a routine retry control.
+`pause` and `reconcile` are also implemented operator commands; their exact syntax is shown under [Inspect and control tasks](#inspect-and-control-tasks). `recover` is a narrow audited recovery operation for missing receipts, not a routine retry control. `abandon` stops a task for good and is described in [finished and abandoned tasks](dev-docs/issue54-retire-finished.md).
 
 ## Configuration and access setup
 

@@ -729,3 +729,4 @@ fn unacknowledged_job_rerun_intent_holds_instead_of_repeating_post() {
 }
 
 mod history;
+mod retirement;

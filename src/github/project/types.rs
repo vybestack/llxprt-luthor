@@ -20,6 +20,8 @@ pub struct Issue {
     pub number: u64,
     pub url: String,
     pub state: String,
+    /// When GitHub closed the issue; absent while it is open.
+    pub closed_at: Option<String>,
     pub assignees: Vec<String>,
     pub labels: Vec<String>,
     pub milestone: Option<String>,

@@ -63,6 +63,7 @@ impl ProjectReader for FakeGithub {
             number: c.issue_number,
             url: c.issue_url.clone(),
             state: "open".into(),
+            closed_at: None,
             assignees,
             labels: vec!["ready".into()],
             milestone: Some("v1".into()),

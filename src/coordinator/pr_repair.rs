@@ -2,11 +2,13 @@
 use super::{
     failed_checks::{self, FailedChecks},
     ids::IdCreator,
+    notes::TaskNote,
     ports::SupervisorLauncher,
     ports::{
         DispatchError, PrVerificationStage, observation_time, verify_completion_claim,
         verify_open_pr,
     },
+    retirement::{self, Observation, RetiredTask, Settlement},
 };
 use crate::{
     claim,
@@ -16,17 +18,13 @@ use crate::{
     },
     ownership::{WorktreeOwner, WorktreeOwnerInternal},
     pr_repair::MAX_PR_REPAIRS,
-    state::{StateError, StateStore, journal, pr_repair, scheduling, task_records},
+    state::{
+        StateError, StateStore, journal, pr_repair, retirement::RetiredPhase, scheduling,
+        task_records,
+    },
     supervisor,
 };
 use serde::Serialize;
-
-/// A task together with the specific reason it was skipped or held.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct TaskNote {
-    pub task_id: String,
-    pub reason: String,
-}
 
 /// What one repair pass did. A skipped task is untouched and is looked at again
 /// next cycle; a held task was recorded as held with its reason.
@@ -35,6 +33,7 @@ pub struct RepairOutcome {
     pub launched: Vec<supervisor::LaunchPlan>,
     pub skipped: Vec<TaskNote>,
     pub held: Vec<TaskNote>,
+    pub retired: Vec<RetiredTask>,
 }
 
 /// The cycle's account of verified-PR housekeeping, reported alongside launches.
@@ -44,6 +43,8 @@ pub struct PrRepairReport {
     pub restore_retained: Vec<TaskNote>,
     pub skipped: Vec<TaskNote>,
     pub held: Vec<TaskNote>,
+    pub retired: Vec<RetiredTask>,
+    pub retire_retained: Vec<TaskNote>,
 }
 
 enum Inspection {
@@ -110,17 +111,62 @@ pub fn repair_verified_prs_after_cleanup<
                 task_id: task,
                 reason,
             }),
-            Err(error) => {
-                let reason = hold_reason(&error);
-                task_records::hold_task(store, &task, &reason)?;
-                outcome.held.push(TaskNote {
+            Err(error) => match finished_instead_of_held(store, &task, projects, prs)? {
+                Resolution::Retired(retired) => outcome.retired.push(retired),
+                Resolution::LeftToCleanup(reason) => outcome.skipped.push(TaskNote {
                     task_id: task,
                     reason,
-                });
-            }
+                }),
+                Resolution::Active => {
+                    let reason = hold_reason(&error);
+                    task_records::hold_task(store, &task, &reason)?;
+                    outcome.held.push(TaskNote {
+                        task_id: task,
+                        reason,
+                    });
+                }
+            },
         }
     }
     Ok(outcome)
+}
+
+enum Resolution {
+    Retired(RetiredTask),
+    /// The saved PR is finished; terminal cleanup, which removes the worktree
+    /// and branch, retires the task once the open-PR search agrees.
+    LeftToCleanup(String),
+    Active,
+}
+
+/// A failed repair check on a task whose work is already over is not a safety
+/// conflict: the closed issue or merged PR is the cause. Anything unproven
+/// stays a hold.
+fn finished_instead_of_held<P: ProjectReader, Q: PrHealthReader>(
+    store: &mut StateStore,
+    task: &str,
+    projects: &mut P,
+    prs: &mut Q,
+) -> Result<Resolution, StateError> {
+    let Observation::Finished(finished) = retirement::observe_finished(store, task, projects, prs)?
+    else {
+        return Ok(Resolution::Active);
+    };
+    if matches!(
+        finished.phase,
+        RetiredPhase::PrMerged | RetiredPhase::PrClosed
+    ) {
+        return Ok(Resolution::LeftToCleanup(format!(
+            "{}; terminal cleanup retires the task",
+            finished.reason
+        )));
+    }
+    match retirement::settle(store, task, &finished)? {
+        Settlement::Retired(retired) => Ok(Resolution::Retired(retired)),
+        Settlement::Blocked(_) | Settlement::Unfinished | Settlement::Unavailable(_) => {
+            Ok(Resolution::Active)
+        }
+    }
 }
 
 /// Bounded to the failing stage: upstream error text never enters task evidence.

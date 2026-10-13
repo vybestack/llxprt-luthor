@@ -124,3 +124,39 @@ pub(crate) fn retry(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>>
     );
     Ok(())
 }
+
+/// Operator decision to stop a task for good. Only local state changes; the
+/// issue, its assignment and any PR are left as they are.
+pub(crate) fn abandon(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
+    if args.len() != 8
+        || args[1] != "--config"
+        || args[3] != "--actor"
+        || args[5] != "--reason"
+        || args[7] != "--execute"
+        || args[0].trim().is_empty()
+        || args[2].trim().is_empty()
+        || args[4].trim().is_empty()
+        || args[6].trim().is_empty()
+        || [0, 2, 4].iter().any(|i| args[*i].starts_with('-'))
+    {
+        return Err("expected TASK --config PATH --actor LOGIN --reason TEXT --execute".into());
+    }
+    let config = Config::from_json(
+        &fs::read_to_string(&args[2]).map_err(|_| "abandon configuration unavailable")?,
+    )
+    .map_err(|error| error.operator_message("abandon"))?;
+    let mut store = StateStore::open(&config.state_root, config.capacity)
+        .map_err(|_| "abandon state unavailable")?;
+    let abandoned = crate::coordinator::abandon_task(&mut store, &args[0], &args[4], &args[6])
+        .map_err(|error| match error {
+            crate::state::StateError::NotRetirable(reason) => format!("abandon refused: {reason}"),
+            crate::state::StateError::InvalidSelection => "abandon refused: task not found".into(),
+            _ => "abandon could not be recorded; inspect local task state".to_owned(),
+        })?;
+    println!(
+        "{}",
+        json!({"task_id": abandoned.task_id, "status": "abandoned", "phase": abandoned.phase,
+        "actor": args[4], "reason": abandoned.reason, "github_changes": "none"})
+    );
+    Ok(())
+}

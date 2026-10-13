@@ -4,8 +4,9 @@ use super::{
         PrVerificationStage, completion_claim_failure_reason, observation_time,
         verify_completion_claim, verify_open_pr,
     },
+    retirement::{Settlement, retire_if_finished},
 };
-use crate::state::{exit_observation, journal, pr_completion, task_records};
+use crate::state::{exit_observation, journal, pr_completion, retirement, task_records};
 use crate::{
     github::{
         project::ProjectReader,
@@ -24,6 +25,14 @@ pub fn reconcile_with_pr<P: ProjectReader, Q: PullRequestReader>(
     projects: &mut P,
     prs: &mut Q,
 ) -> Result<supervisor::Reconciliation, SupervisorError> {
+    // A retired task is finished; its attempts are not reconciled again.
+    if let Some(phase) = task_records::task_phase(store, task_id)?
+        && retirement::RetiredPhase::parse(&phase).is_some()
+    {
+        return Ok(supervisor::Reconciliation::Held {
+            reason: format!("task is retired ({phase})"),
+        });
+    }
     let result = supervisor::reconcile_attempt(store, task_id, attempt_id)?;
     if matches!(result, supervisor::Reconciliation::Running) {
         return monitor_running_attempt(store, task_id, attempt_id, projects, prs);
@@ -32,6 +41,11 @@ pub fn reconcile_with_pr<P: ProjectReader, Q: PullRequestReader>(
         return Ok(result);
     }
     if journal::evidence_payload(store, task_id, Some(attempt_id), "pr_repair_blocked")?.is_some() {
+        // A repair held for a person may have been overtaken: the PR merged or
+        // the issue closed while it waited.
+        if let Settlement::Retired(_) = retire_if_finished(store, task_id, projects, prs)? {
+            return Ok(result);
+        }
         return Ok(supervisor::Reconciliation::Held {
             reason: "PR repair requires a person".into(),
         });
@@ -112,7 +126,7 @@ fn finish_pr_repair<P: ProjectReader, Q: PullRequestReader>(
             projects,
             prs,
             (*pr, proof.observed_at_unix_secs),
-            result,
+            result.clone(),
         ),
         _ => Ok(supervisor::Reconciliation::Held {
             reason: "repair PR missing, ambiguous or unreadable".into(),
@@ -121,6 +135,12 @@ fn finish_pr_repair<P: ProjectReader, Q: PullRequestReader>(
     match outcome {
         Ok(done @ supervisor::Reconciliation::Completed { .. }) => Ok(done),
         other => {
+            // The saved PR is read by its identity and the issue directly: a
+            // merged PR or closed issue explains the failure, so the task is
+            // finished rather than held for a person.
+            if let Settlement::Retired(_) = retire_if_finished(store, task, projects, prs)? {
+                return Ok(result);
+            }
             journal::record_evidence(
                 store,
                 task,

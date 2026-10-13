@@ -62,6 +62,7 @@ fn state_reason(error: &StateError) -> &'static str {
         StateError::AmbiguousTarget(_, _) => "cleanup target ambiguous",
         StateError::CapacityMismatch { .. } => "cleanup state capacity mismatch",
         StateError::UnsupportedDatabaseVersion(_) => "cleanup state database version unsupported",
+        StateError::NotRetirable(_) => "cleanup task cannot be retired",
     }
 }
 
