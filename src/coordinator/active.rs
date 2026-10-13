@@ -42,7 +42,14 @@ pub(crate) fn monitor_running_attempt<P: ProjectReader, Q: PullRequestReader>(
         (_, ActivePr::Held(reason)) => return record_hold(store, task_id, attempt_id, reason),
         (ActiveClaim::Lost, ActivePr::Matching) => "active claim lost and matching PR observed",
         (ActiveClaim::Lost, ActivePr::Absent) => "active claim lost",
-        (ActiveClaim::Owned, ActivePr::Matching) => "matching PR observed while worker active",
+        (ActiveClaim::Owned, ActivePr::Matching) => {
+            if crate::state::pr_repair::authorization(&store.connection, task_id, attempt_id)?
+                .is_some()
+            {
+                return Ok(supervisor::Reconciliation::Running);
+            }
+            "matching PR observed while worker active"
+        }
         (ActiveClaim::Owned, ActivePr::Absent) => return Ok(supervisor::Reconciliation::Running),
     };
     journal::record_evidence(store, task_id, Some(attempt_id), "held_reason", reason)?;
@@ -88,7 +95,15 @@ fn observe_pr<Q: PullRequestReader>(
         &selection.candidate.mapping.code_repository,
         &selection.candidate.issue_url,
     ) {
-        Ok(LookupResult::Absent) => Ok(ActivePr::Absent),
+        Ok(LookupResult::Absent) => {
+            if crate::state::pr_repair::authorization(&store.connection, task_id, attempt_id)?
+                .is_some()
+            {
+                Ok(ActivePr::Held("active repair PR disappeared"))
+            } else {
+                Ok(ActivePr::Absent)
+            }
+        }
         Ok(LookupResult::OpenPreexisting(pr)) => {
             let observed = observation_time()?;
             let verified = verify_open_pr(
@@ -100,7 +115,18 @@ fn observe_pr<Q: PullRequestReader>(
                 PrVerificationStage::Exit,
             );
             Ok(match verified {
-                Ok(_) => ActivePr::Matching,
+                Ok(verified) => {
+                    if let Some(audit) = crate::state::pr_repair::authorization(
+                        &store.connection,
+                        task_id,
+                        attempt_id,
+                    )? && verified.id != audit.saved_pr.id
+                    {
+                        ActivePr::Held("active repair PR identity changed")
+                    } else {
+                        ActivePr::Matching
+                    }
+                }
                 Err(_) => ActivePr::Held("active PR verification failed"),
             })
         }

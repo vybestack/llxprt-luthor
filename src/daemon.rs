@@ -207,6 +207,15 @@ fn cycle_with_dependencies<L: SupervisorLauncher, I: IdCreator>(
         print_schedule_report(&report, &cleanup);
         return Ok(Some(report));
     }
+    let repaired = crate::coordinator::repair_verified_prs(
+        &mut store,
+        config,
+        &mut projects,
+        &mut prs,
+        launcher,
+        ids,
+    )
+    .map_err(|_| "PR repair failed; inspect local task state")?;
     let selected = candidates(
         &mut projects,
         config,
@@ -232,8 +241,14 @@ fn cycle_with_dependencies<L: SupervisorLauncher, I: IdCreator>(
         startup,
     );
     // Keep task and attempt identities visible without echoing prompts, shell stderr or API responses.
-    let report = result.map_err(|_| "daemon scheduling failed; inspect local task state")?;
+    let mut report = result.map_err(|_| "daemon scheduling failed; inspect local task state")?;
+    report.launched.splice(0..0, repaired);
     print_schedule_report(&report, &cleanup);
+    verify_report(&report)?;
+    Ok(Some(report))
+}
+
+fn verify_report(report: &ScheduleReport) -> Result<(), Error> {
     if report
         .startup
         .attempts
@@ -242,7 +257,7 @@ fn cycle_with_dependencies<L: SupervisorLauncher, I: IdCreator>(
     {
         return Err("reconciliation failed; scheduling blocked".into());
     }
-    Ok(Some(report))
+    Ok(())
 }
 
 fn print_schedule_report(report: &ScheduleReport, cleanup: &crate::cleanup::CleanupReport) {

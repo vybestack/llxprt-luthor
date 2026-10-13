@@ -1,5 +1,6 @@
 use std::{path::PathBuf, process::Command};
 
+use super::{health::PrHealth, health_reader::observe as observe_health, types::PrHealthReader};
 use serde_json::Value;
 
 use super::{
@@ -44,7 +45,7 @@ impl GhPullRequestReader {
         Ok(id)
     }
 
-    fn api(&self, args: &[&str]) -> Result<Value, LookupError> {
+    pub(crate) fn api(&self, args: &[&str]) -> Result<Value, LookupError> {
         let output = Command::new(&self.executable)
             .args(args)
             .output()
@@ -193,6 +194,25 @@ fn status_value(value: &Value) -> Option<u16> {
         .and_then(|s| s.parse().ok())
         .or_else(|| value.as_u64().and_then(|s| u16::try_from(s).ok()))
 }
+impl PrHealthReader for GhPullRequestReader {
+    fn rerun_failed_jobs(
+        &mut self,
+        repository: &str,
+        run_id: u64,
+        head: &str,
+    ) -> Result<(), LookupError> {
+        super::job_reader::rerun(&self.executable, repository, run_id, head, |args| {
+            self.api(args)
+        })
+    }
+    fn failed_job_logs(&mut self, repository: &str, job_id: u64) -> Result<String, LookupError> {
+        super::job_reader::logs(&self.executable, repository, job_id)
+    }
+    fn health(&mut self, repository: &str, number: u64) -> Result<PrHealth, LookupError> {
+        observe_health(repository, number, |args| self.api(args))
+    }
+}
+
 #[cfg(test)]
 mod identity_tests {
     use super::*;

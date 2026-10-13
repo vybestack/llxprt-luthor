@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 pub(crate) fn cached_verified_pr(conn: &Connection, task: &str) -> Result<Value, CliError> {
     let mut stmt = conn
         .prepare(
-            "SELECT attempt_id,payload FROM evidence WHERE task_id=?1 AND kind='verified_open_pr'",
+            "SELECT attempt_id,payload FROM evidence WHERE task_id=?1 AND attempt_id=(SELECT attempt_id FROM evidence WHERE task_id=?1 AND kind='verified_open_pr' ORDER BY sequence DESC LIMIT 1) AND kind='verified_open_pr'",
         )
         .map_err(|_| CliError::Database)?;
     let rows = stmt
@@ -87,9 +87,15 @@ pub(crate) fn events(conn: &Connection, table: &str, task: &str) -> Result<Vec<V
             row.map_err(|_| CliError::Database)?;
         // Launch and dispatch details contain executable arguments and prompts.
         let detail = match (table, kind.as_str()) {
-            ("evidence", "held_reason" | "claim_verified" | "cleanup_failed") => {
-                Some(json!(payload))
-            }
+            (
+                "evidence",
+                "held_reason"
+                | "claim_verified"
+                | "cleanup_failed"
+                | "pr_repair_blocked"
+                | "pr_checks_flaky_looking"
+                | "pr_checks_repeat_failure",
+            ) => Some(json!(payload)),
             (
                 "evidence",
                 "pause_pr_lookup" | "exit_pr_lookup" | "retry_pr_lookup" | "source_observation",
@@ -104,9 +110,17 @@ pub(crate) fn events(conn: &Connection, table: &str, task: &str) -> Result<Vec<V
             ("evidence", "attempt_exit") => serde_json::from_str::<ExitReceipt>(&payload)
                 .ok()
                 .map(|receipt| receipt_summary(&receipt)),
-            ("evidence", "verified_open_pr" | "cleanup_removed" | "cleanup_complete") => {
-                serde_json::from_str::<Value>(&payload).ok()
-            }
+            (
+                "evidence",
+                "verified_open_pr"
+                | "cleanup_removed"
+                | "cleanup_complete"
+                | "pr_health"
+                | "pr_repair_result"
+                | "pr_failed_jobs_rerun"
+                | "pr_failed_jobs_rerun_acknowledged"
+                | "pr_repair_pr_lookup",
+            ) => serde_json::from_str::<Value>(&payload).ok(),
             _ => None,
         };
         Ok(

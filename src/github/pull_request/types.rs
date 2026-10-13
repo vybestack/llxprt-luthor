@@ -1,3 +1,4 @@
+use super::health::PrHealth;
 use serde_json::Value;
 use thiserror::Error;
 
@@ -65,4 +66,15 @@ pub(crate) fn error(
         code,
         status,
     }
+}
+
+pub trait PrHealthReader: PullRequestReader {
+    fn rerun_failed_jobs(
+        &mut self,
+        repository: &str,
+        run_id: u64,
+        head: &str,
+    ) -> Result<(), LookupError>;
+    fn failed_job_logs(&mut self, repository: &str, job_id: u64) -> Result<String, LookupError>;
+    fn health(&mut self, repository: &str, number: u64) -> Result<PrHealth, LookupError>;
 }

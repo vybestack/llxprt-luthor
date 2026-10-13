@@ -91,7 +91,7 @@ pub(crate) fn validate_owner_protocol(
 pub(crate) fn validate_verified_open_pr(
     tx: &Transaction<'_>,
     task_id: &str,
-    _attempt_id: &str,
+    attempt_id: &str,
     proof: &VerifiedOpenPr,
 ) -> Result<(), StateError> {
     let state: Option<String> = tx
@@ -122,8 +122,8 @@ pub(crate) fn validate_verified_open_pr(
     let identity: WorktreeIdentity = serde_json::from_str(&identity_payload)?;
     validate_pr_identity(&selection, &intent, &identity, proof)?;
     let duplicate: i64 = tx.query_row(
-        "SELECT COUNT(*) FROM evidence WHERE kind='verified_open_pr' AND json_extract(payload,'$.id')=?1",
-        [proof.id],
+        "SELECT COUNT(*) FROM evidence WHERE kind='verified_open_pr' AND json_extract(payload,'$.id')=?1 AND task_id<>?2",
+        params![proof.id, task_id],
         |row| row.get(0),
     )?;
     let existing: i64 = tx.query_row(
@@ -131,7 +131,28 @@ pub(crate) fn validate_verified_open_pr(
         [task_id],
         |row| row.get(0),
     )?;
-    if duplicate != 0 || existing != 0 {
+    if existing != 0 {
+        let payload = unique_payload(tx, true, task_id, Some(attempt_id), "pr_repair_authorized")?
+            .ok_or(StateError::LaunchBlocked)?;
+        let audit: crate::pr_repair::PrRepairAuthorization = parse_saved(&payload)?;
+        let prior_payload = unique_payload(
+            tx,
+            true,
+            task_id,
+            Some(&audit.previous_plan.attempt_id),
+            "verified_open_pr",
+        )?
+        .ok_or(StateError::LaunchBlocked)?;
+        let prior: VerifiedOpenPr = parse_saved(&prior_payload)?;
+        if audit.saved_pr != prior
+            || audit.saved_pr.id != proof.id
+            || audit.saved_pr.number != proof.number
+            || unique_payload(tx, true, task_id, Some(attempt_id), "verified_open_pr")?.is_some()
+        {
+            return Err(StateError::LaunchBlocked);
+        }
+    }
+    if duplicate != 0 {
         return Err(StateError::LaunchBlocked);
     }
     Ok(())

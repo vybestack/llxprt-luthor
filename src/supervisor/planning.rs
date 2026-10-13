@@ -207,7 +207,7 @@ pub(crate) fn prepare_retry(
     Ok(plan)
 }
 
-fn continuation_command(
+pub(crate) fn continuation_command(
     selection: &SelectionEvidence,
     task_id: &str,
     attempt_id: &str,
@@ -256,7 +256,7 @@ fn continuation_command(
     Ok(RenderedCommand { executable, args })
 }
 
-fn verify_continuation_identity(
+pub(crate) fn verify_continuation_identity(
     first: &LaunchPlan,
     latest: &LaunchPlan,
     task_id: &str,

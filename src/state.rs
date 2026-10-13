@@ -16,6 +16,7 @@ pub(crate) mod exits;
 pub mod journal;
 pub mod launches;
 pub mod pr_completion;
+pub(crate) mod pr_repair;
 mod proofs;
 pub mod scheduling;
 pub mod task_records;

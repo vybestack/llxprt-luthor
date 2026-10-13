@@ -216,3 +216,21 @@ This path supports issue #2's original startup rejection without creating a
 successor task, moving its source claim, replacing its worktree/branch history,
 editing SQLite or launching a duplicate worker. The operator must invoke the
 verified binary explicitly; no daemon or reconciliation path authorizes it.
+
+## Verified PR repair
+
+The execute daemon now rechecks retained verified PRs for base conflicts and
+failed **required** checks. Failed Actions jobs get one audited rerun per head
+before a code repair; passing reruns are recorded as flaky-looking. Pending
+checks and unknown mergeability wait, optional failures do not trigger repair,
+and unsupported/non-rerunnable required checks hold for a person.
+
+A task gets at most three repair continuations on its original session/worktree.
+Each prompt identifies the existing PR, failing checks and bounded log excerpts;
+it requires merge-only base integration, unchanged gates and same-branch push.
+After process accounting, the worker's uncommitted
+`.luthor-pr-repair-result.json` must identify the new attempt and status
+`repaired` or `semantic_conflict`. Semantic conflicts and invalid reports hold
+for a person rather than completing or automatically retrying. New PR proofs
+are appended; `show`/`status` display the latest verified attempt. See
+[issue 44 validation](issue44-pr-repair-validation.md) for safety details.
