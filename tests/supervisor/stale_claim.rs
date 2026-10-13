@@ -15,6 +15,7 @@ pub(crate) fn natural_exit_stale_assignee_is_held_despite_matching_open_pr() {
         .unwrap();
     let mut prs = ExitPr {
         matching: Some((selection.candidate.issue_url.clone(), identity.branch)),
+        sha: Some(identity.head),
         ..ExitPr::default()
     };
     let mut projects = OtherProject(selection.candidate, 0);
@@ -81,6 +82,7 @@ pub(crate) fn stopped_exit_stale_assignee_is_held_despite_matching_open_pr() {
         .unwrap();
     let mut prs = ExitPr {
         matching: Some((selection.candidate.issue_url.clone(), identity.branch)),
+        sha: Some(identity.head),
         ..ExitPr::default()
     };
     let mut projects = OtherProject(selection.candidate, 0);

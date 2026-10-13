@@ -167,8 +167,8 @@ fn live_running_lost_claim_requests_stop_and_holds_reservation_until_exit() {
 
 #[cfg(unix)]
 #[test]
-fn live_matching_pr_requests_stop_but_waits_for_exit_and_independent_rechecks() {
-    active_pr::live_matching_pr_requests_stop_but_waits_for_exit_and_independent_rechecks();
+fn live_matching_pr_finishes_naturally_and_independently_rechecks() {
+    active_pr::live_matching_pr_finishes_naturally_and_independently_rechecks();
 }
 
 #[cfg(unix)]

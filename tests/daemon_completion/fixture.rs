@@ -255,6 +255,15 @@ printf '%s' "$head" > "$root/head"
 printf '{{"id":4242,"number":42,"state":"open","draft":false,"merged":false,"html_url":"https://github.com/org/code/pull/42","body":"Tracker-Issue: https://github.com/org/tracker/issues/7\\nFixes org/tracker#7","created_at":"2026-01-01T00:00:00Z","base":{{"repo":{{"id":10,"full_name":"org/code"}},"ref":"main"}},"head":{{"repo":{{"id":10,"full_name":"org/code"}},"ref":"%s","sha":"%s"}},"user":{{"login":"acoliver"}}}}' "$branch" "$head" > "$root/pr.json"
 printf '{{"attempt_id":"%s","status":"repaired"}}' "$attempt" > .luthor-pr-repair-result.json
 rm -f "$root/conflict"
+if test -f "$root/finish-wait"; then
+  sleep 1
+  i=0
+  while ! test -f "$root/finish-release"; do
+    i=$((i+1)); test "$i" -lt 6000 || exit 98
+    sleep 0.01
+  done
+fi
+printf '{{"summary":"worker finished"}}\n'
 "#,
         root.display()
     )
@@ -265,6 +274,7 @@ fn install_gh(root: &Path) {
     let original = fs::read_to_string(&gh).unwrap();
     let routes = format!(
         r#"  repos/org/code/pulls/42) cat '{}/pr.json' ;;
+  repos/org/code/pulls/43) sed 's/"number":42/"number":43/g; s@pull/42@pull/43@g' '{}/pr.json' ;;
   repos/org/code/pulls?*)
     root='{}'
     if test -f "$root/race"; then
@@ -283,11 +293,14 @@ fn install_gh(root: &Path) {
         exit 0
       fi
     fi
-    if test -f "$root/pr.json"; then
+    if test -f "$root/ambiguous"; then
+      printf '%s\n' '[{{"number":42,"body":"Tracker-Issue: https://github.com/org/tracker/issues/7"}},{{"number":43,"body":"Tracker-Issue: https://github.com/org/tracker/issues/7"}}]'
+    elif test -f "$root/pr.json"; then
       printf '%s\n' '[{{"number":42,"body":"Tracker-Issue: https://github.com/org/tracker/issues/7\nFixes org/tracker#7"}}]'
     else printf '%s\n' '[]'; fi ;;
   repos/org/code) printf '%s\n' '{{"id":10,"full_name":"org/code"}}' ;;
 "#,
+        root.display(),
         root.display(),
         root.display()
     );
