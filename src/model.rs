@@ -37,6 +37,8 @@ pub enum StateError {
     CapacityMismatch { configured: usize, persisted: usize },
     #[error("unsupported database version {0}")]
     UnsupportedDatabaseVersion(i32),
+    #[error("task cannot be retired: {0}")]
+    NotRetirable(&'static str),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -1,6 +1,6 @@
 use super::{
     CliError,
-    history::{attempt_history, cached_verified_pr, events},
+    history::{attempt_history, cached_verified_pr, events, terminal},
     observation::{ObservationSummaries, displayed_reason, observations},
     output::{OutputAge, log_observation},
     process::operator_state,
@@ -73,6 +73,12 @@ pub(crate) fn show(conn: &Connection, root: &Path, task: &str) -> Result<Value, 
         "last_observed_source":last_observed_source,
         "last_observation":last_observation,
         "last_observed_pr_unavailable_reason":if last_observed_pr.is_none(){Some("no stored PR observation")}else{None}});
+    if let Some(record) = terminal(conn, task, &phase)? {
+        output["reason"] = record["reason"].clone();
+        output["terminal"] = record;
+    } else {
+        output["terminal"] = Value::Null;
+    }
     output["cleanup_failure"] = json!(super::history::cleanup_failure(conn, task)?);
     log_observation(
         &mut output,

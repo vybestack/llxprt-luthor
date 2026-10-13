@@ -240,3 +240,5 @@ After process accounting, the worker's uncommitted
 for a person rather than completing or automatically retrying. New PR proofs
 are appended; `show`/`status` display the latest verified attempt. See
 [issue 44 validation](issue44-pr-repair-validation.md) for safety details.
+A task whose issue closed or whose PR finished is retired instead of held; see
+[issue 54](issue54-retire-finished.md).

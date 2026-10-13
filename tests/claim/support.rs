@@ -238,6 +238,7 @@ impl luthor::github::project::ProjectReader for ClaimProjects {
             number: 7,
             url: "https://github.com/org/tracker/issues/7".into(),
             state: "open".into(),
+            closed_at: None,
             assignees: self.assignees.borrow().clone(),
             labels: vec!["ready".into()],
             milestone: self.milestone.clone(),

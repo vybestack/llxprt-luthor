@@ -8,7 +8,7 @@ struct StatusTask {
 
 use super::{
     CliError,
-    history::cached_verified_pr,
+    history::{cached_verified_pr, terminal},
     observation::{ObservationSummaries, displayed_reason, observations},
     output::{OutputAge, log_observation},
     process::operator_state,
@@ -128,7 +128,14 @@ fn present_task(conn: &Connection, root: &Path, saved: &mut StatusTask) -> Resul
         latest.as_ref(),
         sequence,
     );
-    task["reason"] = json!(reason);
+    let terminal = terminal(conn, task_id, &saved_phase)?;
+    task["reason"] = json!(
+        terminal
+            .as_ref()
+            .and_then(|record| record["reason"].as_str().map(str::to_owned))
+            .or(reason)
+    );
+    task["terminal"] = json!(terminal);
 
     task["last_observed_pr"] = json!(pr);
     task["last_observed_source"] = json!(source);

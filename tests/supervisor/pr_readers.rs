@@ -68,8 +68,13 @@ impl PullRequestReader for ExitPr {
         }
     }
     fn detail(&mut self, _: &str, number: u64) -> Result<serde_json::Value, LookupError> {
+        // A PR that is gone is a 404, which retirement must read as unknown.
         let Some((issue_url, branch)) = &self.matching else {
-            unreachable!()
+            return Err(LookupError {
+                category: ErrorCategory::NotFound,
+                code: "not-found",
+                status: Some(404),
+            });
         };
         Ok(serde_json::json!({
             "id": 4200 + number, "number": number, "state": "open",

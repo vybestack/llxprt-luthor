@@ -14,6 +14,7 @@ use crate::{
     supervisor::{LaunchPlan, SupervisorError},
 };
 mod repairs;
+mod retirements;
 
 use rusqlite::types::Value;
 use serde_json::json;

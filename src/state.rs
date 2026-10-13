@@ -19,6 +19,7 @@ pub mod pr_completion;
 pub(crate) mod pr_repair;
 pub(crate) mod pr_restore;
 mod proofs;
+pub mod retirement;
 pub mod scheduling;
 pub mod task_records;
 pub mod worktree_records;

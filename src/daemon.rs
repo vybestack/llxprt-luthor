@@ -4,7 +4,7 @@ use crate::{
     config::Config,
     coordinator::{
         AttemptReview, IdCreator, OsIdCreator, PrRepairReport, ProductionLauncher,
-        ScheduleDependencies, ScheduleReport, SupervisorLauncher,
+        ScheduleDependencies, ScheduleReport, StartupReport, SupervisorLauncher,
         schedule_candidates_after_startup, startup_reconcile_all,
     },
     eligibility::{self, Candidate},
@@ -185,15 +185,29 @@ fn preview(
     Ok(())
 }
 
-fn restore_held_tasks(
+/// Before cleanup and scheduling, so finished tasks stop counting as
+/// unresolved capacity: first the ones an earlier release wrongly held go back
+/// to cleanup, then tasks whose issue closed or PR finished are retired. This
+/// precedes the blocked check, because a finished task's leftover source
+/// operation or unreconciled attempt must not stop the queue.
+fn settle_finished_tasks(
     store: &mut StateStore,
+    projects: &mut GhProjectReader,
     prs: &mut GhPullRequestReader,
+    startup: &mut StartupReport,
 ) -> Result<PrRepairReport, Error> {
     let restored = crate::coordinator::restore_wrongly_held_prs(store, prs)
         .map_err(|_| "PR hold restoration failed; inspect local task state")?;
+    let retirement = crate::coordinator::retire_finished_tasks(store, projects, prs)
+        .map_err(|_| "task retirement failed; inspect local task state")?;
+    startup
+        .settle_retired(store, &retirement.retired)
+        .map_err(|_| "task retirement failed; inspect local task state")?;
     Ok(PrRepairReport {
         restored: restored.restored,
         restore_retained: restored.retained,
+        retired: retirement.retired,
+        retire_retained: retirement.retained,
         ..Default::default()
     })
 }
@@ -212,14 +226,12 @@ fn cycle_with_dependencies<L: SupervisorLauncher, I: IdCreator>(
     }
     let mut store = StateStore::open(&config.state_root, config.capacity)?;
     let mut prs = GhPullRequestReader::new(gh.clone());
-    let startup = startup_reconcile_all(&mut store, &mut projects, &mut prs)?;
+    let mut startup = startup_reconcile_all(&mut store, &mut projects, &mut prs)?;
+    let mut pr_repair = settle_finished_tasks(&mut store, &mut projects, &mut prs, &mut startup)?;
     if startup.scheduling_blocked() {
         println!("{}", json!({"mode":"execute", "blocked":true}));
         return Err("startup reconciliation blocked scheduling".into());
     }
-    // Before cleanup and scheduling, so finished tasks an earlier release held
-    // stop counting as unresolved capacity and become cleanup candidates again.
-    let mut pr_repair = restore_held_tasks(&mut store, &mut prs)?;
     let cleanup = crate::cleanup::clean_terminal_tasks(&mut store, config, &mut prs)
         .map_err(|_| "cleanup failed; inspect local task state")?;
     let disk_space = crate::disk::inspect(&config.worktree_root, config.min_free_space_bytes)?;
@@ -271,6 +283,7 @@ fn cycle_with_dependencies<L: SupervisorLauncher, I: IdCreator>(
     let mut report = result.map_err(|_| "daemon scheduling failed; inspect local task state")?;
     pr_repair.skipped = repair.skipped;
     pr_repair.held = repair.held;
+    pr_repair.retired.extend(repair.retired);
     report.pr_repair = pr_repair;
     report.launched.splice(0..0, repair.launched);
     print_schedule_report(&report, &cleanup);

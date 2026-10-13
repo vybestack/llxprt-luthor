@@ -1,5 +1,5 @@
 //! Return finished tasks that an earlier release wrongly held for PR repair.
-use super::{DispatchError, ports::observation_time, pr_repair::TaskNote};
+use super::{DispatchError, notes::TaskNote, ports::observation_time};
 use crate::{
     cleanup::{CleanupError, terminal_pr},
     github::pull_request::PullRequestReader,

@@ -1,4 +1,4 @@
-use super::{database::StateStore, proofs};
+use super::{database::StateStore, proofs, retirement::RETIRED_PHASES_SQL};
 use crate::{
     config::Config,
     eligibility::Candidate,
@@ -115,7 +115,13 @@ pub fn existing_target(
 /// Record a non-retriable failure without releasing any launch reservation.
 pub fn hold_task(store: &mut StateStore, task_id: &str, reason: &str) -> Result<(), StateError> {
     let tx = store.connection.transaction()?;
-    let changed = tx.execute("UPDATE tasks SET state='held' WHERE id=?1", [task_id])?;
+    // A retired task is finished; nothing may pull it back into a hold.
+    let changed = tx.execute(
+        &format!(
+            "UPDATE tasks SET state='held' WHERE id=?1 AND state NOT IN ({RETIRED_PHASES_SQL})"
+        ),
+        [task_id],
+    )?;
     if changed != 1 {
         return Err(StateError::InvalidSelection);
     }

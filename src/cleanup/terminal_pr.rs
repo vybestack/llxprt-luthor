@@ -5,9 +5,26 @@ use crate::{
 };
 use serde_json::Value;
 
-/// A fresh detail read of the exact previously verified PR, not a title search
-/// or inference from an absent open-PR listing. Reopened PRs stay untouched.
+/// Cleanup acts on a finished PR only when the open-PR search agrees, because
+/// it deletes the branch and worktree.
 pub(crate) fn observe<Q: PullRequestReader>(
+    prs: &mut Q,
+    saved: &VerifiedOpenPr,
+) -> Result<Option<Value>, CleanupError> {
+    let Some(finished) = observe_by_id(prs, saved)? else {
+        return Ok(None);
+    };
+    if lookup(prs, &saved.repository, &saved.tracker_issue_url)? != LookupResult::Absent {
+        return Ok(None);
+    }
+    Ok(Some(finished))
+}
+
+/// A fresh detail read of the exact previously verified PR by its immutable
+/// identity, not a title search or inference from an absent open-PR listing.
+/// Search results lag a merge, so this read alone decides that the PR is
+/// finished. Reopened PRs stay untouched.
+pub(crate) fn observe_by_id<Q: PullRequestReader>(
     prs: &mut Q,
     saved: &VerifiedOpenPr,
 ) -> Result<Option<Value>, CleanupError> {
@@ -34,15 +51,16 @@ pub(crate) fn observe<Q: PullRequestReader>(
             "cleanup PR terminal timestamp missing",
         ));
     }
-    if lookup(prs, &saved.repository, &saved.tracker_issue_url)? != LookupResult::Absent {
-        return Ok(None);
-    }
-    Ok(Some(serde_json::json!({
+    let mut finished = serde_json::json!({
         "id":saved.id,"number":saved.number,"url":saved.url,
         "repository":saved.repository,"state":if merged {"merged"} else {"closed"},
         "closed_at":detail["closed_at"],"merged_at":detail["merged_at"],
         "head_commit_sha":text(&detail, "/head/sha")?
-    })))
+    });
+    if let Some(commit) = detail.get("merge_commit_sha").and_then(Value::as_str) {
+        finished["merge_commit_sha"] = Value::from(commit);
+    }
+    Ok(Some(finished))
 }
 
 fn verify_identity(detail: &Value, saved: &VerifiedOpenPr) -> Result<(), CleanupError> {
