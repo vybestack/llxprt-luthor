@@ -3,9 +3,9 @@ use crate::{
     claim::GhAssignmentWriter,
     config::Config,
     coordinator::{
-        AttemptReview, IdCreator, OsIdCreator, ProductionLauncher, ScheduleDependencies,
-        ScheduleReport, SupervisorLauncher, schedule_candidates_after_startup,
-        startup_reconcile_all,
+        AttemptReview, IdCreator, OsIdCreator, PrRepairReport, ProductionLauncher,
+        ScheduleDependencies, ScheduleReport, SupervisorLauncher,
+        schedule_candidates_after_startup, startup_reconcile_all,
     },
     eligibility::{self, Candidate},
     github::{
@@ -169,6 +169,35 @@ fn cycle(config: &Config, options: &Options) -> Result<(), Error> {
     .map(|_| ())
 }
 
+fn preview(
+    projects: &mut GhProjectReader,
+    config: &Config,
+    options: &Options,
+) -> Result<(), Error> {
+    let selected = candidates(projects, config, options.targets.as_ref(), None)?;
+    println!(
+        "{}",
+        json!({"mode":"preview","candidates":selected.iter().map(|c| json!({
+        "repository":c.repository,"issue_number":c.issue_number,"issue_url":c.issue_url,
+        "project_id":c.project_id,"item_id":c.item_id
+    })).collect::<Vec<_>>()})
+    );
+    Ok(())
+}
+
+fn restore_held_tasks(
+    store: &mut StateStore,
+    prs: &mut GhPullRequestReader,
+) -> Result<PrRepairReport, Error> {
+    let restored = crate::coordinator::restore_wrongly_held_prs(store, prs)
+        .map_err(|_| "PR hold restoration failed; inspect local task state")?;
+    Ok(PrRepairReport {
+        restored: restored.restored,
+        restore_retained: restored.retained,
+        ..Default::default()
+    })
+}
+
 fn cycle_with_dependencies<L: SupervisorLauncher, I: IdCreator>(
     config: &Config,
     options: &Options,
@@ -178,14 +207,7 @@ fn cycle_with_dependencies<L: SupervisorLauncher, I: IdCreator>(
 ) -> Result<Option<ScheduleReport>, Error> {
     let mut projects = GhProjectReader::new(gh.clone());
     if !options.execute {
-        let selected = candidates(&mut projects, config, options.targets.as_ref(), None)?;
-        println!(
-            "{}",
-            json!({"mode":"preview","candidates":selected.iter().map(|c| json!({
-            "repository":c.repository,"issue_number":c.issue_number,"issue_url":c.issue_url,
-            "project_id":c.project_id,"item_id":c.item_id
-        })).collect::<Vec<_>>()})
-        );
+        preview(&mut projects, config, options)?;
         return Ok(None);
     }
     let mut store = StateStore::open(&config.state_root, config.capacity)?;
@@ -195,6 +217,9 @@ fn cycle_with_dependencies<L: SupervisorLauncher, I: IdCreator>(
         println!("{}", json!({"mode":"execute", "blocked":true}));
         return Err("startup reconciliation blocked scheduling".into());
     }
+    // Before cleanup and scheduling, so finished tasks an earlier release held
+    // stop counting as unresolved capacity and become cleanup candidates again.
+    let mut pr_repair = restore_held_tasks(&mut store, &mut prs)?;
     let cleanup = crate::cleanup::clean_terminal_tasks(&mut store, config, &mut prs)
         .map_err(|_| "cleanup failed; inspect local task state")?;
     let disk_space = crate::disk::inspect(&config.worktree_root, config.min_free_space_bytes)?;
@@ -202,12 +227,13 @@ fn cycle_with_dependencies<L: SupervisorLauncher, I: IdCreator>(
         let report = ScheduleReport {
             startup,
             disk_space: Some(disk_space),
+            pr_repair,
             ..Default::default()
         };
         print_schedule_report(&report, &cleanup);
         return Ok(Some(report));
     }
-    let repaired = crate::coordinator::repair_verified_prs_after_cleanup(
+    let repair = crate::coordinator::repair_verified_prs_after_cleanup(
         &mut store,
         config,
         &mut projects,
@@ -216,7 +242,7 @@ fn cycle_with_dependencies<L: SupervisorLauncher, I: IdCreator>(
         ids,
         &cleanup,
     )
-    .map_err(|_| "PR repair failed; inspect local task state")?;
+    .map_err(|_| "PR repair could not record task state; inspect local task state")?;
     let selected = candidates(
         &mut projects,
         config,
@@ -243,7 +269,10 @@ fn cycle_with_dependencies<L: SupervisorLauncher, I: IdCreator>(
     );
     // Keep task and attempt identities visible without echoing prompts, shell stderr or API responses.
     let mut report = result.map_err(|_| "daemon scheduling failed; inspect local task state")?;
-    report.launched.splice(0..0, repaired);
+    pr_repair.skipped = repair.skipped;
+    pr_repair.held = repair.held;
+    report.pr_repair = pr_repair;
+    report.launched.splice(0..0, repair.launched);
     print_schedule_report(&report, &cleanup);
     verify_report(&report)?;
     Ok(Some(report))
@@ -280,6 +309,7 @@ fn print_schedule_report(report: &ScheduleReport, cleanup: &crate::cleanup::Clea
         "{}",
         json!({"mode":"execute", "cleanup":cleanup, "reconciliation":attempts,
         "source_holds":report.startup.source_holds.iter().map(|hold| json!({"task_id":hold.task_id,"kind":hold.kind})).collect::<Vec<_>>(),
+        "pr_repair":report.pr_repair,
         "launched":report.launched.iter().map(|plan| json!({"task_id":plan.task_id,"attempt_id":plan.attempt_id})).collect::<Vec<_>>(),
         "skipped_existing":report.skipped_existing.len(), "capacity_full":report.capacity_full,"disk_space":report.disk_space})
     );

@@ -13,6 +13,8 @@ use crate::{
     state::{StateStore, launches, scheduling, task_records},
     supervisor::{LaunchPlan, SupervisorError},
 };
+mod repairs;
+
 use rusqlite::types::Value;
 use serde_json::json;
 use std::{

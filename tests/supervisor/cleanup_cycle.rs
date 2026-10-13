@@ -111,6 +111,8 @@ fn assert_cleanup_report(report: &Value) {
             "task_id":"historical-selection", "reason":"cleanup configuration differs from task ownership"
         }])
     );
+    assert_eq!(report["pr_repair"]["skipped"], report["cleanup"]["skipped"]);
+    assert!(report["pr_repair"]["held"].as_array().unwrap().is_empty());
     assert!(report["cleanup"]["retained"].as_array().unwrap().is_empty());
     assert_eq!(report["launched"].as_array().unwrap().len(), 1);
 }

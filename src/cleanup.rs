@@ -1,7 +1,7 @@
 //! Opt-in cleanup of quiescent PR-complete tasks after fresh terminal PR proof.
 pub use crate::cleanup_error::CleanupError;
 mod removal;
-mod terminal_pr;
+pub(crate) mod terminal_pr;
 use crate::{
     config::{CleanupPolicy, Config},
     github::pull_request::PullRequestReader,

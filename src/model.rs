@@ -126,6 +126,43 @@ pub(crate) struct OperatorRecoveryAudit<'a> {
     pub(crate) tracked_os_identities: Vec<serde_json::Value>,
 }
 
+impl EffectiveConfigSnapshot {
+    /// Names every field that differs, for operator-facing explanations of why
+    /// a task selected under another configuration is not acted on.
+    pub fn differing_fields(&self, other: &Self) -> Vec<&'static str> {
+        let checks = [
+            ("state_root", self.state_root == other.state_root),
+            ("worktree_root", self.worktree_root == other.worktree_root),
+            ("capacity", self.capacity == other.capacity),
+            ("cleanup", self.cleanup == other.cleanup),
+            (
+                "min_free_space_bytes",
+                self.min_free_space_bytes == other.min_free_space_bytes,
+            ),
+            (
+                "assignment_login",
+                self.assignment_login == other.assignment_login,
+            ),
+            ("sources", self.sources == other.sources),
+            ("mappings", self.mappings == other.mappings),
+            (
+                "initial.executable",
+                self.initial.executable == other.initial.executable,
+            ),
+            ("initial.args", self.initial.args == other.initial.args),
+            (
+                "resume.executable",
+                self.resume.executable == other.resume.executable,
+            ),
+            ("resume.args", self.resume.args == other.resume.args),
+        ];
+        checks
+            .into_iter()
+            .filter_map(|(name, same)| (!same).then_some(name))
+            .collect()
+    }
+}
+
 impl From<&Config> for EffectiveConfigSnapshot {
     fn from(config: &Config) -> Self {
         Self {

@@ -2,12 +2,12 @@
 
 Tracker-Issue: https://github.com/vybestack/llxprt-luthor/issues/49
 
-**Latest disposition:** implementation complete; proceed to PR under the
-explicit unrelated timing-test exception. The final unchanged full gate
-completed with one bounded fixture-wait failure, whose exact focused rerun
-passed. Documentation tests and every unchanged required contract also passed
-separately. The earlier blocked attempts below are retained as historical
-evidence, not the current disposition. Hosted CI remains required before merge.
+**Latest disposition:** PR #55 repaired by merging mapped base `d634469`.
+All conflicts resolved preserving issue 49 cleanup isolation and issue 51 PR
+repair reporting/restoration. The unchanged full Rust 1.98.0 gate now **passes**
+(exit 0), including all-target tests, docs and every required contract. Earlier
+attempt failures below are retained as historical evidence. Hosted CI remains
+required before any merge.
 
 Continued after attempt `attempt-4c029d7e4bcc93837330dc4d5b7f780c` in task
 worktree `/Volumes/XS1000/lwself/task-1d5a2ed060a62e0caf60efaa02f3d06a`,
@@ -213,3 +213,51 @@ manifest/lockfile, workflow, debt ceiling, lint threshold, contract, protected
 branch setting or production safety rule was weakened. OCR review skipped per
 Andrew 2026-10-09. The PR must disclose the failed full-gate run and passing
 focused rerun, and hosted CI must decide before any merge.
+
+
+## PR #55 repair: attempt-8f6298ff803bc5192740de0033b46eb8
+
+Inspected a clean task worktree at `38964c5`, retained tests/logs, issue 49 and
+PR #55. Verified authenticated identity `acoliver` before writes. PR was OPEN
+and CONFLICTING with both hosted matrix checks in progress, no failed checks.
+Fetched mapped base `work/luthor-issue-to-pr-daemon` over the specified SSH
+remote and merged **`d634469`**, without rebase or force push.
+
+Conflicts in `src/coordinator.rs`, `src/coordinator/pr_repair.rs` and
+`src/daemon.rs` were resolved by combining both sides:
+
+- Preserve base's `RepairOutcome`, skip/hold diagnostics, exact finished-PR
+  behavior, drift checks, conservative wrongly-held task restoration, and all
+  base regressions.
+- Preserve cleanup-aware exclusion before any repair inspection. Return those
+  exclusions as skipped notes with their original non-secret cleanup reason.
+- Run restoration before cleanup; run cleanup-aware repair after cleanup;
+  report restoration, cleanup and repair outcomes together.
+- Extend the mixed daemon regression to require matching cleanup/repair skip
+  diagnostics and no holds. Add a focused regression proving a cleanup-skipped
+  task avoids an otherwise failing health read and repairs normally next cycle.
+
+No vendored code, patch, checksum or provenance pin exists in the changed
+integration; regeneration was not applicable. No thresholds, assertions,
+timeouts, contracts, workflows, manifests or safety refusals were weakened.
+
+Validation with the documented absolute confined Cargo/TMPDIR environment:
+
+- Focused cleanup: **18 passed** (includes the new integration regression),
+  `tmp/issue49/repair-cleanup.log`.
+- Focused PR repair: 22 passed and 2 unchanged bounded receipt waits initially
+  failed (`repair-pr-tests.log`); both exact focused reruns passed without
+  edits (`repair-pending-rerun.log`, `repair-config-rerun.log`).
+- Base's three daemon repair/restoration regressions: **3 passed**,
+  `repair-daemon-tests.log`.
+- Structural policy passed (`repair-policy.log`).
+- **Full unchanged `cargo +1.98.0 xtask ci`: PASS, exit 0**, in one shell call
+  with timeout 5400. Policy, formatting, xtask gate fixtures, strict Clippy,
+  workspace build, all-target serial tests, docs and all 31 exact required
+  contracts passed. Supervisor target: **136 passed, 0 failed, 1 ignored**.
+  Evidence: `tmp/issue49/repair-ci.log`, `repair-ci.exit` (0).
+- `git diff HEAD`, diff against fetched base and final status reviewed;
+  `git diff --check` passed. All conflict entries resolved.
+
+Update the existing PR only; OCR review remains skipped per Andrew 2026-10-09.
+Hosted CI must run on the repaired merge commit and pass before any merge.

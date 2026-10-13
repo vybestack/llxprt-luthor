@@ -12,14 +12,48 @@ use crate::{
     claim,
     github::{
         project::ProjectReader,
-        pull_request::{LookupResult, PrHealthReader, lookup},
+        pull_request::{LookupResult, PrHealthReader, PullRequestEvidence, lookup},
     },
     ownership::{WorktreeOwner, WorktreeOwnerInternal},
     pr_repair::MAX_PR_REPAIRS,
     state::{StateError, StateStore, journal, pr_repair, scheduling, task_records},
     supervisor,
 };
+use serde::Serialize;
 
+/// A task together with the specific reason it was skipped or held.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TaskNote {
+    pub task_id: String,
+    pub reason: String,
+}
+
+/// What one repair pass did. A skipped task is untouched and is looked at again
+/// next cycle; a held task was recorded as held with its reason.
+#[derive(Debug, Default)]
+pub struct RepairOutcome {
+    pub launched: Vec<supervisor::LaunchPlan>,
+    pub skipped: Vec<TaskNote>,
+    pub held: Vec<TaskNote>,
+}
+
+/// The cycle's account of verified-PR housekeeping, reported alongside launches.
+#[derive(Debug, Default, Serialize)]
+pub struct PrRepairReport {
+    pub restored: Vec<String>,
+    pub restore_retained: Vec<TaskNote>,
+    pub skipped: Vec<TaskNote>,
+    pub held: Vec<TaskNote>,
+}
+
+enum Inspection {
+    Idle,
+    Launched(Box<supervisor::LaunchPlan>),
+    Skipped(String),
+}
+
+/// Visits every `pr_complete` task once. One task's problem is recorded against
+/// that task and never stops the others; only a failure to record state aborts.
 pub fn repair_verified_prs<
     P: ProjectReader,
     Q: PrHealthReader,
@@ -32,7 +66,7 @@ pub fn repair_verified_prs<
     prs: &mut Q,
     launcher: &mut L,
     ids: &mut I,
-) -> Result<Vec<supervisor::LaunchPlan>, DispatchError> {
+) -> Result<RepairOutcome, DispatchError> {
     repair_verified_prs_after_cleanup(
         store,
         config,
@@ -59,29 +93,64 @@ pub fn repair_verified_prs_after_cleanup<
     launcher: &mut L,
     ids: &mut I,
     cleanup: &crate::cleanup::CleanupReport,
-) -> Result<Vec<supervisor::LaunchPlan>, DispatchError> {
-    let mut launched = Vec::new();
+) -> Result<RepairOutcome, DispatchError> {
+    let mut outcome = RepairOutcome::default();
     for task in pr_repair::candidates(store)? {
-        if cleanup.skipped.iter().any(|skip| skip.task_id == task) {
+        if let Some(skip) = cleanup.skipped.iter().find(|skip| skip.task_id == task) {
+            outcome.skipped.push(TaskNote {
+                task_id: task,
+                reason: skip.reason.clone(),
+            });
             continue;
         }
-        match inspect_config(store, config, &task, projects, prs, launcher, ids) {
-            Ok(Some(plan)) => launched.push(plan),
-            Ok(None) => {}
+        match inspect_task(store, config, &task, projects, prs, launcher, ids) {
+            Ok(Inspection::Launched(plan)) => outcome.launched.push(*plan),
+            Ok(Inspection::Idle) => {}
+            Ok(Inspection::Skipped(reason)) => outcome.skipped.push(TaskNote {
+                task_id: task,
+                reason,
+            }),
             Err(error) => {
-                task_records::hold_task(
-                    store,
-                    &task,
-                    "PR repair validation or launch failed; inspect task evidence",
-                )?;
-                return Err(error);
+                let reason = hold_reason(&error);
+                task_records::hold_task(store, &task, &reason)?;
+                outcome.held.push(TaskNote {
+                    task_id: task,
+                    reason,
+                });
             }
         }
     }
-    Ok(launched)
+    Ok(outcome)
 }
 
-fn inspect_config<P: ProjectReader, Q: PrHealthReader, L: SupervisorLauncher, I: IdCreator>(
+/// Bounded to the failing stage: upstream error text never enters task evidence.
+fn hold_reason(error: &DispatchError) -> String {
+    let cause = match error {
+        DispatchError::PullRequest(lookup) => {
+            format!("PR or check state could not be verified ({lookup})")
+        }
+        DispatchError::Claim(_) | DispatchError::ChangedClaim => {
+            "issue claim changed or could not be re-read".into()
+        }
+        DispatchError::Worktree(_) => "worktree identity or tip did not verify".into(),
+        DispatchError::Supervisor(_) => {
+            "PR, process, receipt or ownership evidence did not verify".into()
+        }
+        DispatchError::State(StateError::LaunchBlocked) => {
+            "recorded context does not allow a repair launch (ambiguous PR or unverified history)"
+                .into()
+        }
+        DispatchError::State(_) => "task state could not be validated".into(),
+        DispatchError::RetryHeld { .. } | DispatchError::ExistingPr => {
+            "repair launch was refused".into()
+        }
+    };
+    format!("PR repair held: {cause}")
+}
+
+/// The PR is looked up before anything else: a task whose PR is no longer open
+/// is finished and must not be judged against today's configuration.
+fn inspect_task<P: ProjectReader, Q: PrHealthReader, L: SupervisorLauncher, I: IdCreator>(
     store: &mut StateStore,
     config: &crate::config::Config,
     task: &str,
@@ -89,34 +158,44 @@ fn inspect_config<P: ProjectReader, Q: PrHealthReader, L: SupervisorLauncher, I:
     prs: &mut Q,
     launcher: &mut L,
     ids: &mut I,
-) -> Result<Option<supervisor::LaunchPlan>, DispatchError> {
-    let (previous, _) = pr_repair::context(store, task)?;
-    let selection = crate::state::selection_for_attempt(store, &previous)?;
-    if selection.effective_config != crate::model::EffectiveConfigSnapshot::from(config) {
-        return Err(StateError::InvalidConfig.into());
-    }
-    inspect_one(store, task, projects, prs, launcher, ids)
-}
-
-fn inspect_one<P: ProjectReader, Q: PrHealthReader, L: SupervisorLauncher, I: IdCreator>(
-    store: &mut StateStore,
-    task: &str,
-    projects: &mut P,
-    prs: &mut Q,
-    launcher: &mut L,
-    ids: &mut I,
-) -> Result<Option<supervisor::LaunchPlan>, DispatchError> {
+) -> Result<Inspection, DispatchError> {
     let saved = pr_repair::saved_pr(&store.connection, task)?;
-    let selection =
-        task_records::selection_evidence(store, task)?.ok_or(StateError::InvalidSelection)?;
     // Exhaustive absence covers a merged/closed PR and leaves cleanup to its
     // separate exact terminal-PR proof. It must never trigger a new PR.
-    let result = lookup(prs, &saved.repository, &saved.tracker_issue_url)?;
-    let pr = match result {
-        LookupResult::Absent => return Ok(None),
-        LookupResult::OpenPreexisting(pr) => *pr,
-        LookupResult::Ambiguous(_) => return Err(StateError::LaunchBlocked.into()),
+    let pr = match lookup(prs, &saved.repository, &saved.tracker_issue_url) {
+        Ok(LookupResult::Absent) => return Ok(Inspection::Idle),
+        Ok(LookupResult::OpenPreexisting(pr)) => *pr,
+        Ok(LookupResult::Ambiguous(_)) => return Err(StateError::LaunchBlocked.into()),
+        // Unknown is not a conflict; nothing changes and the next cycle asks again.
+        Err(error) => {
+            return Ok(Inspection::Skipped(format!(
+                "PR lookup unavailable ({error}); will retry next cycle"
+            )));
+        }
     };
+    let (previous, _) = pr_repair::context(store, task)?;
+    let selection = crate::state::selection_for_attempt(store, &previous)?;
+    let drift = selection
+        .effective_config
+        .differing_fields(&crate::model::EffectiveConfigSnapshot::from(config));
+    if !drift.is_empty() {
+        return Ok(Inspection::Skipped(format!(
+            "selection config differs: {}",
+            drift.join(", ")
+        )));
+    }
+    inspect_open_pr(store, task, (saved, pr), (projects, prs), (launcher, ids))
+}
+
+fn inspect_open_pr<P: ProjectReader, Q: PrHealthReader, L: SupervisorLauncher, I: IdCreator>(
+    store: &mut StateStore,
+    task: &str,
+    (saved, pr): (crate::model::VerifiedOpenPr, PullRequestEvidence),
+    (projects, prs): (&mut P, &mut Q),
+    (launcher, ids): (&mut L, &mut I),
+) -> Result<Inspection, DispatchError> {
+    let selection =
+        task_records::selection_evidence(store, task)?.ok_or(StateError::InvalidSelection)?;
     let observed = verify_open_pr(
         store,
         task,
@@ -145,18 +224,18 @@ fn inspect_one<P: ProjectReader, Q: PrHealthReader, L: SupervisorLauncher, I: Id
         &serde_json::to_string(&health).map_err(StateError::from)?,
     )?;
     if limit_reached(store, task, &health)? {
-        return Ok(None);
+        return Ok(Inspection::Idle);
     }
     let excerpts = match failed_checks::inspect(store, task, &saved, &health, prs)? {
-        FailedChecks::Waiting => return Ok(None),
+        FailedChecks::Waiting => return Ok(Inspection::Idle),
         FailedChecks::Ready(excerpts) => excerpts,
     };
     if !health.needs_repair() {
-        return Ok(None);
+        return Ok(Inspection::Idle);
     }
     match scheduling::ensure_dispatch_capacity(store) {
         Ok(()) => {}
-        Err(StateError::Capacity { .. }) => return Ok(None),
+        Err(StateError::Capacity { .. }) => return Ok(Inspection::Idle),
         Err(error) => return Err(error.into()),
     }
     launch_repair(
@@ -167,7 +246,7 @@ fn inspect_one<P: ProjectReader, Q: PrHealthReader, L: SupervisorLauncher, I: Id
         ids,
         (observed, health, excerpts),
     )
-    .map(Some)
+    .map(|plan| Inspection::Launched(Box::new(plan)))
 }
 
 fn launch_repair<P: ProjectReader, L: SupervisorLauncher, I: IdCreator>(
