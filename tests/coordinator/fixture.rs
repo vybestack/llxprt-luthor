@@ -31,9 +31,12 @@ pub(crate) struct Fixture {
     pub(crate) config: Config,
     pub(crate) store: StateStore,
     pub(crate) candidate: Candidate,
+    // Last field: release isolation only after fixture state and files are dropped.
+    _isolation: super::isolation::Guard,
 }
 impl Fixture {
     pub(crate) fn new(capacity: usize) -> Self {
+        let isolation = super::isolation::acquire();
         let dir = tempfile::tempdir().unwrap();
         let checkout = fixture_checkout(&dir);
         let config = fixture_config(&dir, checkout, capacity);
@@ -44,6 +47,7 @@ impl Fixture {
             config,
             store,
             candidate,
+            _isolation: isolation,
         }
     }
 

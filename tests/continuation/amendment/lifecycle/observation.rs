@@ -1,7 +1,6 @@
 use super::{Lane, await_receipt, database, executable_lane, launch};
 use luthor::state::{exit_observation, journal, scheduling, task_records};
 use luthor::{
-    OwnershipError, WorktreeOwner,
     state::{verify_amended_observation_plan, verify_amended_worker_plan},
     supervisor::{self, LaunchPlan, Reconciliation, RecoveryInspection},
 };
@@ -13,23 +12,7 @@ use std::{
 };
 
 pub(super) fn await_worktree_owner_release(lane: &Lane) {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        match WorktreeOwner::acquire_existing(lane.f.store.root(), "task-a") {
-            Ok(owner) => {
-                drop(owner);
-                return;
-            }
-            Err(OwnershipError::Busy) => {
-                assert!(
-                    Instant::now() < deadline,
-                    "worktree owner remained busy past deadline"
-                );
-                thread::sleep(Duration::from_millis(20));
-            }
-            Err(OwnershipError::Unavailable) => panic!("worktree owner is unavailable"),
-        }
-    }
+    crate::coordinator::waiting::owner_release(lane.f.store.root(), &lane.plan.task_id);
 }
 
 pub(super) fn exited_lane() -> (Lane, LaunchPlan) {
