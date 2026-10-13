@@ -68,6 +68,7 @@ impl Harness {
                 push_remote: "origin".into(),
                 allowed_pr_head_repository: "org/head".into(),
                 allowed_pr_author: "acoliver".into(),
+                required_checks: Default::default(),
             }],
             initial: CommandTemplate {
                 executable: gh.clone(),

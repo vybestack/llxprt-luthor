@@ -177,6 +177,23 @@ evidence) holds the task, with a specific `PR repair held: ...` reason listed
 under `pr_repair.held`. One task's problem never stops the rest of the pass,
 reconciliation or dispatch.
 
+PR check selection is per mapping: omit `required_checks` to retain GitHub's
+`isRequired`, supply an exact names array to gate an unprotected repository,
+or use `{"kind":"all"}` for all head checks except skipped runs. For example:
+
+```json
+"required_checks": ["ubuntu-latest (Rust 1.88.0)", "release build + source bundle"]
+```
+
+The selected failures use the same one-rerun-per-head behavior, immutable Actions
+job verification, repair limit and bounded log excerpts. Missing named gates
+stay pending. Status/show expose `required_checks_source` and `last_pr_health`;
+`none` warns that check-based repair is effectively off because neither GitHub
+nor the mapping supplies gates. Mapping changes remain selection-config drift,
+not authorization to alter an existing session. See
+[check-selection semantics](dev-docs/config-and-state.md#per-mapping-required-check-selection).
+PR handoff acceptance is unchanged; this does not add automatic merging.
+
 Tasks that an earlier release held with exactly the reason
 `PR repair validation or launch failed; inspect task evidence` are returned to
 `pr_complete` automatically, before cleanup and scheduling, once a fresh

@@ -1,4 +1,5 @@
 mod amendment;
+mod checks;
 mod entry;
 mod error;
 mod files;

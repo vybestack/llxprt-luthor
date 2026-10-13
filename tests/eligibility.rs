@@ -92,6 +92,7 @@ fn mapping() -> Mapping {
         push_remote: "origin".into(),
         allowed_pr_head_repository: "org/fork".into(),
         allowed_pr_author: "alice".into(),
+        required_checks: Default::default(),
     }
 }
 

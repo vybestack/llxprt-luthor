@@ -1,5 +1,5 @@
 use super::{
-    health::{FailedJob, PrHealth},
+    health::{FailedJob, PrHealth, RequiredChecksSource},
     types::{ErrorCategory, LookupError, error},
 };
 use serde_json::Value;
@@ -9,6 +9,7 @@ const QUERY: &str = "query($owner:String!,$repo:String!,$number:Int!,$cursor:Str
 pub(crate) fn observe(
     repository: &str,
     number: u64,
+    checks: &crate::config::RequiredChecks,
     mut api: impl FnMut(&[&str]) -> Result<Value, LookupError>,
 ) -> Result<PrHealth, LookupError> {
     let (owner, repo) = repository.split_once('/').ok_or_else(malformed)?;
@@ -50,12 +51,13 @@ pub(crate) fn observe(
             if cursor.is_some() {
                 return Err(malformed());
             }
+            append_failures(current, &contexts, repository, checks, &mut api)?;
             return Ok(current.clone());
         }
         collect_contexts(&mut contexts, rollup)?;
         match next_cursor(rollup)? {
             None => {
-                append_failures(current, &contexts, repository, &mut api)?;
+                append_failures(current, &contexts, repository, checks, &mut api)?;
                 return Ok(current.clone());
             }
             Some(next) if cursor.as_ref() != Some(&next) => cursor = Some(next),
@@ -109,6 +111,7 @@ fn snapshot(pr: &Value) -> Result<PrHealth, LookupError> {
         failed_jobs: Vec::new(),
         required_jobs: Vec::new(),
         required_checks_pending: false,
+        required_checks_source: RequiredChecksSource::None,
     })
 }
 
@@ -116,10 +119,13 @@ fn append_failures(
     health: &mut PrHealth,
     nodes: &[Value],
     repository: &str,
+    checks: &crate::config::RequiredChecks,
     api: &mut impl FnMut(&[&str]) -> Result<Value, LookupError>,
 ) -> Result<(), LookupError> {
+    health.required_checks_source = super::health_selection::source(checks);
+    let mut selected_names = Vec::new();
     for node in latest_contexts(nodes)? {
-        let required = node["isRequired"].as_bool().ok_or_else(malformed)?;
+        let github_required = node["isRequired"].as_bool().ok_or_else(malformed)?;
         let (name, failed) = match node["__typename"].as_str() {
             Some("CheckRun") => (node["name"].as_str(), check_failed(node)?),
             Some("StatusContext") => (node["context"].as_str(), status_failed(node)?),
@@ -128,6 +134,13 @@ fn append_failures(
         let name = name
             .filter(|name| !name.is_empty() && name.len() <= 128)
             .ok_or_else(malformed)?;
+        let required = super::health_selection::selected(checks, name, node, github_required);
+        if required {
+            selected_names.push(name);
+            if health.required_checks_source == RequiredChecksSource::None {
+                health.required_checks_source = RequiredChecksSource::Github;
+            }
+        }
         if required
             && (node["status"]
                 .as_str()
@@ -157,6 +170,7 @@ fn append_failures(
             health.failed_required_checks.push(name.into());
         }
     }
+    health.required_checks_pending |= super::health_selection::missing(checks, &selected_names);
     Ok(())
 }
 

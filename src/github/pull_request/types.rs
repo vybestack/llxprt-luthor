@@ -76,5 +76,10 @@ pub trait PrHealthReader: PullRequestReader {
         head: &str,
     ) -> Result<(), LookupError>;
     fn failed_job_logs(&mut self, repository: &str, job_id: u64) -> Result<String, LookupError>;
-    fn health(&mut self, repository: &str, number: u64) -> Result<PrHealth, LookupError>;
+    fn health(
+        &mut self,
+        repository: &str,
+        number: u64,
+        checks: &crate::config::RequiredChecks,
+    ) -> Result<PrHealth, LookupError>;
 }

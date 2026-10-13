@@ -636,3 +636,73 @@ fn cleanup_rejects_absolute_traversal_git_empty_and_overlapping_paths() {
         assert!(Config::from_json(&value.to_string()).is_err(), "{paths:?}");
     }
 }
+
+#[test]
+fn mapping_required_checks_defaults_and_round_trips_without_snapshot_drift() {
+    use luthor::config::{CheckRule, RequiredChecks};
+    let original = Config::from_json(valid()).unwrap();
+    assert_eq!(
+        original.mappings[0].required_checks,
+        RequiredChecks::default()
+    );
+    assert!(
+        !serde_json::to_string(&original)
+            .unwrap()
+            .contains("required_checks")
+    );
+    for (policy, expected) in [
+        (
+            serde_json::json!([
+                "ubuntu-latest (Rust 1.88.0)",
+                "release build + source bundle"
+            ]),
+            RequiredChecks::Names(vec![
+                "ubuntu-latest (Rust 1.88.0)".into(),
+                "release build + source bundle".into(),
+            ]),
+        ),
+        (
+            serde_json::json!({"kind":"all"}),
+            RequiredChecks::Rule(CheckRule::All {}),
+        ),
+        (
+            serde_json::json!({"kind":"github"}),
+            RequiredChecks::default(),
+        ),
+    ] {
+        let mut json: serde_json::Value = serde_json::from_str(valid()).unwrap();
+        json["mappings"][0]["required_checks"] = policy;
+        let config = Config::from_json(&json.to_string()).unwrap();
+        assert_eq!(config.mappings[0].required_checks, expected);
+        assert_eq!(
+            Config::from_json(&serde_json::to_string(&config).unwrap())
+                .unwrap()
+                .mappings,
+            config.mappings
+        );
+    }
+}
+
+#[test]
+fn mapping_required_checks_rejects_malformed_or_ambiguous_policies() {
+    for policy in [
+        serde_json::json!([]),
+        serde_json::json!([""]),
+        serde_json::json!([" "]),
+        serde_json::json!(["a", "a"]),
+        serde_json::json!(["a\nb"]),
+        serde_json::json!(["x".repeat(129)]),
+        serde_json::json!([1]),
+        serde_json::json!(null),
+        serde_json::json!({"kind":"any"}),
+        serde_json::json!({"kind":"all", "typo":true}),
+    ] {
+        let mut json: serde_json::Value = serde_json::from_str(valid()).unwrap();
+        json["mappings"][0]["required_checks"] = policy;
+        assert!(
+            Config::from_json(&json.to_string()).is_err(),
+            "accepted {}",
+            json["mappings"][0]["required_checks"]
+        );
+    }
+}

@@ -64,6 +64,7 @@ fn mapping(repository: &str) -> Mapping {
         push_remote: "origin".into(),
         allowed_pr_head_repository: repository.into(),
         allowed_pr_author: "acoliver".into(),
+        required_checks: Default::default(),
     }
 }
 

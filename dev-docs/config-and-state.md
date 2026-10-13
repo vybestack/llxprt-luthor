@@ -17,6 +17,50 @@ Synthetic example (all paths, IDs and names are illustrative; no key is present)
 }
 ```
 
+### Per-mapping required-check selection
+
+Optional `required_checks` on each mapping chooses the check gates used by
+PR health, failed-job reruns and repair. It does not change branch protection:
+
+- Omitted (or `{"kind":"github"}`): use GitHub's `isRequired`, unchanged.
+- `["ubuntu-latest (Rust 1.88.0)", "release build + source bundle"]`: use exactly
+  these check-run names or legacy status-context names, even if GitHub marks
+  none required. Names are case-sensitive, unique, non-blank ASCII strings of
+  at most 128 bytes; an empty array is invalid. A named check not yet present
+  stays pending, rather than being treated as green.
+- `{"kind":"all"}`: use every check run and status context on the PR head,
+  excluding skipped check runs. Pending checks wait; skipped checks do not
+  cause reruns or job-detail reads. Existing success/neutral classifications
+  are unchanged.
+
+The selected set replaces (rather than unions with) GitHub's required set.
+GraphQL pagination, latest check-run selection, exact PR/head and immutable
+Actions job/attempt checks are unchanged. Each failed Actions run is rerun once
+per verified head; a repeated failure supplies bounded log excerpts to repair.
+Failed non-Actions checks require a person, as before. This setting never
+bypasses GitHub's own merge requirements.
+
+`pr_health` evidence records `required_checks_source` as `github`,
+`configured_list`, `configured_all`, or `none`. **`none` means GitHub returned
+no required checks and no mapping override was configured: check-based repair
+is effectively off**, though merge conflicts can still trigger repair. Status
+and show expose the source and cached `last_pr_health` (including PR ID/head,
+selected failed checks/jobs and pending state); these commands make no fresh
+GitHub read. Before any health observation the source is null; historical
+health evidence without a source reports `unknown`, never inferred `none`.
+
+This field is included in candidate mappings and effective configuration
+snapshots. Old mappings deserialize to GitHub selection, and the default is
+omitted when serializing to preserve existing snapshot bytes. Check-policy
+changes count as mapping drift: existing open-PR tasks selected with a different
+policy are skipped, not silently repinned. Configure it before selecting tasks;
+this change provides no migration of existing task authorization.
+
+`pr_complete` still means a verified open-PR handoff, not green CI or a merge:
+draft/red/pending PR acceptance is unchanged. Automatic merging remains the
+separate, unimplemented issue #40; its future green gate should consume this
+same health selection, not introduce another check rule.
+
 ### Cleanup and available-space policy
 
 Optional top-level fields:

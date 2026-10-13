@@ -73,12 +73,11 @@ pub(crate) fn show(conn: &Connection, root: &Path, task: &str) -> Result<Value, 
         "last_observed_source":last_observed_source,
         "last_observation":last_observation,
         "last_observed_pr_unavailable_reason":if last_observed_pr.is_none(){Some("no stored PR observation")}else{None}});
-    if let Some(record) = terminal(conn, task, &phase)? {
-        output["reason"] = record["reason"].clone();
-        output["terminal"] = record;
-    } else {
-        output["terminal"] = Value::Null;
+    output["terminal"] = json!(terminal(conn, task, &phase)?);
+    if !output["terminal"].is_null() {
+        output["reason"] = output["terminal"]["reason"].clone();
     }
+    super::checks::present(conn, task, &mut output)?;
     output["worker_build"] = super::history::worker_build(conn, task)?;
     output["cleanup_failure"] = json!(super::history::cleanup_failure(conn, task)?);
     log_observation(

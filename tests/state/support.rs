@@ -30,6 +30,7 @@ pub(super) fn candidate(issue_id: &str, number: u64) -> Candidate {
             push_remote: "origin".into(),
             allowed_pr_head_repository: "bot/fork".into(),
             allowed_pr_author: "bot".into(),
+            required_checks: Default::default(),
         },
         source: Source {
             project_id: "project-1".into(),
@@ -66,6 +67,7 @@ pub(super) fn config() -> Config {
             push_remote: "origin".into(),
             allowed_pr_head_repository: "bot/fork".into(),
             allowed_pr_author: "bot".into(),
+            required_checks: Default::default(),
         }],
         initial: CommandTemplate {
             executable: "/bin/worker".into(),

@@ -317,6 +317,7 @@ fn fixture_config(root: &std::path::Path) -> Config {
             push_remote: "origin".into(),
             allowed_pr_head_repository: "bot/fork".into(),
             allowed_pr_author: "bot".into(),
+            required_checks: Default::default(),
         }],
         initial: CommandTemplate {
             executable: "/bin/worker".into(),
