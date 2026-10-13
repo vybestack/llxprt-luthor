@@ -17,6 +17,47 @@ Synthetic example (all paths, IDs and names are illustrative; no key is present)
 }
 ```
 
+### Cleanup and available-space policy
+
+Optional top-level fields:
+
+- `cleanup` defaults to `{"kind":"disabled"}`. Opt in with
+  `{"kind":"artifacts","paths":["target","tmp/build"]}` or
+  `{"kind":"worktree"}`. Artifact paths must be relative, non-empty,
+  non-overlapping and outside `.git`; runtime checks require ignored,
+  untracked paths and refuse symlinks, nested repositories, special files
+  and filesystem boundaries.
+- `min_free_space_bytes` defaults to `0`; for example `53687091200` holds
+  dispatch below 50 GiB available to the current user on `worktree_root`'s
+  filesystem. Equality permits dispatch. Measurement failures fail closed.
+
+Both fields are included in new effective configuration snapshots. Older
+JSON snapshots deserialize to the defaults without altering saved rows.
+Cleanup uses the **current** policy for existing terminal tasks, but requires
+unchanged task roots and mappings. Launch continuations retain their existing
+snapshot/config identity rules. Changing cleanup/space policy does not authorize
+an otherwise-invalid retry or resume.
+
+Execute daemon and explicit dispatch perform cleanup before space preflight;
+read-only/preview commands never remove files. Only `pr_complete` tasks with
+completed released attempts and fresh terminal proof for their exact saved PR
+are eligible. The ownership lock, process/receipt proof, worktree identity,
+PR repository/number/ID/base/head/author/tracker linkage and absence of other
+matching open PRs are rechecked. Whole-worktree removal additionally requires
+no unsaved files and the current PR head tip. Git branches, fetched base pins,
+private state, logs and locks remain. Telemetry-loss and historical boot proof
+uncertainty refuse cleanup rather than inferring quiescence.
+
+The schema is unchanged. A `cleanup` intent records policy, targets, immutable
+worktree identity, fresh merged/closed PR evidence and observation time before
+any deletion. `cleanup_removed` records each removed absolute path;
+`cleanup_complete` prevents repeat cleanup across restarts and policy changes.
+`cleanup_failed` is a bounded operator-visible failure. An unfinished intent
+requires inspection, never automatic retries. `show` displays removed paths and
+completion/failure events without exposing prompts or config. See the
+[operator cleanup guide](../README.md#terminal-task-cleanup-and-disk-space-dispatch-holds)
+for operational boundaries.
+
 ### Remote base for new task worktrees
 
 Before creating a new task worktree, Luthor fetches `refs/heads/<base_branch>`

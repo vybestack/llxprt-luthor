@@ -595,3 +595,44 @@ fn operator_message_surfaces_fixed_validation_reasons_but_not_serde_input() {
         "retry configuration invalid"
     );
 }
+
+#[test]
+fn cleanup_and_disk_policy_defaults_preserve_existing_configs() {
+    let config = Config::from_json(valid()).unwrap();
+    assert_eq!(config.cleanup, luthor::config::CleanupPolicy::Disabled);
+    assert_eq!(config.min_free_space_bytes, 0);
+    let mut value: serde_json::Value = serde_json::from_str(valid()).unwrap();
+    value["cleanup"] = serde_json::json!({"kind":"artifacts","paths":["target","tmp/build"]});
+    value["min_free_space_bytes"] = serde_json::json!(50_000_000_000u64);
+    let config = Config::from_json(&value.to_string()).unwrap();
+    assert_eq!(config.min_free_space_bytes, 50_000_000_000);
+    assert_eq!(
+        config.cleanup,
+        luthor::config::CleanupPolicy::Artifacts {
+            paths: vec!["target".into(), "tmp/build".into()]
+        }
+    );
+    value["cleanup"] = serde_json::json!({"kind":"worktree"});
+    assert!(Config::from_json(&value.to_string()).is_ok());
+}
+
+#[test]
+fn cleanup_rejects_absolute_traversal_git_empty_and_overlapping_paths() {
+    for paths in [
+        vec![],
+        vec![""],
+        vec!["/target"],
+        vec![".."],
+        vec!["tmp/../target"],
+        vec!["."],
+        vec!["./target"],
+        vec![".git"],
+        vec!["target/.git"],
+        vec!["target", "target/debug"],
+        vec!["target", "target"],
+    ] {
+        let mut value: serde_json::Value = serde_json::from_str(valid()).unwrap();
+        value["cleanup"] = serde_json::json!({"kind":"artifacts","paths":paths});
+        assert!(Config::from_json(&value.to_string()).is_err(), "{paths:?}");
+    }
+}

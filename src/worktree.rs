@@ -390,7 +390,7 @@ fn validate_task_id(task_id: &str) -> Result<(), WorktreeError> {
     Ok(())
 }
 
-fn check_root(root: &Path) -> Result<PathBuf, WorktreeError> {
+pub(crate) fn check_root(root: &Path) -> Result<PathBuf, WorktreeError> {
     let normalized = normalized_root(root)?;
     match fs::symlink_metadata(root) {
         Ok(meta) if !meta.is_dir() || meta.file_type().is_symlink() => {

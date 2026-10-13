@@ -209,3 +209,85 @@ fn remote_base_fetch_failure_holds_dispatch_without_launch_or_stale_worktree() {
         ["task-fetch"], |row| row.get(0)).unwrap();
     assert_eq!(reason, "remote base fetch failed");
 }
+
+#[test]
+fn low_disk_space_holds_dispatch_before_selection_claim_worktree_or_launch() {
+    let mut f = Fixture::new(1);
+    f.config.min_free_space_bytes = u64::MAX;
+    let candidate = f.candidate.clone();
+    let mut github = FakeGithub::new(&candidate);
+    let mut writer = FakeWriter::default();
+    let mut launcher = FakeLauncher::default();
+    assert!(matches!(
+        f.run(
+            "task-disk",
+            &candidate,
+            &mut github,
+            &mut writer,
+            &mut launcher
+        ),
+        Err(DispatchError::State(
+            luthor::state::StateError::LowDiskSpace { .. }
+        ))
+    ));
+    assert_eq!(
+        luthor::state::task_records::task_count(&f.store).unwrap(),
+        0
+    );
+    assert_eq!(
+        luthor::state::scheduling::reservation_count(&f.store).unwrap(),
+        0
+    );
+    assert_eq!(github.reads, 0);
+    assert_eq!(writer.calls, 0);
+    assert!(launcher.plans.is_empty());
+    assert!(!f.config.worktree_root.exists());
+    f.config.min_free_space_bytes = 0;
+    assert!(
+        f.run(
+            "task-disk",
+            &candidate,
+            &mut github,
+            &mut writer,
+            &mut launcher
+        )
+        .is_ok()
+    );
+    assert_eq!(launcher.plans.len(), 1);
+}
+
+#[test]
+fn scheduler_reports_low_disk_space_without_consuming_ids_or_reservations() {
+    let mut f = Fixture::new(1);
+    f.config.min_free_space_bytes = u64::MAX;
+    let mut github = FakeGithub::new(&f.candidate);
+    let mut prs = std::mem::take(&mut github.prs);
+    let mut writer = FakeWriter::default();
+    let mut launcher = FakeLauncher::default();
+    let mut ids = FixedIds::default();
+    let report = schedule_candidates(
+        &mut f.store,
+        vec![f.candidate.clone()],
+        ScheduleDependencies {
+            config: &f.config,
+            config_revision: "disk",
+            projects: &mut github,
+            prs: &mut prs,
+            assignments: &mut writer,
+            launcher: &mut launcher,
+            ids: &mut ids,
+        },
+    )
+    .unwrap();
+    let space = report.disk_space.unwrap();
+    assert!(space.dispatch_held);
+    assert_eq!(space.min_free_space_bytes, u64::MAX);
+    assert!(space.available_bytes < space.min_free_space_bytes);
+    assert!(report.launched.is_empty());
+    assert_eq!(ids.0, 0);
+    assert_eq!(writer.calls, 0);
+    assert_eq!(
+        luthor::state::task_records::task_count(&f.store).unwrap(),
+        0
+    );
+}

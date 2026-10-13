@@ -49,6 +49,8 @@ impl Harness {
             state_root: state.clone(),
             worktree_root: dir.path().to_path_buf(),
             capacity: 2,
+            cleanup: luthor::config::CleanupPolicy::disabled(),
+            min_free_space_bytes: 0,
             assignment_login: "agent".into(),
             sources: vec![Source {
                 project_id: "PROJECT".into(),

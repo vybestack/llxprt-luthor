@@ -16,11 +16,57 @@ pub struct Config {
     pub state_root: PathBuf,
     pub worktree_root: PathBuf,
     pub capacity: usize,
+    #[serde(default = "CleanupPolicy::disabled")]
+    pub cleanup: CleanupPolicy,
+    #[serde(default)]
+    pub min_free_space_bytes: u64,
     pub assignment_login: String,
     pub sources: Vec<Source>,
     pub mappings: Vec<Mapping>,
     pub initial: CommandTemplate,
     pub resume: CommandTemplate,
+}
+
+/// Destructive cleanup is opt-in; paths are relative to the verified task worktree.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CleanupPolicy {
+    Disabled,
+    Artifacts { paths: Vec<PathBuf> },
+    Worktree,
+}
+
+impl CleanupPolicy {
+    pub fn disabled() -> Self {
+        Self::Disabled
+    }
+
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        let Self::Artifacts { paths } = self else {
+            return Ok(());
+        };
+        let invalid = || {
+            ConfigError::Invalid(
+                "cleanup paths must be non-overlapping relative artifact paths outside .git".into(),
+            )
+        };
+        if paths.is_empty() {
+            return Err(invalid());
+        }
+        for (index, path) in paths.iter().enumerate() {
+            if path.as_os_str().is_empty()
+                || path.components().any(
+                    |part| !matches!(part, std::path::Component::Normal(name) if name != ".git"),
+                )
+                || paths[..index]
+                    .iter()
+                    .any(|prior| path.starts_with(prior) || prior.starts_with(path))
+            {
+                return Err(invalid());
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -158,6 +204,7 @@ impl Config {
         {
             return Err(ConfigError::Invalid("invalid assignment_login".into()));
         }
+        self.cleanup.validate()?;
         validate_sources(&self.sources, &self.mappings)?;
         validate_mappings(&self.mappings)?;
         validate_command(&self.initial)?;

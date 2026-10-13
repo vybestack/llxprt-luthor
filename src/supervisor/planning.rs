@@ -47,6 +47,11 @@ pub fn prepare_initial(
 ) -> Result<LaunchPlan, SupervisorError> {
     validate_stop_socket_path(store.root(), attempt_id)?;
     let selection = worktree_records::claimed_worktree_context(store, task_id)?;
+    crate::disk::inspect(
+        &selection.effective_config.worktree_root,
+        selection.effective_config.min_free_space_bytes,
+    )?
+    .enforce()?;
     let identity = worktree::verify_existing_worktree(store, task_id)?;
     let RenderedCommand { executable, args } =
         command::initial_command(&selection, &identity, task_id, attempt_id)?;
@@ -82,6 +87,11 @@ pub fn prepare_resume(
     }
     let selection =
         task_records::selection_evidence(store, task_id)?.ok_or(SupervisorError::Conflict)?;
+    crate::disk::inspect(
+        &selection.effective_config.worktree_root,
+        selection.effective_config.min_free_space_bytes,
+    )?
+    .enforce()?;
     let identity = worktree::verify_existing_worktree(store, task_id)?;
     verify_continuation_identity(&first, &latest, task_id, &identity)?;
     if first.config_revision != selection.config_revision
@@ -151,6 +161,11 @@ pub(crate) fn prepare_retry(
     let mut selection = crate::state::selection_for_attempt(store, previous)?;
     let previous_config = selection.effective_config.clone();
     selection.effective_config = config.into();
+    crate::disk::inspect(
+        &selection.effective_config.worktree_root,
+        selection.effective_config.min_free_space_bytes,
+    )?
+    .enforce()?;
     let identity = worktree::verify_existing_worktree(store, task_id)?;
     verify_continuation_identity(&first, latest, task_id, &identity)?;
     let RenderedCommand { executable, args } = continuation_command(

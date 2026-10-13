@@ -329,12 +329,19 @@ pub(crate) fn reserved_launch_survives_darwin_final_component_alias_reopen_and_s
  {
     use std::os::unix::fs::symlink;
     let mut f = Fixture::new(2);
-    let private_root = tempfile::tempdir_in("/private/var/tmp").unwrap();
-    let root = private_root.path().join("state");
-    let alias = private_root.path().join("state-alias");
+    let private_root = tempfile::tempdir().unwrap();
+    let relative = private_root
+        .path()
+        .strip_prefix(std::env::current_dir().unwrap())
+        .unwrap();
+    let root = relative.join("state");
+    let alias = relative.join("state-alias");
     std::fs::create_dir(&root).unwrap();
-    symlink(&root, &alias).unwrap();
-    assert_eq!(std::fs::canonicalize(&alias).unwrap(), root);
+    symlink("state", &alias).unwrap();
+    assert_eq!(
+        std::fs::canonicalize(&alias).unwrap(),
+        std::fs::canonicalize(&root).unwrap()
+    );
     let original = seed_direct_root(&mut f, &root);
     assert_alias_refuses_launch(&mut f, &alias, &original);
     assert_direct_root_holds_and_schedules_331(&mut f, &root, &original);

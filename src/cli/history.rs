@@ -87,7 +87,9 @@ pub(crate) fn events(conn: &Connection, table: &str, task: &str) -> Result<Vec<V
             row.map_err(|_| CliError::Database)?;
         // Launch and dispatch details contain executable arguments and prompts.
         let detail = match (table, kind.as_str()) {
-            ("evidence", "held_reason" | "claim_verified") => Some(json!(payload)),
+            ("evidence", "held_reason" | "claim_verified" | "cleanup_failed") => {
+                Some(json!(payload))
+            }
             (
                 "evidence",
                 "pause_pr_lookup" | "exit_pr_lookup" | "retry_pr_lookup" | "source_observation",
@@ -102,7 +104,9 @@ pub(crate) fn events(conn: &Connection, table: &str, task: &str) -> Result<Vec<V
             ("evidence", "attempt_exit") => serde_json::from_str::<ExitReceipt>(&payload)
                 .ok()
                 .map(|receipt| receipt_summary(&receipt)),
-            ("evidence", "verified_open_pr") => serde_json::from_str::<Value>(&payload).ok(),
+            ("evidence", "verified_open_pr" | "cleanup_removed" | "cleanup_complete") => {
+                serde_json::from_str::<Value>(&payload).ok()
+            }
             _ => None,
         };
         Ok(

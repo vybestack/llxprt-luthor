@@ -195,6 +195,20 @@ fn cycle_with_dependencies<L: SupervisorLauncher, I: IdCreator>(
         println!("{}", json!({"mode":"execute", "blocked":true}));
         return Err("startup reconciliation blocked scheduling".into());
     }
+    let cleanup = crate::cleanup::clean_terminal_tasks(&mut store, config, &mut prs)
+        .map_err(|_| "cleanup failed; inspect local task state")?;
+    let disk_space = crate::disk::inspect(&config.worktree_root, config.min_free_space_bytes)?;
+    println!(
+        "{}",
+        json!({"mode":"execute", "cleanup":cleanup, "disk_space":disk_space})
+    );
+    if disk_space.dispatch_held {
+        return Ok(Some(ScheduleReport {
+            startup,
+            disk_space: Some(disk_space),
+            ..Default::default()
+        }));
+    }
     let selected = candidates(
         &mut projects,
         config,
@@ -253,7 +267,7 @@ fn print_schedule_report(report: &ScheduleReport) {
         json!({"mode":"execute", "reconciliation":attempts,
         "source_holds":report.startup.source_holds.iter().map(|hold| json!({"task_id":hold.task_id,"kind":hold.kind})).collect::<Vec<_>>(),
         "launched":report.launched.iter().map(|plan| json!({"task_id":plan.task_id,"attempt_id":plan.attempt_id})).collect::<Vec<_>>(),
-        "skipped_existing":report.skipped_existing.len(), "capacity_full":report.capacity_full})
+        "skipped_existing":report.skipped_existing.len(), "capacity_full":report.capacity_full,"disk_space":report.disk_space})
     );
 }
 

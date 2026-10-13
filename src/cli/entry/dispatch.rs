@@ -75,6 +75,11 @@ pub(crate) fn dispatch(args: Vec<String>) -> Result<(), Box<dyn std::error::Erro
     let mut projects = GhProjectReader::new(PathBuf::from("gh"));
     let mut prs = GhPullRequestReader::new(PathBuf::from("gh"));
     reconcile_before_dispatch(&mut store, &mut projects, &mut prs)?;
+    crate::cleanup::clean_terminal_tasks(&mut store, &config, &mut prs)
+        .map_err(|_| "cleanup failed; inspect local task state")?;
+    let space = crate::disk::inspect(&config.worktree_root, config.min_free_space_bytes)?;
+    println!("{}", json!({"disk_space":space}));
+    space.enforce()?;
     let mut projects = GhProjectReader::new(PathBuf::from("gh"));
     let candidates = eligibility::select_target(
         &mut projects,
