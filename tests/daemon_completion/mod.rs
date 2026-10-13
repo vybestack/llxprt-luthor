@@ -10,6 +10,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+mod active_finish;
 mod fixture;
 use fixture::Fixture;
 

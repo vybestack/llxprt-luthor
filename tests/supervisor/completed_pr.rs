@@ -18,6 +18,7 @@ pub(crate) fn natural_exit_matching_pr_is_proved_and_persisted() {
         .unwrap();
     let mut prs = ExitPr {
         matching: Some((selection.candidate.issue_url, identity.branch)),
+        sha: Some(identity.head),
         ..ExitPr::default()
     };
     let mut projects = OtherProject(
@@ -94,6 +95,7 @@ pub(crate) fn missing_receipt_cannot_be_overridden_by_matching_open_pr() {
         .unwrap();
     let mut prs = ExitPr {
         matching: Some((selection.candidate.issue_url, identity.branch)),
+        sha: Some(identity.head),
         ..ExitPr::default()
     };
     let mut projects = OtherProject(
@@ -158,6 +160,7 @@ pub(crate) fn stopped_exit_matching_pr_is_proved_and_persisted() {
         .unwrap();
     let mut prs = ExitPr {
         matching: Some((selection.candidate.issue_url, identity.branch)),
+        sha: Some(identity.head),
         ..ExitPr::default()
     };
     let mut projects = OtherProject(

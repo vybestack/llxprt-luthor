@@ -41,6 +41,7 @@ pub(crate) struct ExitPr {
     pub(crate) fail: bool,
     pub(crate) matching: Option<(String, String)>,
     pub(crate) author: Option<String>,
+    pub(crate) sha: Option<String>,
 }
 #[cfg(unix)]
 impl PullRequestReader for ExitPr {
@@ -79,10 +80,10 @@ impl PullRequestReader for ExitPr {
         Ok(serde_json::json!({
             "id": 4200 + number, "number": number, "state": "open",
             "html_url": format!("https://github.com/org/code/pull/{number}"),
-            "body": format!("Tracker-Issue: {issue_url}"), "draft": true,
+            "body": format!("Tracker-Issue: {issue_url}\nFixes org/tracker#{}", issue_url.rsplit('/').next().unwrap()), "draft": true,
             "created_at": "2026-01-01T00:00:00Z",
             "base": {"repo": {"id": 10, "full_name": "org/code"}, "ref": "main"},
-            "head": {"repo": {"id": 10, "full_name": "org/code"}, "ref": branch, "sha": "abc123"},
+            "head": {"repo": {"id": 10, "full_name": "org/code"}, "ref": branch, "sha": self.sha.as_deref().unwrap_or("abc123")},
             "user": {"login": self.author.as_deref().unwrap_or("operator")}
         }))
     }

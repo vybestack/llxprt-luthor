@@ -67,7 +67,7 @@ pub(super) fn fixture() -> (tempfile::TempDir, Config, StateStore, TerminalPr) {
         detail: json!({
             "id":4242,"number":42,"state":"open","merged":false,
             "html_url":"https://github.com/org/code/pull/42",
-            "body":"Tracker-Issue: https://github.com/org/tracker/issues/7",
+            "body":"Tracker-Issue: https://github.com/org/tracker/issues/7\nFixes org/tracker#7",
             "draft":false,"created_at":"2026-01-01T00:00:00Z",
             "base":{"repo":{"id":10,"full_name":"org/code"},"ref":"main"},
             "head":{"repo":{"id":10,"full_name":"org/code"},"ref":identity.branch,"sha":sha},

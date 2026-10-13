@@ -63,7 +63,7 @@ impl PullRequestReader for FakePr {
         Ok(json!({
             "id": number, "number": number, "state": "open",
             "html_url": format!("https://github.com/org/code/pull/{number}"),
-            "body": "Tracker-Issue: https://github.com/org/tracker/issues/1",
+            "body": "Tracker-Issue: https://github.com/org/tracker/issues/1\nFixes org/tracker#1",
             "created_at": "2026-01-01T00:00:00Z",
             "base": {"repo": {"id": 10, "full_name": "org/code"}, "ref": "main"},
             "head": {"repo": {"id": 10, "full_name": "org/code"}, "ref": "branch", "sha": "abc123"},

@@ -148,3 +148,52 @@ pub(crate) fn observation_time() -> Result<u64, SupervisorError> {
         .map_err(|_| SupervisorError::IdentityUnavailable)?
         .as_secs())
 }
+
+/// Finishing workers must supply both exact tracker references and the live tip.
+/// Do not reuse this observation as terminal process or completion proof.
+pub(crate) fn verify_finishing_pr<Q: PullRequestReader>(
+    store: &StateStore,
+    task_id: &str,
+    attempt_id: &str,
+    prs: &mut Q,
+    evidence: (PullRequestEvidence, u64),
+) -> Result<VerifiedOpenPr, &'static str> {
+    let selection = crate::state::task_records::selection_evidence(store, task_id)
+        .map_err(|_| "PR selection unavailable")?
+        .ok_or("PR selection unavailable")?;
+    let candidate = &selection.candidate;
+    let closing = crate::worker_instructions::closing_reference(
+        &candidate.repository,
+        &candidate.mapping.code_repository,
+        candidate.issue_number,
+    );
+    if !evidence.0.body.lines().any(|line| line == closing) {
+        return Err("PR closing reference missing");
+    }
+    let proof = verify_open_pr(
+        store,
+        task_id,
+        attempt_id,
+        prs,
+        evidence,
+        PrVerificationStage::Exit,
+    )?;
+    verify_local_pr_tip(store, task_id, &proof)?;
+    Ok(proof)
+}
+
+/// A PR on the task branch is not its expected finish unless GitHub has the
+/// exact live local tip. The immutable dispatch snapshot may precede commits
+/// made by the worker, so inspect the owned worktree rather than its saved SHA.
+fn verify_local_pr_tip(
+    store: &StateStore,
+    task_id: &str,
+    proof: &VerifiedOpenPr,
+) -> Result<(), &'static str> {
+    let identity = crate::worktree::verify_existing_worktree(store, task_id)
+        .map_err(|_| "PR local worktree unavailable")?;
+    if identity.head != proof.head_commit_sha {
+        return Err("PR head differs from local tip");
+    }
+    Ok(())
+}

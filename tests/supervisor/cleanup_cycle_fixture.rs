@@ -68,7 +68,7 @@ fn terminal_pr(store: &StateStore, task: &str, number: u64) -> TerminalPr {
         detail: json!({
             "id":4200+number,"number":number,"state":"open","merged":false,
             "html_url":format!("https://github.com/org/code/pull/{number}"),
-            "body":format!("Tracker-Issue: https://github.com/org/tracker/issues/{number}"),
+            "body":format!("Tracker-Issue: https://github.com/org/tracker/issues/{number}\nFixes org/tracker#{number}"),
             "draft":false,"created_at":"2026-01-01T00:00:00Z",
             "base":{"repo":{"id":10,"full_name":"org/code"},"ref":"main"},
             "head":{"repo":{"id":10,"full_name":"org/code"},"ref":identity.branch,"sha":identity.head},

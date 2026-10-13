@@ -2,7 +2,7 @@ use super::{
     active::monitor_running_attempt,
     ports::{
         PrVerificationStage, completion_claim_failure_reason, observation_time,
-        verify_completion_claim, verify_open_pr,
+        verify_completion_claim, verify_finishing_pr, verify_open_pr,
     },
     retirement::{Settlement, retire_if_finished},
 };
@@ -219,47 +219,15 @@ fn finish_verified_natural_exit_with_pr<P: ProjectReader, Q: PullRequestReader>(
     exit_observation::record_exit_pr_lookup(store, task_id, attempt_id, &proof)?;
     match lookup_result {
         Ok(LookupResult::Absent) => Ok(result),
-        Ok(LookupResult::OpenPreexisting(pr)) => {
-            let verified = verify_open_pr(
-                store,
-                task_id,
-                attempt_id,
-                prs,
-                (*pr, observed_at_unix_secs),
-                PrVerificationStage::Exit,
-            );
-            match verified {
-                Ok(verified) => {
-                    if let Err(error) = verify_completion_claim(projects, &selection) {
-                        let reason = completion_claim_failure_reason(&error);
-                        journal::record_evidence(
-                            store,
-                            task_id,
-                            Some(attempt_id),
-                            "held_reason",
-                            reason,
-                        )?;
-                        return Ok(supervisor::Reconciliation::Held {
-                            reason: reason.into(),
-                        });
-                    }
-                    pr_completion::record_verified_open_pr(store, task_id, attempt_id, &verified)?;
-                    Ok(result)
-                }
-                Err(reason) => {
-                    journal::record_evidence(
-                        store,
-                        task_id,
-                        Some(attempt_id),
-                        "held_reason",
-                        reason,
-                    )?;
-                    Ok(supervisor::Reconciliation::Held {
-                        reason: reason.into(),
-                    })
-                }
-            }
-        }
+        Ok(LookupResult::OpenPreexisting(pr)) => verify_and_record_open_pr(
+            store,
+            task_id,
+            attempt_id,
+            projects,
+            prs,
+            (*pr, observed_at_unix_secs),
+            result,
+        ),
         Ok(LookupResult::Ambiguous(_)) => Ok(supervisor::Reconciliation::Held {
             reason: "exit PR ambiguous".into(),
         }),
@@ -291,14 +259,26 @@ fn verify_and_record_open_pr<P: ProjectReader, Q: PullRequestReader>(
     evidence: (crate::github::pull_request::PullRequestEvidence, u64),
     result: supervisor::Reconciliation,
 ) -> Result<supervisor::Reconciliation, SupervisorError> {
-    let verified = verify_open_pr(
-        store,
+    // Repair completion already verifies its saved PR identity and exact local
+    // tip in the state commit. Retain that fail-closed error path.
+    let verified = if crate::state::pr_repair::authorization(
+        &store.connection,
         task_id,
         attempt_id,
-        prs,
-        evidence,
-        PrVerificationStage::Exit,
-    );
+    )?
+    .is_some()
+    {
+        verify_open_pr(
+            store,
+            task_id,
+            attempt_id,
+            prs,
+            evidence,
+            PrVerificationStage::Exit,
+        )
+    } else {
+        verify_finishing_pr(store, task_id, attempt_id, prs, evidence)
+    };
     match verified {
         Ok(verified) => {
             let selection = task_records::selection_evidence(store, task_id)?

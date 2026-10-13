@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 
 pub(super) struct PrReader {
     pub(super) inner: crate::FakePr,
+    pub(super) head: String,
     pub(super) mutation: &'static str,
 }
 impl PullRequestReader for PrReader {
@@ -30,6 +31,9 @@ impl PullRequestReader for PrReader {
     fn detail(&mut self, repo: &str, number: u64) -> Result<Value, LookupError> {
         let mut detail = self.inner.detail(repo, number)?;
         detail["head"]["ref"] = json!("luthor/task-a");
+        detail["head"]["sha"] = json!(self.head);
+        detail["body"] =
+            json!("Tracker-Issue: https://github.com/org/tracker/issues/1\nFixes org/tracker#1");
         match self.mutation {
             "branch" => detail["head"]["ref"] = json!("wrong"),
             "author" => detail["user"]["login"] = json!("other"),
@@ -49,6 +53,9 @@ pub(super) fn complete_from(
     mutation: &'static str,
 ) -> (Lane, LaunchPlan, Reconciliation) {
     let mut prs = PrReader {
+        head: luthor::worktree::verify_existing_worktree(&lane.f.store, "task-a")
+            .unwrap()
+            .head,
         inner: crate::FakePr {
             present_on: Some(1),
             ..Default::default()
@@ -214,6 +221,9 @@ fn amended_pr_completion_rejects_forged_duplicate_wrong_receipt_and_unauthorized
 fn amended_completion_preserves_held_lookup_retry_path() {
     let (mut lane, plan) = exited_lane();
     let mut prs = PrReader {
+        head: luthor::worktree::verify_existing_worktree(&lane.f.store, "task-a")
+            .unwrap()
+            .head,
         inner: crate::FakePr {
             fail_on: Some(1),
             ..Default::default()

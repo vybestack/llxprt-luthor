@@ -1,6 +1,4 @@
-use super::ports::{
-    PrVerificationStage, observation_time, verify_completion_claim, verify_open_pr,
-};
+use super::ports::{observation_time, verify_completion_claim, verify_finishing_pr};
 use crate::state::{journal, task_records};
 use crate::{
     claim::ClaimError,
@@ -20,7 +18,7 @@ enum ActiveClaim {
 
 enum ActivePr {
     Absent,
-    Matching,
+    Matching(Box<crate::model::VerifiedOpenPr>),
     Held(&'static str),
 }
 
@@ -53,15 +51,19 @@ pub(crate) fn monitor_running_attempt<P: ProjectReader, Q: PullRequestReader>(
     let pr = pr.expect("owned or lost claim has a PR observation");
     let reason = match (claim, pr) {
         (_, ActivePr::Held(reason)) => return record_hold(store, task_id, attempt_id, reason),
-        (ActiveClaim::Lost, ActivePr::Matching) => "active claim lost and matching PR observed",
+        (ActiveClaim::Lost, ActivePr::Matching(_)) => "active claim lost and matching PR observed",
         (ActiveClaim::Lost, ActivePr::Absent) => "active claim lost",
-        (ActiveClaim::Owned, ActivePr::Matching) => {
-            if crate::state::pr_repair::authorization(&store.connection, task_id, attempt_id)?
-                .is_some()
-            {
-                return Ok(supervisor::Reconciliation::Running);
-            }
-            "matching PR observed while worker active"
+        (ActiveClaim::Owned, ActivePr::Matching(proof)) => {
+            // This is the worker's expected finish, not a competing PR. Keep
+            // its reservation and let normal receipt reconciliation complete it.
+            journal::record_evidence(
+                store,
+                task_id,
+                Some(attempt_id),
+                "active_open_pr",
+                &serde_json::to_string(&proof)?,
+            )?;
+            return Ok(supervisor::Reconciliation::Running);
         }
         (ActiveClaim::Owned, ActivePr::Absent) => return Ok(supervisor::Reconciliation::Running),
     };
@@ -119,14 +121,7 @@ fn observe_pr<Q: PullRequestReader>(
         }
         Ok(LookupResult::OpenPreexisting(pr)) => {
             let observed = observation_time()?;
-            let verified = verify_open_pr(
-                store,
-                task_id,
-                attempt_id,
-                prs,
-                (*pr, observed),
-                PrVerificationStage::Exit,
-            );
+            let verified = verify_finishing_pr(store, task_id, attempt_id, prs, (*pr, observed));
             Ok(match verified {
                 Ok(verified) => {
                     if let Some(audit) = crate::state::pr_repair::authorization(
@@ -137,7 +132,7 @@ fn observe_pr<Q: PullRequestReader>(
                     {
                         ActivePr::Held("active repair PR identity changed")
                     } else {
-                        ActivePr::Matching
+                        ActivePr::Matching(Box::new(verified))
                     }
                 }
                 Err(_) => ActivePr::Held("active PR verification failed"),

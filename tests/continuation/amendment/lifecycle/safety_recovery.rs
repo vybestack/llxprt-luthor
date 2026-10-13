@@ -49,6 +49,9 @@ fn safety_amended_operator_missing_receipt_refuses_absent_and_matching_pr_withou
         let (mut lane, plan) = missing_receipt();
         let before = history(&lane);
         let mut prs = PrReader {
+            head: luthor::worktree::verify_existing_worktree(&lane.f.store, "task-a")
+                .unwrap()
+                .head,
             inner: crate::FakePr {
                 present_on: matching.then_some(1),
                 ..Default::default()

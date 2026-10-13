@@ -4,6 +4,9 @@ use rusqlite::params;
 
 /// Nonterminal attempts must each be inspected on startup, including attempts
 /// without a launch intent (an inconsistent durable state is not safe to skip).
+/// Also revisit the latest held attempt with an open pause-PR observation:
+/// older releases stopped finishing workers and left this proof unresolved.
+/// Only normal receipt, claim and fresh exact PR verification may complete it.
 pub fn pending_attempts(store: &StateStore) -> Result<Vec<(String, String)>, StateError> {
     let mut statement = store.connection.prepare(&format!(
         "SELECT a.task_id,a.id FROM attempts a WHERE NOT (
@@ -27,7 +30,13 @@ pub fn pending_attempts(store: &StateStore) -> Result<Vec<(String, String)>, Sta
              (SELECT 1 FROM reservations r WHERE r.attempt_id=a.id AND r.status='reserved') OR
              (EXISTS (SELECT 1 FROM evidence e WHERE e.task_id=a.task_id AND e.attempt_id=a.id AND e.kind='attempt_exit')
               AND NOT EXISTS (SELECT 1 FROM evidence e WHERE e.task_id=a.task_id AND e.attempt_id=a.id AND e.kind=CASE WHEN EXISTS
-                 (SELECT 1 FROM intents i WHERE i.task_id=a.task_id AND i.attempt_id=a.id AND i.kind='stop') THEN 'pause_pr_lookup' ELSE 'exit_pr_lookup' END)))
+                 (SELECT 1 FROM intents i WHERE i.task_id=a.task_id AND i.attempt_id=a.id AND i.kind='stop') THEN 'pause_pr_lookup' ELSE 'exit_pr_lookup' END))
+             OR (a.id=(SELECT id FROM attempts WHERE task_id=a.task_id ORDER BY rowid DESC LIMIT 1)
+               AND EXISTS (SELECT 1 FROM tasks t WHERE t.id=a.task_id AND t.state='held')
+               AND EXISTS (SELECT 1 FROM evidence e WHERE e.task_id=a.task_id AND e.attempt_id=a.id
+                 AND e.kind='pause_pr_lookup' AND e.sequence=(SELECT MAX(sequence) FROM evidence
+                   WHERE task_id=a.task_id AND attempt_id=a.id AND kind='pause_pr_lookup')
+                 AND CASE WHEN json_valid(e.payload) THEN json_extract(e.payload,'$.status.status')='open' ELSE 0 END)))
              AND NOT EXISTS (SELECT 1 FROM tasks rt WHERE rt.id=a.task_id AND rt.state IN ({RETIRED_PHASES_SQL}))
              ORDER BY a.rowid",
     ))?;

@@ -72,6 +72,7 @@ fn matching_readers(store: &StateStore) -> (OtherProject, ExitPr) {
         .unwrap();
     let prs = ExitPr {
         matching: Some((selection.candidate.issue_url.clone(), identity.branch)),
+        sha: Some(identity.head),
         ..ExitPr::default()
     };
     (OtherProject(selection.candidate, 0), prs)
