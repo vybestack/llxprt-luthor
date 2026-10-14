@@ -5,6 +5,7 @@ mod error;
 mod files;
 mod history;
 mod logs;
+mod merge;
 mod observation;
 mod observation_labels;
 mod output;

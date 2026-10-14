@@ -766,3 +766,99 @@ fn retry_policy_rejects_unbounded_ambiguous_and_unknown_configuration() {
         );
     }
 }
+
+#[test]
+fn merge_policy_is_opt_in_mapping_local_and_defaults_to_all_checks_no_drafts() {
+    use luthor::config::{CheckRule, MergeMethod, MergePolicy, RequiredChecks};
+    let mut value: serde_json::Value = serde_json::from_str(valid()).unwrap();
+    let old = Config::from_json(&value.to_string()).unwrap();
+    assert_eq!(old.mappings[0].merge, MergePolicy::Disabled {});
+    assert!(
+        serde_json::to_value(&old).unwrap()["mappings"][0]
+            .get("merge")
+            .is_none()
+    );
+    for method in [MergeMethod::Merge, MergeMethod::Squash, MergeMethod::Rebase] {
+        value["mappings"][0]["merge"] =
+            serde_json::json!({"kind":"enabled","method":method.as_str()});
+        let config = Config::from_json(&value.to_string()).unwrap();
+        assert_eq!(
+            config.mappings[0].merge,
+            MergePolicy::Enabled {
+                method,
+                required_checks: RequiredChecks::Rule(CheckRule::All {}),
+                allow_draft: false
+            }
+        );
+        assert_eq!(
+            Config::from_json(&serde_json::to_string(&config).unwrap())
+                .unwrap()
+                .mappings,
+            config.mappings
+        );
+    }
+    for checks in [
+        serde_json::json!(["CI"]),
+        serde_json::json!({"kind":"github"}),
+        serde_json::json!({"kind":"all"}),
+    ] {
+        value["mappings"][0]["merge"] = serde_json::json!({"kind":"enabled","method":"squash","required_checks":checks,"allow_draft":true});
+        Config::from_json(&value.to_string()).unwrap();
+    }
+}
+
+#[test]
+fn malformed_merge_authorization_is_rejected_not_silently_disabled() {
+    let mut value: serde_json::Value = serde_json::from_str(valid()).unwrap();
+    for policy in [
+        serde_json::json!({"kind":"enabled"}),
+        serde_json::json!({"kind":"enabled","method":"auto"}),
+        serde_json::json!({"kind":"enabled","method":"squash","required_checks":[]}),
+        serde_json::json!({"kind":"enabled","method":"squash","required_checks":["CI","CI"]}),
+        serde_json::json!({"kind":"enabled","method":"squash","allow_draft":"yes"}),
+        serde_json::json!({"kind":"enabled","method":"squash","bypass":true}),
+        serde_json::json!({"kind":"disabled","method":"squash"}),
+        serde_json::json!(true),
+    ] {
+        value["mappings"][0]["merge"] = policy;
+        assert!(
+            Config::from_json(&value.to_string()).is_err(),
+            "{}",
+            value["mappings"][0]["merge"]
+        );
+    }
+}
+
+#[test]
+fn live_merge_policy_does_not_change_worker_ownership_but_all_other_mapping_fields_do() {
+    use luthor::config::{MergeMethod, MergePolicy};
+    let mut config = Config::from_json(valid()).unwrap();
+    let old = config.mappings[0].clone();
+    config.mappings[0].merge = MergePolicy::Enabled {
+        method: MergeMethod::Squash,
+        required_checks: Default::default(),
+        allow_draft: false,
+    };
+    assert!(config.mappings[0].same_worker_mapping(&old));
+    let mut value = serde_json::to_value(&config).unwrap();
+    for (field, change) in [
+        ("base_branch", serde_json::json!("other")),
+        ("code_repository", serde_json::json!("other/code")),
+        ("tracker_repository", serde_json::json!("other/tracker")),
+        ("checkout", serde_json::json!("/other")),
+        ("push_remote", serde_json::json!("other")),
+        ("allowed_pr_author", serde_json::json!("other")),
+        (
+            "allowed_pr_head_repository",
+            serde_json::json!("other/fork"),
+        ),
+        ("required_checks", serde_json::json!(["Other CI"])),
+    ] {
+        let saved = value["mappings"][0].clone();
+        value["mappings"][0][field] = change;
+        let mapping: luthor::config::Mapping =
+            serde_json::from_value(value["mappings"][0].clone()).unwrap();
+        assert!(!mapping.same_worker_mapping(&old), "{field}");
+        value["mappings"][0] = saved;
+    }
+}

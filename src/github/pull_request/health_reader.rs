@@ -12,6 +12,16 @@ pub(crate) fn observe(
     checks: &crate::config::RequiredChecks,
     mut api: impl FnMut(&[&str]) -> Result<Value, LookupError>,
 ) -> Result<PrHealth, LookupError> {
+    observe_checks(repository, number, checks, false, &mut api).map(|observed| observed.health)
+}
+
+pub(crate) fn observe_checks(
+    repository: &str,
+    number: u64,
+    checks: &crate::config::RequiredChecks,
+    strict: bool,
+    mut api: impl FnMut(&[&str]) -> Result<Value, LookupError>,
+) -> Result<super::MergeChecks, LookupError> {
     let (owner, repo) = repository.split_once('/').ok_or_else(malformed)?;
     let mut cursor = None;
     let mut health = None;
@@ -51,14 +61,22 @@ pub(crate) fn observe(
             if cursor.is_some() {
                 return Err(malformed());
             }
-            append_failures(current, &contexts, repository, checks, &mut api)?;
-            return Ok(current.clone());
+            let summary =
+                append_failures(current, &contexts, repository, checks, strict, &mut api)?;
+            return Ok(super::MergeChecks {
+                health: current.clone(),
+                summary,
+            });
         }
         collect_contexts(&mut contexts, rollup)?;
         match next_cursor(rollup)? {
             None => {
-                append_failures(current, &contexts, repository, checks, &mut api)?;
-                return Ok(current.clone());
+                let summary =
+                    append_failures(current, &contexts, repository, checks, strict, &mut api)?;
+                return Ok(super::MergeChecks {
+                    health: current.clone(),
+                    summary,
+                });
             }
             Some(next) if cursor.as_ref() != Some(&next) => cursor = Some(next),
             _ => return Err(malformed()),
@@ -120,8 +138,10 @@ fn append_failures(
     nodes: &[Value],
     repository: &str,
     checks: &crate::config::RequiredChecks,
+    strict: bool,
     api: &mut impl FnMut(&[&str]) -> Result<Value, LookupError>,
-) -> Result<(), LookupError> {
+) -> Result<Vec<super::CheckSummary>, LookupError> {
+    let mut summary = Vec::new();
     health.required_checks_source = super::health_selection::source(checks);
     let mut selected_names = Vec::new();
     for node in latest_contexts(nodes)? {
@@ -134,28 +154,23 @@ fn append_failures(
         let name = name
             .filter(|name| !name.is_empty() && name.len() <= 128)
             .ok_or_else(malformed)?;
-        let required = super::health_selection::selected(checks, name, node, github_required);
+        let required = selected(checks, name, node, github_required, strict);
+        let failed = failed || neutral_failure(node, strict);
+        summary.push(super::CheckSummary {
+            name: name.into(),
+            required,
+            state: check_state(node)?.into(),
+        });
         if required {
             selected_names.push(name);
             if health.required_checks_source == RequiredChecksSource::None {
                 health.required_checks_source = RequiredChecksSource::Github;
             }
         }
-        if required
-            && (node["status"]
-                .as_str()
-                .is_some_and(|status| status != "COMPLETED")
-                || matches!(node["state"].as_str(), Some("PENDING" | "EXPECTED")))
-        {
+        if required && pending(node) {
             health.required_checks_pending = true;
         }
-        if required
-            && node["__typename"] == "CheckRun"
-            && node["status"] == "COMPLETED"
-            && !node
-                .pointer("/checkSuite/workflowRun")
-                .is_none_or(Value::is_null)
-        {
+        if completed_actions_job(node, required) {
             let job = parse_job(node, name)?;
             if !current_job(&job, &health.head, repository, api)? {
                 health.required_checks_pending = true;
@@ -171,7 +186,7 @@ fn append_failures(
         }
     }
     health.required_checks_pending |= super::health_selection::missing(checks, &selected_names);
-    Ok(())
+    Ok(summary)
 }
 
 fn check_failed(node: &Value) -> Result<bool, LookupError> {
@@ -316,4 +331,50 @@ fn current_job(
         return Err(malformed());
     }
     Ok(attempt == job.run_attempt)
+}
+
+fn check_state(node: &Value) -> Result<&str, LookupError> {
+    match node["__typename"].as_str() {
+        Some("CheckRun") if node["status"] == "COMPLETED" => {
+            node["conclusion"].as_str().ok_or_else(malformed)
+        }
+        Some("CheckRun") => Ok("PENDING"),
+        Some("StatusContext") => node["state"].as_str().ok_or_else(malformed),
+        _ => Err(malformed()),
+    }
+}
+
+fn selected(
+    checks: &crate::config::RequiredChecks,
+    name: &str,
+    node: &Value,
+    github_required: bool,
+    strict: bool,
+) -> bool {
+    super::health_selection::selected(checks, name, node, github_required)
+        || (strict
+            && matches!(
+                checks,
+                crate::config::RequiredChecks::Rule(crate::config::CheckRule::All {})
+            ))
+}
+
+fn neutral_failure(node: &Value, strict: bool) -> bool {
+    strict && node["conclusion"] == "NEUTRAL"
+}
+
+fn pending(node: &Value) -> bool {
+    node["status"]
+        .as_str()
+        .is_some_and(|status| status != "COMPLETED")
+        || matches!(node["state"].as_str(), Some("PENDING" | "EXPECTED"))
+}
+
+fn completed_actions_job(node: &Value, required: bool) -> bool {
+    required
+        && node["__typename"] == "CheckRun"
+        && node["status"] == "COMPLETED"
+        && !node
+            .pointer("/checkSuite/workflowRun")
+            .is_none_or(Value::is_null)
 }

@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 use std::{collections::HashSet, path::PathBuf};
 
+mod merge_policy;
+pub use merge_policy::{MergeMethod, MergePolicy};
+
 mod retry_policy;
 pub use retry_policy::{RetryPolicy, TransientFailure};
 
@@ -99,6 +102,11 @@ pub struct Mapping {
     pub allowed_pr_author: String,
     #[serde(default, skip_serializing_if = "RequiredChecks::is_default")]
     pub required_checks: RequiredChecks,
+    #[serde(
+        default = "MergePolicy::disabled",
+        skip_serializing_if = "MergePolicy::is_disabled"
+    )]
+    pub merge: MergePolicy,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -287,6 +295,7 @@ fn validate_mapping_fields(mapping: &Mapping) -> Result<(), ConfigError> {
         .required_checks
         .validate()
         .map_err(|reason| ConfigError::Invalid(reason.into()))?;
+    mapping.merge.validate()?;
     validate_push_remote(&mapping.push_remote)?;
     validate_repository(&mapping.allowed_pr_head_repository)?;
     if mapping.allowed_pr_author.trim().is_empty()
@@ -478,4 +487,22 @@ fn validate_argument_template(arg: &str) -> Result<(), ConfigError> {
         return Err(ConfigError::Invalid("unmatched template delimiter".into()));
     }
     Ok(())
+}
+
+impl Mapping {
+    /// Merge authorization is live policy, not a change to saved worker/worktree
+    /// ownership. Every pre-existing mapping field must still match exactly.
+    pub fn same_worker_mapping(&self, other: &Self) -> bool {
+        let mut comparable = self.clone();
+        comparable.merge = other.merge.clone();
+        comparable == *other
+    }
+}
+
+pub(crate) fn same_worker_mappings(left: &[Mapping], right: &[Mapping]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .all(|(left, right)| left.same_worker_mapping(right))
 }
