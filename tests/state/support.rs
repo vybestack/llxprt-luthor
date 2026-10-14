@@ -31,6 +31,7 @@ pub(super) fn candidate(issue_id: &str, number: u64) -> Candidate {
             allowed_pr_head_repository: "bot/fork".into(),
             allowed_pr_author: "bot".into(),
             required_checks: Default::default(),
+            merge: luthor::config::MergePolicy::disabled(),
         },
         source: Source {
             project_id: "project-1".into(),
@@ -69,6 +70,7 @@ pub(super) fn config() -> Config {
             allowed_pr_head_repository: "bot/fork".into(),
             allowed_pr_author: "bot".into(),
             required_checks: Default::default(),
+            merge: luthor::config::MergePolicy::disabled(),
         }],
         initial: CommandTemplate {
             executable: "/bin/worker".into(),

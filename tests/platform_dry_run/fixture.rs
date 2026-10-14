@@ -60,6 +60,7 @@ fn mapping(dir: &Path) -> Mapping {
         allowed_pr_head_repository: "org/code".into(),
         allowed_pr_author: "operator".into(),
         required_checks: Default::default(),
+        merge: luthor::config::MergePolicy::disabled(),
     }
 }
 fn source() -> Source {

@@ -105,7 +105,7 @@ This lock coordinates cooperative Luthor workers that follow the protocol. It do
 
 Capacity counts reserved attempts, including uncertain attempts. A slot is not released merely because a process appears absent or a worker exited. Luthor retains reservations when process, receipt, claim, or PR evidence is uncertain. Pause can free a slot only after process-group termination is verified; the task's claim, worktree, logs, and session identity remain. A paused task requires explicit resume. Each resume keeps the task's worker session and worktree and creates a new attempt.
 
-A worker process exit does not complete a task. Completion requires a verified matching open PR in the mapped code repository, with the exact tracker issue linkage, expected base and allowed head repository, and authorized identity. Draft status and pending or failing checks are reported, but do not by themselves negate a verified matching open PR. An absent, ambiguous, or unreadable PR result does not establish completion. Luthor does not automatically retry work, review or repair a PR, merge, or unassign an issue.
+A worker process exit does not complete a task. Completion requires a verified matching open PR in the mapped code repository, with the exact tracker issue linkage, expected base and allowed head repository, and authorized identity. Draft status and pending or failing checks are reported, but do not by themselves negate a verified matching open PR. An absent, ambiguous, or unreadable PR result does not establish completion. Luthor does not automatically retry work, review or repair a PR, merge without an explicit mapping policy, or unassign an issue.
 
 ## Terminal-task cleanup and disk-space dispatch holds
 
@@ -217,7 +217,8 @@ stay pending. Status/show expose `required_checks_source` and `last_pr_health`;
 nor the mapping supplies gates. Mapping changes remain selection-config drift,
 not authorization to alter an existing session. See
 [check-selection semantics](dev-docs/config-and-state.md#per-mapping-required-check-selection).
-PR handoff acceptance is unchanged; this does not add automatic merging.
+PR handoff acceptance is unchanged; check-based repair does not itself authorize merging.
+Merging requires the separate opt-in policy described below.
 
 Tasks that an earlier release held with exactly the reason
 `PR repair validation or launch failed; inspect task evidence` are returned to
@@ -505,7 +506,25 @@ GitHub closing keywords in PR bodies only automatically close issues when the
 PR targets the code repository's **default branch**. The maintained Luthor base
 is `work/luthor-issue-to-pr-daemon`, while this repository's default is
 `bootstrap/luthor-base`. These references improve linking but cannot by
-themselves guarantee closure after merge to the maintained base. The operator
-must continue verifying merged delivery and closing remaining issues until
-branch policy is deliberately aligned; this does not change the configured
+themselves guarantee closure after merge to the maintained base. With the
+mapping's merge policy enabled, Luthor confirms its exact-head merge, then
+closes a still-open tracker issue with a comment naming the PR and merged head,
+and journals the closure. With merging disabled, operators must still verify
+merged delivery and close remaining issues. Neither path changes the configured
 base, repository default, branch protection or safety checks.
+
+### Optional merging of verified PRs
+
+Merging remains **off by default**. A mapping can explicitly opt in with
+`"merge": {"kind":"enabled","method":"squash"}`; merge checks default to all
+visible checks, and drafts are excluded. The execute daemon merges only the
+saved verified PR head when fresh checks pass or skip and GitHub reports it
+MERGEABLE and CLEAN. For an owned green BEHIND PR, it first requests a
+head-pinned **merge** of the base, never a rebase or force push, and waits for
+existing lineage verification and checks on the new head. Conflicts go through
+the existing repair path. It journals updates, merges and tracker closure;
+uncertain writes stop the cycle rather than being retried. See
+[merge policy and recovery](dev-docs/config-and-state.md#opt-in-verified-head-merging-issue-40)
+for named/GitHub-required check rules, draft promotion, evidence and recovery.
+This does not enable merging in any operator config or bypass hosted CI or
+branch protection.

@@ -139,7 +139,10 @@ fn verify_configuration(
         || selection.effective_config.state_root != config.state_root
         || selection.effective_config.assignment_login != config.assignment_login
         || selection.effective_config.sources != config.sources
-        || selection.effective_config.mappings != config.mappings
+        || !crate::config::same_worker_mappings(
+            &selection.effective_config.mappings,
+            &config.mappings,
+        )
         || selection.effective_config.initial != config.initial
         || selection.effective_config.resume != config.resume
     {

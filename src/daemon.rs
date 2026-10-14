@@ -183,6 +183,7 @@ fn cycle_with_dependencies<L: SupervisorLauncher, I: IdCreator>(
         println!("{}", json!({"mode":"execute", "blocked":true}));
         return Err("startup reconciliation blocked scheduling".into());
     }
+    let pr_merge = crate::coordinator::merge_verified_prs(&mut store, config, &mut prs)?;
     let cleanup = crate::cleanup::clean_terminal_tasks(&mut store, config, &mut prs)
         .map_err(|_| "cleanup failed; inspect local task state")?;
     let disk_space = crate::disk::inspect(&config.worktree_root, config.min_free_space_bytes)?;
@@ -190,6 +191,7 @@ fn cycle_with_dependencies<L: SupervisorLauncher, I: IdCreator>(
         let report = ScheduleReport {
             startup,
             disk_space: Some(disk_space),
+            pr_merge,
             pr_repair,
             ..Default::default()
         };
@@ -212,9 +214,7 @@ fn cycle_with_dependencies<L: SupervisorLauncher, I: IdCreator>(
         options.targets.as_ref(),
         Some(&store),
     )?;
-    for candidate in &selection.candidates {
-        verify_authenticated_account(&gh, candidate)?;
-    }
+    verify_candidate_accounts(&gh, &selection.candidates)?;
     let mut assignments = GhAssignmentWriter { executable: gh };
     let result = schedule_candidates_after_startup(
         &mut store,
@@ -238,6 +238,7 @@ fn cycle_with_dependencies<L: SupervisorLauncher, I: IdCreator>(
     report.candidate_read_failures = selection.candidate_read_failures;
     report.source_read_failures = selection.source_read_failures;
     report.pr_repair = pr_repair;
+    report.pr_merge = pr_merge;
     report.launched.splice(0..0, repair.launched);
     print_schedule_report(&report, &cleanup);
     verify_report(&report)?;
@@ -275,7 +276,7 @@ fn print_schedule_report(report: &ScheduleReport, cleanup: &crate::cleanup::Clea
         "{}",
         json!({"mode":"execute", "cleanup":cleanup, "reconciliation":attempts,
         "source_holds":report.startup.source_holds.iter().map(|hold| json!({"task_id":hold.task_id,"kind":hold.kind})).collect::<Vec<_>>(),
-        "pr_repair":report.pr_repair, "automatic_retries":report.automatic_retries,
+        "pr_repair":report.pr_repair, "pr_merge":report.pr_merge, "automatic_retries":report.automatic_retries,
         "candidate_read_failures":report.candidate_read_failures,
         "source_read_failures":report.source_read_failures,
         "launched":report.launched.iter().map(|plan| json!({"task_id":plan.task_id,"attempt_id":plan.attempt_id})).collect::<Vec<_>>(),
@@ -302,4 +303,14 @@ pub fn run(args: &[String]) -> Result<(), Error> {
         }
         thread::sleep(POLL_INTERVAL);
     }
+}
+
+fn verify_candidate_accounts(
+    gh: &std::path::Path,
+    candidates: &[crate::eligibility::Candidate],
+) -> Result<(), Error> {
+    for candidate in candidates {
+        verify_authenticated_account(gh, candidate)?;
+    }
+    Ok(())
 }

@@ -102,6 +102,7 @@ fn mappings() -> Vec<Mapping> {
         allowed_pr_head_repository: "org/repo".into(),
         allowed_pr_author: "acoliver".into(),
         required_checks: Default::default(),
+        merge: luthor::config::MergePolicy::disabled(),
     }]
 }
 

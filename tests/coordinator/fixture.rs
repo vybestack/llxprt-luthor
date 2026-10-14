@@ -227,6 +227,7 @@ fn fixture_config(
         allowed_pr_head_repository: "org/code".into(),
         allowed_pr_author: "bot".into(),
         required_checks: Default::default(),
+        merge: luthor::config::MergePolicy::disabled(),
     };
     let worker = dir.path().join("worker");
     fs::write(&worker, "#!/bin/sh\nexit 0\n").unwrap();
