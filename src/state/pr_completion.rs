@@ -13,6 +13,32 @@ pub fn record_verified_open_pr(
     attempt_id: &str,
     proof: &VerifiedOpenPr,
 ) -> Result<(), StateError> {
+    record_completion(store, task_id, attempt_id, proof, None)
+}
+
+pub(crate) fn record_restored_open_pr(
+    store: &mut StateStore,
+    task: &str,
+    attempt: &str,
+    proof: &VerifiedOpenPr,
+    restoration: &serde_json::Value,
+) -> Result<(), StateError> {
+    super::pr_restore::require_open_context(store, task)?;
+    let identity = crate::worktree::verify_existing_worktree(store, task)
+        .map_err(|_| StateError::LaunchBlocked)?;
+    if identity.head != proof.head_commit_sha {
+        return Err(StateError::LaunchBlocked);
+    }
+    record_completion(store, task, attempt, proof, Some(restoration))
+}
+
+fn record_completion(
+    store: &mut StateStore,
+    task_id: &str,
+    attempt_id: &str,
+    proof: &VerifiedOpenPr,
+    restoration: Option<&serde_json::Value>,
+) -> Result<(), StateError> {
     if !(stopped_exit_for_pause(store, task_id, attempt_id)?
         || natural_exit_for_attention(store, task_id, attempt_id)?)
         || proof.id == 0
@@ -42,6 +68,9 @@ pub fn record_verified_open_pr(
     )?;
     if tx.changes() != 1 {
         return Err(StateError::LaunchBlocked);
+    }
+    if let Some(restoration) = restoration {
+        tx.execute("INSERT INTO evidence(task_id,attempt_id,kind,payload) VALUES(?1,?2,'pr_hold_restored',?3)", params![task_id, attempt_id, restoration.to_string()])?;
     }
     amended_completion::record(&tx, task_id, attempt_id)?;
     amended_dispatch::verify_committed_amendment(&tx, task_id, attempt_id)?;

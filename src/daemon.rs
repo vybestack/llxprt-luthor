@@ -143,8 +143,12 @@ fn settle_finished_tasks(
     prs: &mut GhPullRequestReader,
     startup: &mut StartupReport,
 ) -> Result<PrRepairReport, Error> {
-    let restored = crate::coordinator::restore_wrongly_held_prs(store, prs)
+    let mut restored = crate::coordinator::restore_open_held_prs(store, projects, prs)
+        .map_err(|_| "open PR hold restoration failed; inspect local task state")?;
+    let terminal = crate::coordinator::restore_wrongly_held_prs(store, prs)
         .map_err(|_| "PR hold restoration failed; inspect local task state")?;
+    restored.restored.extend(terminal.restored);
+    restored.retained.extend(terminal.retained);
     let retirement = crate::coordinator::retire_finished_tasks(store, projects, prs)
         .map_err(|_| "task retirement failed; inspect local task state")?;
     startup

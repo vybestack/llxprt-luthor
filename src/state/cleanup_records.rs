@@ -27,15 +27,7 @@ pub(crate) fn verified_pr(store: &StateStore, task: &str) -> Result<VerifiedOpen
     if !valid {
         return Err(StateError::LaunchBlocked);
     }
-    let payload = proofs::unique_payload(
-        &store.connection,
-        true,
-        task,
-        Some(&attempt),
-        "verified_open_pr",
-    )?
-    .ok_or(StateError::LaunchBlocked)?;
-    let proof: VerifiedOpenPr = serde_json::from_str(&payload)?;
+    let proof = proofs::current_pr(&store.connection, task, &attempt)?;
     if proof.attempt_id != attempt || proof.id == 0 || proof.number == 0 {
         return Err(StateError::LaunchBlocked);
     }

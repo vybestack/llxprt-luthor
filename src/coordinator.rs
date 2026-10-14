@@ -3,12 +3,13 @@ mod active;
 mod failed_checks;
 mod notes;
 pub use notes::TaskNote;
+mod pr_head;
 mod pr_repair;
 pub use pr_repair::{
     PrRepairReport, RepairOutcome, repair_verified_prs, repair_verified_prs_after_cleanup,
 };
 mod pr_restore;
-pub use pr_restore::{RestoreReport, restore_wrongly_held_prs};
+pub use pr_restore::{RestoreReport, restore_open_held_prs, restore_wrongly_held_prs};
 mod reconciliation;
 mod recovery;
 mod retirement;

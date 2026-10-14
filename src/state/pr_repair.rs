@@ -12,8 +12,28 @@ pub(crate) fn candidates(store: &StateStore) -> Result<Vec<String>, StateError> 
 }
 
 pub(crate) fn saved_pr(db: &Connection, task: &str) -> Result<VerifiedOpenPr, StateError> {
-    let payload: String = db.query_row("SELECT payload FROM evidence WHERE task_id=?1 AND kind='verified_open_pr' ORDER BY sequence DESC LIMIT 1", [task], |row| row.get(0))?;
+    let payload: String = db.query_row("SELECT payload FROM evidence WHERE task_id=?1 AND kind IN ('verified_open_pr','pr_head_verified') ORDER BY sequence DESC LIMIT 1", [task], |row| row.get(0))?;
     proofs::parse_saved(&payload)
+}
+
+pub(crate) fn record_head(
+    store: &mut StateStore,
+    task: &str,
+    saved: &VerifiedOpenPr,
+    observed: &VerifiedOpenPr,
+    lineage: &serde_json::Value,
+) -> Result<(), StateError> {
+    let tx = store.connection.transaction()?;
+    if saved_pr(&tx, task)? != *saved {
+        return Err(StateError::LaunchBlocked);
+    }
+    tx.execute("INSERT INTO evidence(task_id,attempt_id,kind,payload) VALUES(?1,?2,'pr_base_merge_adopted',?3)", params![task, saved.attempt_id, lineage.to_string()])?;
+    tx.execute(
+        "INSERT INTO evidence(task_id,attempt_id,kind,payload) VALUES(?1,?2,'pr_head_verified',?3)",
+        params![task, saved.attempt_id, serde_json::to_string(observed)?],
+    )?;
+    tx.commit()?;
+    Ok(())
 }
 
 pub(crate) fn count(db: &Connection, task: &str) -> Result<usize, StateError> {

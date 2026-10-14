@@ -10,6 +10,7 @@ pub use types::{WorktreeError, WorktreeInspection, WorktreeResult};
 mod git;
 pub(crate) use git::check_root;
 use git::*;
+pub(crate) mod pr_head;
 mod recovery;
 /// A never-dispatched worker must start on its exact clean saved tip, rather
 /// than the descendant tip accepted when reconciling an already-run worker.

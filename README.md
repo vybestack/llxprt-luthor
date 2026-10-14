@@ -172,10 +172,35 @@ any state change, and the cycle's single JSON document reports it under
 `pr_repair.skipped` with its reason, for example
 `selection config differs: cleanup, min_free_space_bytes, initial.args`. An
 unreadable PR lookup is skipped the same way and asked again next cycle. Only a
-genuine safety conflict on an open PR (changed head, author, claim or process
-evidence) holds the task, with a specific `PR repair held: ...` reason listed
-under `pr_repair.held`. One task's problem never stops the rest of the pass,
+genuine safety conflict on an open PR (unproved head change, changed author,
+claim or process evidence) holds the task, with a specific `PR repair held: ...`
+reason listed under `pr_repair.held`. One task's problem never stops the rest of the pass,
 reconciliation or dispatch.
+
+A PR head may legitimately advance through GitHub `update-branch` or manual
+merges of the configured base. Luthor accepts only a first-parent extension of
+the recorded PR tip made entirely of two-parent merges whose second parents
+are on that base. After fresh PR identity, claim, ownership and exit-receipt
+verification, it fetches the head and base into task-private refs and
+fast-forwards the clean, verified task worktree. The operator checkout's base
+branch is not changed. `pr_base_merge_adopted` records the lineage and
+`pr_head_verified` records the current PR proof; original completion evidence
+is preserved. Foreign commits and non-base merges stay held; dirty worktrees
+are never fast-forwarded.
+
+Execute cycles also restore open-PR tasks held with `exit PR present`,
+`PR repair held: PR, process, receipt or ownership evidence did not verify`, or
+`PR repair held: worktree identity or tip did not verify`. Restoration requires
+fresh matching PR and claim evidence, accounted attempts, verified receipts,
+and an owned worktree at the matching or safely adoptable tip. An operator
+fast-forward or an interrupted adoption can therefore return to `pr_complete`
+and normal bounded repair. An old `exit PR present` without a saved completion
+proof requires an exact local/PR tip match; it cannot adopt an unrecorded remote
+head. Restoration appends `pr_hold_restored` and reports the task under
+`pr_repair.restored`; unavailable evidence is reported under
+`pr_repair.restore_retained`. Live reservations, unfinished attempts, cleanup
+intents, semantic-conflict holds and incompatible/amended sessions are not
+restored. No restoration launches a worker by itself.
 
 PR check selection is per mapping: omit `required_checks` to retain GitHub's
 `isRequired`, supply an exact names array to gate an unprotected repository,

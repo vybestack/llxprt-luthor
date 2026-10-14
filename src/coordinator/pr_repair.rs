@@ -4,10 +4,7 @@ use super::{
     ids::IdCreator,
     notes::TaskNote,
     ports::SupervisorLauncher,
-    ports::{
-        DispatchError, PrVerificationStage, observation_time, verify_completion_claim,
-        verify_open_pr,
-    },
+    ports::{DispatchError, PrVerificationStage, observation_time, verify_open_pr},
     retirement::{self, Observation, RetiredTask, Settlement},
 };
 use crate::{
@@ -255,13 +252,11 @@ fn inspect_open_pr<P: ProjectReader, Q: PrHealthReader, L: SupervisorLauncher, I
         PrVerificationStage::Exit,
     )
     .map_err(|_| supervisor::SupervisorError::Conflict)?;
-    if observed.id != saved.id
-        || observed.number != saved.number
-        || observed.head_commit_sha != saved.head_commit_sha
-    {
-        return Err(supervisor::SupervisorError::Conflict.into());
-    }
-    verify_completion_claim(projects, &selection)?;
+    // Release the inspection owner before the launch path acquires it anew.
+    drop(super::pr_head::synchronize(
+        store, task, &saved, &observed, projects,
+    )?);
+    let saved = pr_repair::saved_pr(&store.connection, task)?;
     let health = prs.health(
         &saved.repository,
         saved.number,
