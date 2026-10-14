@@ -36,6 +36,13 @@ pub(crate) fn recover_intent(
             }
             Err(error) => return Err(error.into()),
         }
+        // A linked worktree root holds a `.git` file. Without it, git would
+        // discover an enclosing repository and judge that one instead.
+        if !fs::symlink_metadata(intent.path.join(".git")).is_ok_and(|meta| meta.is_file()) {
+            return Err(WorktreeError::Conflict(
+                "worktree path is not a verifiable git worktree",
+            ));
+        }
         let actual = identity(&intent.path, intent, git_dir, remote).map_err(unverifiable)?;
         let status = read_git(
             &intent.path,
@@ -57,9 +64,8 @@ pub(crate) fn recover_intent(
     result
 }
 
-/// A path that git cannot read as a worktree (empty or partial directory) is
-/// an unverifiable path, not a git failure, so every environment reports it
-/// the same way regardless of whether a parent repository encloses the path.
+/// A worktree git cannot read (partial or corrupt checkout) is an unverifiable
+/// path, not a git failure.
 fn unverifiable(error: WorktreeError) -> WorktreeError {
     match error {
         WorktreeError::Git(_) => {
