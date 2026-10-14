@@ -71,6 +71,17 @@ pub(crate) fn inspect_recovery_quiescence_with_owner(
         Ok(context) => context,
         Err(reason) => return Ok(RecoveryInspection::Held(reason)),
     };
+    if !super::dispatch_abort::path_absent(
+        &attempts.join(format!("{attempt_id}.dispatch-aborted.json")),
+    ) {
+        return Ok(
+            if super::abort_recovery::inspect(store, &attempts, &plan, owner)? {
+                RecoveryInspection::Quiescent
+            } else {
+                RecoveryInspection::Held("dispatch abort proof is missing, invalid or still live")
+            },
+        );
+    }
     let held = |reason| Ok(RecoveryInspection::Held(reason));
     let child_file = match recovery_child_evidence(store, task_id, attempt_id, &attempts)? {
         Ok(child) => child,

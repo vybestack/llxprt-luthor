@@ -252,6 +252,27 @@ pub fn retry_context_for_task(
     retry_context(&store.connection, task_id, previous_attempt_id)
 }
 
+/// Read-only eligibility for explicit natural-exit or audited dispatch-abort retry.
+pub fn retry_plan_for_task(
+    store: &StateStore,
+    task: &str,
+    attempt: &str,
+) -> Result<crate::model::LaunchPlan, StateError> {
+    retry_plan(&store.connection, task, attempt)
+}
+
+fn retry_plan(
+    db: &Connection,
+    task: &str,
+    attempt: &str,
+) -> Result<crate::model::LaunchPlan, StateError> {
+    if super::dispatch_abort::recovered_abort(db, task, attempt)?.is_some() {
+        super::dispatch_abort::retry_plan(db, task, attempt)
+    } else {
+        retry_context(db, task, attempt).map(|(plan, _)| plan)
+    }
+}
+
 pub(crate) fn selection_for_attempt(
     store: &StateStore,
     plan: &crate::model::LaunchPlan,
@@ -313,7 +334,7 @@ fn authorize_retry(
     task_id: &str,
     attempt_id: &str,
 ) -> Result<(), StateError> {
-    let (prior, _) = retry_context(tx, task_id, &audit.previous_plan.attempt_id)?;
+    let prior = retry_plan(tx, task_id, &audit.previous_plan.attempt_id)?;
     let previous = attempt_selection(tx, &prior)?;
     if audit.previous_plan != prior
         || !retry_evidence_matches(tx, audit, &previous)?

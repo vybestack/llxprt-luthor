@@ -48,6 +48,7 @@ mod supervisor {
     pub(super) mod crashed_supervisor;
     pub(super) mod descendants;
     pub(super) mod dispatch;
+    mod dispatch_abort;
     pub(super) mod execution;
     pub(super) mod exit_errors;
     pub(super) mod gate;

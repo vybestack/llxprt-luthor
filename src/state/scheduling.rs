@@ -185,7 +185,7 @@ pub fn reservation_count(store: &StateStore) -> Result<usize, StateError> {
 }
 
 fn unresolved_task_count(connection: &rusqlite::Connection) -> Result<usize, StateError> {
-    Ok(connection.query_row(
+    let unresolved: usize = connection.query_row(
         &format!("SELECT COUNT(DISTINCT t.id) FROM tasks t WHERE t.state NOT IN ('completed',{RETIRED_PHASES_SQL})
              AND NOT (t.state='pr_complete'
                AND NOT EXISTS (SELECT 1 FROM reservations r WHERE r.task_id=t.id AND r.status='reserved')
@@ -250,5 +250,9 @@ fn unresolved_task_count(connection: &rusqlite::Connection) -> Result<usize, Sta
                    AND (SELECT COUNT(*) FROM attempts WHERE task_id=t.id AND (lifecycle!='completed' OR outcome IS NULL))=0)))"),
         [],
         |row| row.get(0),
-    )?)
+    )?;
+    let aborted = super::dispatch_abort::retryable_attention_count(connection)?;
+    unresolved
+        .checked_sub(aborted)
+        .ok_or(StateError::LaunchBlocked)
 }

@@ -284,7 +284,7 @@ pub(crate) struct ChildIdentity {
 }
 
 #[cfg(unix)]
-#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub(crate) struct ProcessIdentity {
     pub(crate) pid: u32,
     pub(crate) boot_identity: String,

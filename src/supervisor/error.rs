@@ -25,6 +25,8 @@ pub enum SupervisorError {
     ReadyTimeout,
     #[error("supervisor execution is unavailable; reservation held for reconciliation")]
     ExecutionUnavailable,
+    #[error("supervisor dispatch aborted before worker release")]
+    DispatchAborted,
     #[error("process gate closed without release")]
     GateClosed,
     #[error("stop cannot prove ownership; reservation held")]

@@ -74,6 +74,20 @@ pub fn operator_recover_missing_receipt<P: ProjectReader, Q: PullRequestReader>(
     if !recovery_quiescent(store, task_id, attempt_id, &owner)? {
         return Ok(held("worker quiescence changed during recovery"));
     }
+    if let Some(abort) =
+        supervisor::dispatch_abort::read(&store.root().join("attempts"), attempt_id)
+    {
+        if !matches!(pr, RecoveryPrEvidence::Absent) {
+            return Ok(held("dispatch abort recovery requires absent pull request"));
+        }
+        let proof = crate::state::ExitPrEvidence {
+            observed_at_unix_secs: observation_time()?,
+            repository: repository.clone(),
+            status: crate::state::PausePrStatus::Absent,
+        };
+        crate::state::dispatch_abort::commit(store, abort, actor, reason, proof)?;
+        return Ok(RecoveryResult::RecoveredAttention);
+    }
     recovery_commit::audited_commit(store, task_id, attempt_id, actor, reason, repository, pr)
 }
 

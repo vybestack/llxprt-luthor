@@ -10,6 +10,7 @@ mod context;
 mod continuation;
 mod continuation_hold;
 mod database;
+pub(crate) mod dispatch_abort;
 mod dispatch_stages;
 pub mod exit_observation;
 pub(crate) mod exits;
@@ -47,8 +48,8 @@ pub use context::{
 };
 
 pub use database::StateStore;
-pub use launches::retry_context_for_task;
 pub(crate) use launches::{hold_retry_intent, initial_launch, selection_for_attempt};
+pub use launches::{retry_context_for_task, retry_plan_for_task};
 
 use crate::config::Config;
 

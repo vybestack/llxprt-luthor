@@ -52,6 +52,10 @@ pub(crate) fn recover(args: Vec<String>) -> Result<(), Box<dyn std::error::Error
     )
     .map_err(|_| "recovery could not be completed")?;
     match result {
+        crate::coordinator::RecoveryResult::RecoveredAttention => println!(
+            "{}",
+            json!({"task_id": task_id, "attempt_id": attempt_id, "status": "attention", "reason": "dispatch abort audited; explicit retry available"})
+        ),
         crate::coordinator::RecoveryResult::RecoveredHeld => println!(
             "{}",
             json!({"task_id": task_id, "attempt_id": attempt_id, "status": "recovered_held", "reason": "receipt loss audited; task remains held"})
@@ -88,8 +92,8 @@ pub(crate) fn retry(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>>
     )
     .map_err(|error| error.operator_message("retry"))?;
     let mut store = StateStore::open(&config.state_root, config.capacity)?;
-    crate::state::retry_context_for_task(&store, &args[0], &args[2])
-        .map_err(|_| "retry requires the latest verified natural exit in attention")?;
+    crate::state::retry_plan_for_task(&store, &args[0], &args[2])
+        .map_err(|_| "retry requires the latest verified natural exit or audited dispatch abort in attention")?;
     let selection =
         task_records::selection_evidence(&store, &args[0])?.ok_or("task selection missing")?;
     verify_authenticated_account(PathBuf::from("gh").as_path(), &selection.candidate)?;

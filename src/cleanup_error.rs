@@ -80,6 +80,7 @@ fn supervisor_reason(error: &SupervisorError) -> String {
         SupervisorError::Conflict
         | SupervisorError::ReadyTimeout
         | SupervisorError::ExecutionUnavailable
+        | SupervisorError::DispatchAborted
         | SupervisorError::GateClosed
         | SupervisorError::StopUnavailable
         | SupervisorError::IdentityUnavailable => error.to_string(),

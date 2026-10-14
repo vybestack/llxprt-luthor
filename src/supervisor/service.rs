@@ -65,6 +65,9 @@ pub fn supervise(root: &Path, attempt: &str) -> Result<(), SupervisorError> {
         run_gated_child(&plan, std::io::stdin(), &attempts)?;
         Ok(())
     })();
+    if let Err(SupervisorError::DispatchAborted) = &result {
+        return result;
+    }
     if let Err(error) = &result {
         // The coordinator retains the reservation whether the gate closed or the worker failed.
         let _ = write_private_json(

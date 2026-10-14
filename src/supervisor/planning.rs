@@ -179,7 +179,7 @@ pub(crate) fn prepare_retry(
         &identity,
         &first,
         latest,
-        "naturally exited worker",
+        retry_previous_turn(store, previous)?,
     )?;
     let worktree = identity.path.clone();
     let worker_build = super::worker_pin::continuation(store, &first, latest, &executable)?;
@@ -211,6 +211,25 @@ pub(crate) fn prepare_retry(
         },
     )?;
     Ok(plan)
+}
+
+fn retry_previous_turn(
+    store: &StateStore,
+    previous: &LaunchPlan,
+) -> Result<&'static str, SupervisorError> {
+    Ok(
+        if crate::state::dispatch_abort::recovered_abort(
+            &store.connection,
+            &previous.task_id,
+            &previous.attempt_id,
+        )?
+        .is_some()
+        {
+            "cancelled dispatch (no worker was released)"
+        } else {
+            "naturally exited worker"
+        },
+    )
 }
 
 pub(crate) fn continuation_command(
