@@ -33,15 +33,10 @@ pub(crate) fn configured(root: &Path) -> (Config, Candidate) {
         ],
     };
     let config = Config {
-        state_root: if root.is_absolute() {
-            root.strip_prefix(std::env::current_dir().unwrap())
-                .unwrap()
-                .join("state")
-        } else {
-            root.join("state")
-        },
+        state_root: fixture_state_root(root),
         worktree_root: root.join("worktrees"),
         capacity: 1,
+        retry_policy: Default::default(),
         cleanup: luthor::config::CleanupPolicy::disabled(),
         min_free_space_bytes: 0,
         assignment_login: "operator".into(),
@@ -80,6 +75,16 @@ pub(crate) fn configured(root: &Path) -> (Config, Candidate) {
         source,
     };
     (config, candidate)
+}
+
+fn fixture_state_root(root: &Path) -> std::path::PathBuf {
+    if root.is_absolute() {
+        root.strip_prefix(std::env::current_dir().unwrap())
+            .unwrap()
+            .join("state")
+    } else {
+        root.join("state")
+    }
 }
 
 pub(crate) fn git(dir: &Path, args: &[&str]) {

@@ -48,6 +48,7 @@ pub(super) fn config() -> Config {
         state_root: "/state".into(),
         worktree_root: "/worktrees".into(),
         capacity: 1,
+        retry_policy: Default::default(),
         cleanup: luthor::config::CleanupPolicy::disabled(),
         min_free_space_bytes: 0,
         assignment_login: "bot".into(),

@@ -17,6 +17,36 @@ Synthetic example (all paths, IDs and names are illustrative; no key is present)
 }
 ```
 
+### Optional task-attempt retry policy
+
+`retry_policy` defaults to `{"kind":"disabled"}`. Opt in with
+`{"kind":"bounded","max_attempts":3,"backoff_secs":90,"classes":["rate_limit","transient_server","connectivity"]}`.
+`max_attempts` is an unsigned total task-attempt bound (at least two), not a
+count of provider HTTP replays. `backoff_secs` must be a positive unsigned delay;
+classes must be nonempty, distinct, and chosen from the three supported typed
+transport classifications. Unknown fields/classes and incomplete policies fail
+configuration validation. Policy is operational, like cleanup: it is not added
+to the immutable selection snapshot, so enabling it can authorize existing
+attention tasks. Its exact value is recorded in each automatic retry request.
+
+No schema migration is required. The existing append-only attempt history
+provides the total count, including operator continuations. `worker_outcome`
+evidence stores a bounded classification enum and first-observation Unix time,
+never worker text. It is reused after restart and checked against the current
+private stdout envelope. `automatic_retry_requested` links that observation,
+policy and previous count to the new attempt; failures have bounded
+`automatic_retry_failed` evidence. Existing `retry_authorized` evidence and
+transactional reservation/launch intent are unchanged. No direct state edits
+are needed to enable policy or continue a task.
+
+See [bounded transient retries](../README.md#opt-in-bounded-transient-retries)
+for the worker JSON/exit agreement, nonretryable and human-review outcomes,
+execute-only boundaries, and safety checks. The worker's typed transport
+contract was verified at `vybestack/llxprt-code-rs` commit
+`9cc8677aa8270d810a32fcafb4a2c0f52778175e` (`src/envelope.rs`,
+`src/agent/error.rs`, `src/adapter/error.rs`, `src/transport.rs`, and
+`tests/error_contracts.rs`); no log regex or private worker wrapper is involved.
+
 ### Per-mapping required-check selection
 
 Optional `required_checks` on each mapping chooses the check gates used by

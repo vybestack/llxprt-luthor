@@ -119,6 +119,7 @@ pub(super) fn fixture_config(
         state_root: dir.join("state"),
         worktree_root: dir.join("worktrees"),
         capacity: 1,
+        retry_policy: Default::default(),
         cleanup: luthor::config::CleanupPolicy::disabled(),
         min_free_space_bytes: 0,
         assignment_login: "operator".into(),

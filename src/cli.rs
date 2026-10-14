@@ -11,6 +11,7 @@ mod output;
 mod pin_adoption;
 mod process;
 mod read;
+mod retry_outcome;
 mod show;
 mod status;
 pub use amendment::run as amend_undispatched;

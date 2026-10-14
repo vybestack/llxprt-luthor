@@ -280,7 +280,9 @@ For state layout, migrations, and configuration details, see [Configuration and 
 its latest completed, released attempt. It requires a natural exit with no signal
 or stop intent, rechecks the private receipt and registered process absence, then
 reads the source claim and exhaustive open-PR list again. It never reassigns the
-issue, creates another task or worktree, or retries on daemon startup.
+issue or creates another task or worktree. Startup reconciliation alone never
+authorizes retry; the separate policy below must be enabled for execute-cycle
+automation.
 
 ```sh
 luthor retry TASK --attempt PREVIOUS_ATTEMPT --config /private/luthor.json --config-revision corrected-budget-512 --actor acoliver --reason 'Correct unsupported worker budget from 1024 to 512' --execute
@@ -308,7 +310,8 @@ Normal `resume` retains its original stopped-attempt and selection-configuration
 requirements. It does not adopt a retry's changed revision. A revised retry that
 is subsequently paused cannot be resumed through that original-config path.
 Another natural exit may be explicitly retried with a different revision and
-fresh proof, but there is no automatic retry loop. The process-absence check covers
+fresh proof. Automatic continuation is disabled unless explicitly configured
+below. The process-absence check covers
 registered processes and tracked descendants, not deliberately untracked escaped
 children. A reused PID or boot change fails closed.
 
@@ -322,6 +325,59 @@ old boot identity. Ordinary historical exits stay held because escaped runtime
 workers cannot be excluded by a receipt and group probes alone. See
 [terminal startup revalidation](dev-docs/config-and-state.md#darwin-boot-identity-and-terminal-startup-revalidation)
 for the proof and refusal boundaries.
+
+### Opt-in bounded transient retries
+
+To authorize automatic **task-attempt** continuation during `daemon --execute`
+or `cycle --execute`, set the optional top-level configuration field:
+
+```json
+"retry_policy": {
+  "kind": "bounded",
+  "max_attempts": 3,
+  "backoff_secs": 90,
+  "classes": ["rate_limit", "transient_server", "connectivity"]
+}
+```
+
+Omission or `{"kind":"disabled"}` preserves operator-only retry. This is not
+provider-request replay: the worker must have exited naturally, reached
+`attention`, and released its reservation. The total attempt limit includes the
+initial attempt, manual retries, resumes, and automatic retries. Backoff starts
+when the daemon first durably classifies that attempt; repeated polls and daemon
+restarts cannot reset it. Exhaustion leaves the task in attention, without a new
+reservation. Manual `retry` remains a separate explicit operator authorization.
+
+The worker must emit one terminal JSON object on stdout with the matching
+`session_id`, `status:"error"`, and a typed `error.code`; transport errors must
+agree with exit code 5. Only `model-rate-limit`, `model-transient-server`, and
+`model-connectivity` map to the configured classes. Luthor does **not** infer a
+transient from stderr, summaries, stack traces, HTTP numbers, or substrings such
+as `body read failed` or `timeout`. Quota/permanent failures, unknown/malformed
+output, stop/signal exits, and explicit terminal verdicts never auto-retry. A
+successful worker exit without a matching PR needs human review, including
+workers that ask for a missing handoff. It is reported as `needs_human_input`,
+not as a transport failure.
+
+Automation calls the same audited retry path as the operator command: fresh
+GitHub identity, source/claim and PR-absence checks; exact task/session/worktree
+identity; receipt and registered-process absence; worktree ownership and
+capacity. It uses the configured resume command with a fresh attempt ID and an
+automatic revision suffix. Include `{attempt.id}` in the resume prompt so each
+continuation is distinct. No new assignment, task, or worktree is created; no
+historical terminal-exit exception is enabled. Safety or upstream errors fail
+the pass with an audited failure, not a fallback. An uncertain launch retains
+its reservation and is never replayed automatically.
+
+The current policy intentionally applies to existing attention tasks without
+changing their immutable selection configuration. `worker_outcome` evidence
+persists classification and observation time; `automatic_retry_requested`
+records the exact policy, prior attempt count, new attempt ID and attribution.
+`retry_authorized` retains the existing transactional launch/claim/PR audit.
+Execute reports include `automatic_retries` with classification and decisions
+such as `backoff`, `capacity_full`, `exhausted`, and `needs_human_input`. Cached
+`status` and `show` expose the latest `worker_outcome`; those views, previews,
+plain reconciliation, and stopped-task resume do not initiate retries.
 
 ## Interrupted selection and claim recovery
 

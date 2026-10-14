@@ -36,6 +36,7 @@ use std::{
 mod supervisor {
     use super::*;
     pub(super) mod active_pr;
+    mod automatic_retry;
     mod cleanup_cases;
     mod cleanup_cycle;
     mod cleanup_cycle_fixture;

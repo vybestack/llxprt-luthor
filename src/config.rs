@@ -1,17 +1,14 @@
 use serde::{Deserialize, Serialize};
 use std::{collections::HashSet, path::PathBuf};
-use thiserror::Error;
+
+mod retry_policy;
+pub use retry_policy::{RetryPolicy, TransientFailure};
 
 mod required_checks;
 pub use required_checks::{CheckRule, RequiredChecks};
 
-#[derive(Debug, Error)]
-pub enum ConfigError {
-    #[error("invalid JSON configuration: {0}")]
-    Json(#[from] serde_json::Error),
-    #[error("invalid configuration: {0}")]
-    Invalid(String),
-}
+mod error;
+pub use error::ConfigError;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -19,6 +16,8 @@ pub struct Config {
     pub state_root: PathBuf,
     pub worktree_root: PathBuf,
     pub capacity: usize,
+    #[serde(default)]
+    pub retry_policy: RetryPolicy,
     #[serde(default = "CleanupPolicy::disabled")]
     pub cleanup: CleanupPolicy,
     #[serde(default)]
@@ -176,18 +175,6 @@ fn render_argument(argument: &str, values: &TaskValues) -> Result<String, Config
     Ok(rendered)
 }
 
-impl ConfigError {
-    /// Bounded message for operator entry points. Validation reasons are fixed
-    /// strings that never carry configuration values, whereas serde errors can
-    /// echo input bytes, so those are reduced to the subject alone.
-    pub fn operator_message(&self, subject: &str) -> String {
-        match self {
-            Self::Invalid(reason) => format!("{subject} configuration invalid: {reason}"),
-            Self::Json(_) => format!("{subject} configuration invalid"),
-        }
-    }
-}
-
 impl Config {
     pub fn from_json(json: &str) -> Result<Self, ConfigError> {
         let config: Self = serde_json::from_str(json)?;
@@ -210,6 +197,7 @@ impl Config {
             return Err(ConfigError::Invalid("invalid assignment_login".into()));
         }
         self.cleanup.validate()?;
+        self.retry_policy.validate()?;
         validate_sources(&self.sources, &self.mappings)?;
         validate_mappings(&self.mappings)?;
         validate_command(&self.initial)?;

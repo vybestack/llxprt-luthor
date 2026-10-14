@@ -78,6 +78,7 @@ pub(crate) fn show(conn: &Connection, root: &Path, task: &str) -> Result<Value, 
         output["reason"] = output["terminal"]["reason"].clone();
     }
     super::checks::present(conn, task, &mut output)?;
+    super::retry_outcome::present(conn, task, &mut output)?;
     output["worker_build"] = super::history::worker_build(conn, task)?;
     output["cleanup_failure"] = json!(super::history::cleanup_failure(conn, task)?);
     log_observation(
