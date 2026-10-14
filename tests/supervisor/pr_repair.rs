@@ -809,3 +809,5 @@ fn pin_adoption_enables_legacy_pr_repair_after_pin_hold_and_restart() {
         Some("pr_complete")
     );
 }
+
+mod head_advancement;

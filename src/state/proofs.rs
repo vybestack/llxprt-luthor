@@ -135,15 +135,7 @@ pub(crate) fn validate_verified_open_pr(
         let payload = unique_payload(tx, true, task_id, Some(attempt_id), "pr_repair_authorized")?
             .ok_or(StateError::LaunchBlocked)?;
         let audit: crate::pr_repair::PrRepairAuthorization = parse_saved(&payload)?;
-        let prior_payload = unique_payload(
-            tx,
-            true,
-            task_id,
-            Some(&audit.previous_plan.attempt_id),
-            "verified_open_pr",
-        )?
-        .ok_or(StateError::LaunchBlocked)?;
-        let prior: VerifiedOpenPr = parse_saved(&prior_payload)?;
+        let prior = current_pr(tx, task_id, &audit.previous_plan.attempt_id)?;
         if audit.saved_pr != prior
             || audit.saved_pr.id != proof.id
             || audit.saved_pr.number != proof.number
@@ -184,4 +176,16 @@ pub(crate) fn validate_pr_identity(
         return Err(StateError::LaunchBlocked);
     }
     Ok(())
+}
+
+pub(crate) fn current_pr(
+    db: &Connection,
+    task: &str,
+    attempt: &str,
+) -> Result<VerifiedOpenPr, StateError> {
+    // Keep completion proof uniqueness strict even after head observations.
+    unique_payload(db, true, task, Some(attempt), "verified_open_pr")?
+        .ok_or(StateError::LaunchBlocked)?;
+    let payload: String = db.query_row("SELECT payload FROM evidence WHERE task_id=?1 AND attempt_id=?2 AND kind IN ('verified_open_pr','pr_head_verified') ORDER BY sequence DESC LIMIT 1", params![task, attempt], |row| row.get(0))?;
+    parse_saved(&payload)
 }
