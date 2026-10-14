@@ -65,6 +65,7 @@ fn mapping(repository: &str) -> Mapping {
         allowed_pr_head_repository: repository.into(),
         allowed_pr_author: "acoliver".into(),
         required_checks: Default::default(),
+        merge: luthor::config::MergePolicy::disabled(),
     }
 }
 

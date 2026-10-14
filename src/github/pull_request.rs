@@ -1,6 +1,13 @@
 use serde_json::Value;
 
 mod checks;
+mod merge_followup;
+mod merge_reader;
+mod merge_types;
+pub(crate) mod merge_validation;
+mod merge_write;
+pub use crate::pr_merge::{CheckSummary, MergeChecks};
+pub use merge_types::PrMerger;
 mod health;
 mod health_reader;
 mod health_selection;
@@ -16,6 +23,10 @@ mod evidence_tests;
 mod health_tests;
 #[cfg(all(test, unix))]
 mod job_tests;
+#[cfg(test)]
+mod merge_check_tests;
+#[cfg(test)]
+mod merge_write_tests;
 
 use evidence::parse_evidence;
 pub use reader::GhPullRequestReader;

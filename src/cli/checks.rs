@@ -19,5 +19,6 @@ pub(crate) fn present(conn: &Connection, task: &str, output: &mut Value) -> Resu
         .map_err(|_| CliError::Serialization)?
         .unwrap_or(Value::Null);
     output["last_pr_health"] = serde_json::to_value(health).map_err(|_| CliError::Serialization)?;
+    super::merge::present(conn, task, output)?;
     Ok(())
 }

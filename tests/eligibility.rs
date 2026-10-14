@@ -93,6 +93,7 @@ fn mapping() -> Mapping {
         allowed_pr_head_repository: "org/fork".into(),
         allowed_pr_author: "alice".into(),
         required_checks: Default::default(),
+        merge: luthor::config::MergePolicy::disabled(),
     }
 }
 

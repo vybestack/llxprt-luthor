@@ -14,6 +14,7 @@ use crate::{
     supervisor::{LaunchPlan, SupervisorError},
 };
 mod discovery;
+mod merges;
 mod repairs;
 mod retirements;
 

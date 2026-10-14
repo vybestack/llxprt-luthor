@@ -30,6 +30,7 @@ mod ownership;
 #[cfg(unix)]
 pub use ownership::{OwnershipError, WorktreeOwner, WorktreeOwnerProtocol};
 
+pub mod pr_merge;
 pub mod pr_repair;
 
 pub mod worker_build;

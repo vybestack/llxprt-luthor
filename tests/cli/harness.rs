@@ -70,6 +70,7 @@ impl Harness {
                 allowed_pr_head_repository: "org/head".into(),
                 allowed_pr_author: "acoliver".into(),
                 required_checks: Default::default(),
+                merge: luthor::config::MergePolicy::disabled(),
             }],
             initial: CommandTemplate {
                 executable: gh.clone(),

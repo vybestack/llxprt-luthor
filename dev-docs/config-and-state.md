@@ -87,9 +87,10 @@ policy are skipped, not silently repinned. Configure it before selecting tasks;
 this change provides no migration of existing task authorization.
 
 `pr_complete` still means a verified open-PR handoff, not green CI or a merge:
-draft/red/pending PR acceptance is unchanged. Automatic merging remains the
-separate, unimplemented issue #40; its future green gate should consume this
-same health selection, not introduce another check rule.
+draft/red/pending PR acceptance is unchanged. The separate opt-in merge policy
+for issue #40 uses the same required-check selection syntax, but requires
+SUCCESS or SKIPPED conclusions and fresh MERGEABLE/CLEAN proof before writing.
+See [verified-head merging](#opt-in-verified-head-merging-issue-40).
 
 ### Cleanup and available-space policy
 
@@ -316,3 +317,102 @@ are appended; `show`/`status` display the latest verified attempt. See
 [issue 44 validation](issue44-pr-repair-validation.md) for safety details.
 A task whose issue closed or whose PR finished is retired instead of held; see
 [issue 54](issue54-retire-finished.md).
+
+## Opt-in verified-head merging (issue 40)
+
+Each mapping may have a `merge` policy. Omission or `{"kind":"disabled"}`
+leaves PR completion, repair and cleanup behavior unchanged; preview mode never
+merges. No operator configuration is automatically rewritten or enabled.
+
+```json
+"merge": {
+  "kind": "enabled",
+  "method": "squash",
+  "required_checks": {"kind": "all"},
+  "allow_draft": false
+}
+```
+
+`method` is required and is `merge`, `squash` or `rebase`. The independent merge
+`required_checks` rule defaults to `all`; it also accepts `{"kind":"github"}`
+(branch-protection-required contexts) or an explicit nonempty names array such
+as `["Luthor quality gates"]`. A missing named check is pending, not success.
+Selected checks must finish SUCCESS or SKIPPED (legacy commit statuses must be
+SUCCESS). Neutral, failed, cancelled, timed-out and action-required checks do
+not qualify. The default `all` includes optional failures; rules selecting
+fewer contexts never bypass GitHub branch protection. Check observations retain
+names, selected/optional status, conclusions, source and Actions job identities.
+An empty rollup has no checks for `all`/`github`; explicit missing names still
+block. GitHub must independently report the PR MERGEABLE and CLEAN.
+
+Drafts default to excluded. `allow_draft: true` explicitly authorizes marking an
+otherwise qualifying draft ready for review before merging; GitHub cannot merge
+an actual draft. Eligibility is rechecked after promotion. There is no admin,
+auto-merge or protection bypass, and no branch deletion in the merge operation.
+
+The execute daemon sweeps `pr_complete` tasks before terminal cleanup, using the
+current mapping's opt-in policy. The saved selection/worktree/attempt must be
+accounted and all existing mapping fields must still match. Changing **only**
+merge policy neither reauthorizes workers nor changes their ownership checks.
+The exact saved PR ID, repository IDs, author, branches, tracker line and head
+SHA must match fresh observations. A newer pushed head is never adopted by this
+sweep. An independently verified repair/base-merge head can qualify on a later
+cycle, using its newer saved proof.
+
+Before a merge or draft promotion, a task-level `pr_merge` intent journals the verified PR,
+policy, check summary and observation time. The gh REST merge write includes
+`sha=<verified head>` and `merge_method=<method>`, so a racing push is refused by
+GitHub. Authentication must match the saved, mapping-allowed author and the existing
+`acoliver` live-write restriction before each write. Mutations
+are single-shot and never use read retries. The response and fresh terminal PR
+must agree on the merge commit; `pr_merged` records the authorization, merged
+head, merge commit and confirmation time. The task remains in `pr_complete`
+until the existing cleanup/retirement path settles it.
+
+An interrupted/uncertain mutation stops the execute cycle, records a bounded
+`pr_merge_error`, and is not blindly repeated. The next enabled sweep can recover
+only from exact terminal merged-PR proof on the authorized head. An unresolved
+open PR requires operator inspection; it is not reported as merged or sent to a
+repair worker. With policy disabled, the sweep performs no upstream reads or
+writes, including recovery writes. Policy drift never allows a different head
+or repository to satisfy an old intent.
+
+### BEHIND branches and tracker closure
+
+For an owned, non-excluded BEHIND PR whose selected checks are green, the merge
+sweep records a `pr_branch_update` intent bound to the saved head, then uses
+GitHub's `updatePullRequestBranch` through `gh api graphql` with
+`expectedHeadOid=<observed head>` and explicit `updateMethod: MERGE`.
+A successful response records `pr_branch_updated`. This is a merge of the base,
+never a rebase, force push or protection bypass. Each head has its own durable
+intent; an uncertain update is not blindly repeated.
+
+The sweep never authorizes merging the returned/new head. It waits for the
+existing repair monitor to verify fresh claim, accounted exit/receipt, worktree
+ownership and configured-base merge lineage, synchronize a clean owned local
+worktree, and record `pr_head_verified`. Only a subsequent sweep can evaluate
+checks for that verified new head. Old-head checks cannot authorize it. A
+conflicting PR goes to the existing bounded conflict repair; an update error is
+recorded and surfaced, not hidden by a fallback.
+
+After an exact terminal merge is confirmed, Luthor reads the tracker identity
+from the saved selection (including repository, issue number, node ID and URL),
+not from the code repository or closing keyword. If GitHub already closed it,
+`tracker_closed` records that observation without a write. Otherwise a
+`tracker_close` intent precedes a single `gh issue close --reason completed`
+with a comment naming the merged PR, verified head and merge commit. Fresh
+closure proof is journaled as `tracker_closed`, bound to `pr_merged`.
+This works for non-default PR bases and separate tracker repositories.
+
+An interrupted closure retains the merge evidence. A later sweep can recover
+from a fresh exact closed-issue read without remerging/reclosing; an unresolved
+open issue requires inspection rather than replaying an uncertain comment or
+close. Closure failure stops the cycle before cleanup can retire the task.
+No tracker issue is closed before confirmed merge evidence exists. Disabled
+policy performs neither branch updates nor tracker closure, even on restart.
+
+Daemon JSON reports `pr_merge.merged` and `pr_merge.waiting`; failing check names
+are included in waiting reasons even for UNSTABLE PRs. `status` and `show`
+expose cached `last_merge_checks`, `merge_evidence`, `merge_error`,
+`last_branch_update` and `tracker_closure`, as well as the existing
+`last_pr_health`. These are journal observations, not fresh reads.

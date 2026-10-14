@@ -74,6 +74,7 @@ impl Fixture {
                 allowed_pr_head_repository: "org/code".into(),
                 allowed_pr_author: "bot".into(),
                 required_checks: Default::default(),
+                merge: luthor::config::MergePolicy::disabled(),
             }],
             initial: CommandTemplate {
                 executable: "/bin/worker".into(),

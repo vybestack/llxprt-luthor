@@ -319,6 +319,7 @@ fn fixture_config(root: &std::path::Path) -> Config {
             allowed_pr_head_repository: "bot/fork".into(),
             allowed_pr_author: "bot".into(),
             required_checks: Default::default(),
+            merge: luthor::config::MergePolicy::disabled(),
         }],
         initial: CommandTemplate {
             executable: "/bin/worker".into(),

@@ -224,6 +224,13 @@ fn inspect_task<P: ProjectReader, Q: PrHealthReader, L: SupervisorLauncher, I: I
     let mut comparable = crate::model::EffectiveConfigSnapshot::from(config);
     comparable.initial.executable = selection.effective_config.initial.executable.clone();
     comparable.resume.executable = selection.effective_config.resume.executable.clone();
+    for (current, saved) in comparable
+        .mappings
+        .iter_mut()
+        .zip(&selection.effective_config.mappings)
+    {
+        current.merge = saved.merge.clone();
+    }
     let drift = selection.effective_config.differing_fields(&comparable);
     if !drift.is_empty() {
         return Ok(Inspection::Skipped(format!(
