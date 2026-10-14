@@ -347,7 +347,43 @@ build holds continuation rather than trying a new binary. Existing dispatched
 sessions whose plans predate build pins show `legacy_unrecorded` and cannot
 silently acquire the current binary's identity. There is no automatic copying,
 rebuilding, repinning or session migration; restore the pinned build or use a
-separately authorized migration workflow (not provided by this change).
+separately authorized session migration workflow. Pin adoption below records
+operator-attested provenance; it does not convert session formats.
+
+### Adopt a build pin for a legacy session
+
+For a non-running `legacy_unrecorded` task whose lifetime build is known:
+
+```sh
+luthor adopt-pin TASK --config PATH --executable PATH --sha256 HEX \
+  --actor LOGIN --reason 'Evidence that this executable was used throughout the task'
+# Review the single JSON preview, then repeat with --execute to commit.
+```
+
+The executable argument must **exactly equal** the initial or resume executable
+in the task's saved selection snapshot, not merely today's config or an alias
+of the same file. Relative paths/PATH names resolve from the saved task worktree
+as at ordinary build selection. The file must be executable and hash to the
+supplied 64-hex-digit SHA-256 now. The operator attests its historical use;
+Luthor cannot infer past bytes from today's file. `--actor` and a nonempty
+`--reason` are required and recorded, not a GitHub write or reassignment.
+
+Preview is read-only; `--execute` rechecks all requirements under the coordinator
+and worktree-owner locks. All attempts must have reconciled exits and released
+reservations: reconcile first, including a held task whose worker may still be
+running. Already-recorded or adopted pins are refused; no repinning is supported.
+The command emits exactly one JSON document, including on refusal (nonzero exit).
+
+Execution appends `worker_pin_adopted` evidence with actor, reason, supplied path,
+resolved build path, hash, time, historical attempt IDs and phase transition.
+Historical plans, argv, dispatch artifacts and exits remain unchanged. `status`
+and `show` then report `pinned`, and future resume, retry and PR repair use that
+build and the same dispatch/worker-gate hash checks as a launch-recorded pin.
+Only a hold specifically caused by the unrecorded legacy pin is restored to its
+prior continuation phase; unrelated safety holds and incompatible-session checks
+remain in force. Adoption launches nothing and changes nothing on GitHub.
+Daemon auto-adoption is not enabled; adoption always requires this explicit
+operator action.
 
 A naturally failing worker's structured `error.message` reporting
 `unsupported state version N`, or `error.code` of `session_incompatible` /

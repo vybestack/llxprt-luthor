@@ -59,6 +59,7 @@ pub(crate) fn context(
 }
 
 pub(crate) fn validate(
+    db: &Connection,
     audit: &PrRepairAuthorization,
     selection: &SelectionEvidence,
 ) -> Result<(), StateError> {
@@ -69,7 +70,8 @@ pub(crate) fn validate(
         || plan.session_id != prior.session_id
         || plan.session_id != plan.task_id
         || plan.worktree != prior.worktree
-        || plan.worker_build != prior.worker_build
+        || super::pin_adoption::effective_build(db, plan)?
+            != super::pin_adoption::effective_build(db, prior)?
         || plan.session_environment != prior.session_environment
         || plan.config_revision != prior.config_revision
         || audit.saved_pr.attempt_id != prior.attempt_id
@@ -119,7 +121,7 @@ pub(crate) fn hold_intent(
     selection: &SelectionEvidence,
 ) -> Result<(), StateError> {
     let (previous, saved) = context(store, &audit.plan.task_id)?;
-    validate(audit, selection)?;
+    validate(&store.connection, audit, selection)?;
     if previous != audit.previous_plan
         || saved != audit.saved_pr
         || count(&store.connection, &previous.task_id)? >= MAX_PR_REPAIRS
