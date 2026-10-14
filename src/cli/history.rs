@@ -119,7 +119,8 @@ pub(crate) fn events(conn: &Connection, table: &str, task: &str) -> Result<Vec<V
                 | "pr_repair_result"
                 | "pr_failed_jobs_rerun"
                 | "pr_failed_jobs_rerun_acknowledged"
-                | "pr_repair_pr_lookup",
+                | "pr_repair_pr_lookup"
+                | "worker_pin_adopted",
             ) => serde_json::from_str::<Value>(&payload).ok(),
             _ => None,
         };
@@ -220,7 +221,9 @@ pub(crate) fn worker_build(conn: &Connection, task: &str) -> Result<Value, CliEr
         .map(|text| serde_json::from_str(&text))
         .transpose()
         .map_err(|_| CliError::Database)?;
-    let mut summary = match plan.worker_build {
+    let build =
+        crate::state::pin_adoption::effective_build(conn, &plan).map_err(|_| CliError::Database)?;
+    let mut summary = match build {
         Some(build) => json!({"path":build.path,"sha256":build.sha256,"pin_status":"pinned"}),
         None => json!({"path":plan.executable,"sha256":null,"pin_status":"legacy_unrecorded"}),
     };

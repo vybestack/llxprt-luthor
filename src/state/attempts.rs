@@ -293,7 +293,7 @@ fn repair_selection(
     let prior: String = db.query_row("SELECT i.detail FROM attempts a JOIN intents i ON i.task_id=a.task_id AND i.attempt_id=a.id AND i.kind='launch' WHERE a.task_id=?1 AND a.rowid=(SELECT MAX(rowid) FROM attempts WHERE task_id=?1 AND rowid<(SELECT rowid FROM attempts WHERE id=?2))", params![plan.task_id, plan.attempt_id], |row| row.get(0))?;
     let prior: LaunchPlan = serde_json::from_str(&prior)?;
     let selection = attempt_selection(db, &prior)?;
-    super::pr_repair::validate(audit, &selection)?;
+    super::pr_repair::validate(db, audit, &selection)?;
     if audit.plan != *plan
         || audit.previous_plan != prior
         || plan.config_revision != selection.config_revision
@@ -303,21 +303,19 @@ fn repair_selection(
     Ok(selection)
 }
 
-fn verify_worker_lineage(db: &Connection, plan: &LaunchPlan) -> Result<(), StateError> {
+pub(crate) fn verify_worker_lineage(db: &Connection, plan: &LaunchPlan) -> Result<(), StateError> {
     let payload: String = db.query_row(
         "SELECT i.detail FROM attempts a JOIN intents i ON i.task_id=a.task_id AND i.attempt_id=a.id AND i.kind='launch' WHERE a.task_id=?1 ORDER BY a.rowid LIMIT 1",
         [&plan.task_id], |row| row.get(0),
     )?;
     let first: LaunchPlan = serde_json::from_str(&payload)?;
-    if plan.worker_build != first.worker_build
+    let build = super::pin_adoption::effective_build(db, &first)?;
+    let plan_build = super::pin_adoption::effective_build(db, plan)?;
+    // Historical unpinned plans are observation evidence, not launch permission.
+    if plan_build != build
         || (plan.attempt_id != first.attempt_id
             && plan.worker_build.is_some()
-            && plan.executable
-                != first
-                    .worker_build
-                    .as_ref()
-                    .ok_or(StateError::LaunchBlocked)?
-                    .path)
+            && plan.executable != build.ok_or(StateError::LaunchBlocked)?.path)
     {
         return Err(StateError::LaunchBlocked);
     }

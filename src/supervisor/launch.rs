@@ -46,6 +46,7 @@ pub fn execute_with_binary(
         return Err(SupervisorError::Conflict);
     }
     super::worker_pin::verify(plan)?;
+    crate::state::verify_worker_lineage(&store.connection, plan)?;
     let root = store.root().to_path_buf();
     ownership
         .verify_binding(&root, &plan.task_id)
