@@ -8,6 +8,7 @@ mod logs;
 mod observation;
 mod observation_labels;
 mod output;
+mod pin_adoption;
 mod process;
 mod read;
 mod show;

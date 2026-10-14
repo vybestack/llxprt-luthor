@@ -1,4 +1,5 @@
 mod git_fixture;
+mod pin_adoption_fixture;
 use luthor::{
     claim::{AssignmentError, AssignmentWriter},
     config::{CommandTemplate, Config, Mapping, Marker, Source},
@@ -56,6 +57,7 @@ mod supervisor {
     pub(super) mod operator_matching;
     pub(super) mod operator_refusals;
     pub(super) mod operator_rollback;
+    mod pin_adoption;
     pub(super) mod pr_identity;
     pub(super) mod pr_readers;
     mod pr_repair;

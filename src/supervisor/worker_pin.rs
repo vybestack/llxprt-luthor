@@ -27,7 +27,7 @@ pub(crate) fn continuation(
     latest: &LaunchPlan,
     template: &Path,
 ) -> Result<WorkerBuild, SupervisorError> {
-    let result = continuation_build(first, latest, template);
+    let result = continuation_build(store, first, latest, template);
     if let Err(SupervisorError::WorkerBuildHeld(reason)) = &result {
         task_records::hold_task(store, &first.task_id, reason)?;
     }
@@ -35,14 +35,17 @@ pub(crate) fn continuation(
 }
 
 fn continuation_build(
+    store: &StateStore,
     first: &LaunchPlan,
     latest: &LaunchPlan,
     template: &Path,
 ) -> Result<WorkerBuild, SupervisorError> {
-    if first.worker_build != latest.worker_build {
+    let first_build = crate::state::pin_adoption::effective_build(&store.connection, first)?;
+    let latest_build = crate::state::pin_adoption::effective_build(&store.connection, latest)?;
+    if first_build != latest_build {
         return Err(SupervisorError::Conflict);
     }
-    let Some(build) = first.worker_build.as_ref() else {
+    let Some(build) = first_build.as_ref() else {
         return Err(SupervisorError::WorkerBuildHeld(format!(
             "legacy session worker {}; hash unrecorded; requested template {}; explicitly migrate the session before continuation",
             first.executable.display(),

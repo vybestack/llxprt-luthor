@@ -15,6 +15,7 @@ pub mod exit_observation;
 pub(crate) mod exits;
 pub mod journal;
 pub mod launches;
+pub mod pin_adoption;
 pub mod pr_completion;
 pub(crate) mod pr_repair;
 pub(crate) mod pr_restore;
@@ -32,8 +33,8 @@ pub use crate::model::{
 };
 pub use amended_dispatch::{verify_amended_observation_plan, verify_amended_worker_plan};
 pub(crate) use amendment::policy::{initial_branch_removal_plan, validate_removal_config};
-pub(crate) use attempts::attempt_selection;
 pub(crate) use attempts::same_task_config;
+pub(crate) use attempts::{attempt_selection, verify_worker_lineage};
 pub use context::{
     AmendedDispatchProof, BranchRemovalDelta, BranchRemovalReason, BranchRemovalRequest,
     FutureTemplateCorrection, InitialBranchRemovalAudit, ProcessQuiescence,

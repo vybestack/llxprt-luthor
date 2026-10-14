@@ -777,3 +777,35 @@ fn worker_pin_repair_keeps_build_after_operator_updates_templates() {
         original.worker_build.unwrap().path
     );
 }
+
+#[test]
+fn pin_adoption_enables_legacy_pr_repair_after_pin_hold_and_restart() {
+    let mut f = Fixture::new();
+    let build = crate::pin_adoption_fixture::legacy(&f.config, &f.store);
+    assert!(f.repair().is_err());
+    let history = crate::pin_adoption_fixture::rows(&f.config);
+    crate::pin_adoption_fixture::adopt(&mut f.store, &build);
+    assert_eq!(crate::pin_adoption_fixture::rows(&f.config), history);
+    assert_eq!(
+        task_records::task_phase(&f.store, "task")
+            .unwrap()
+            .as_deref(),
+        Some("pr_complete")
+    );
+    drop(f.store);
+    f.store = StateStore::open(&f.config.state_root, 1).unwrap();
+    let next = f.repair().unwrap().remove(0);
+    assert_eq!(next.worker_build, Some(build.clone()));
+    assert_eq!(next.executable, build.path);
+    f.run(&next, "repaired");
+    assert!(matches!(
+        f.reconcile(&next.attempt_id),
+        Reconciliation::Completed { .. }
+    ));
+    assert_eq!(
+        task_records::task_phase(&f.store, "task")
+            .unwrap()
+            .as_deref(),
+        Some("pr_complete")
+    );
+}
