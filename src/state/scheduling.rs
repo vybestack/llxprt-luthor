@@ -62,8 +62,8 @@ pub(crate) fn active_attempt_reservation(
     )? == 1)
 }
 
-/// Persisted source operations without their proof block new selections.
-/// Also include preparing tasks where the process died before the first intent.
+/// Report task-local source holds and unresolved stop operations. Source holds
+/// retain capacity but do not globally block scheduling; uncertain stops do.
 pub fn unresolved_sources(store: &StateStore) -> Result<Vec<(String, String)>, StateError> {
     let mut statement = store.connection.prepare(&format!(
         "SELECT t.id, 'selection' FROM tasks t WHERE t.state='preparing'

@@ -52,10 +52,53 @@ fn open_store(root: impl AsRef<Path>, capacity: usize) -> Result<StateStore, Sta
     connection.pragma_update(None, "journal_mode", "WAL")?;
     connection.pragma_update(None, "foreign_keys", "ON")?;
     let version: i32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if version > 3 {
+    if version > 4 {
         return Err(StateError::UnsupportedDatabaseVersion(version));
     }
     let tx = connection.transaction()?;
+    initialize_schema(&tx, version, capacity)?;
+    tx.commit()?;
+    Ok(StateStore {
+        connection,
+        _lock: StateLock(lock),
+        root: root.to_path_buf(),
+    })
+}
+
+/// Keep abandoned histories while retaining uniqueness for every other task.
+fn migrate_task_identity(tx: &rusqlite::Transaction<'_>) -> Result<(), StateError> {
+    tx.execute_batch("CREATE TABLE tasks_v4 (id TEXT PRIMARY KEY, tracker_repo_id TEXT NOT NULL, issue_node_id TEXT NOT NULL, repository TEXT NOT NULL, issue_number INTEGER NOT NULL, state TEXT NOT NULL, config_revision TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+        INSERT INTO tasks_v4 SELECT * FROM tasks;
+        CREATE TABLE attempts_v4 (id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks_v4(id), lifecycle TEXT NOT NULL, outcome TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+        INSERT INTO attempts_v4 SELECT * FROM attempts;
+        CREATE TABLE intents_v4 (sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, task_id TEXT NOT NULL REFERENCES tasks_v4(id), attempt_id TEXT, kind TEXT NOT NULL, detail TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+        INSERT INTO intents_v4 SELECT * FROM intents;
+        CREATE TABLE reservations_v4 (attempt_id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks_v4(id), status TEXT NOT NULL CHECK(status IN ('reserved','released')), created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+        INSERT INTO reservations_v4 SELECT * FROM reservations;
+        CREATE TABLE evidence_v4 (sequence INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL REFERENCES tasks_v4(id), attempt_id TEXT, kind TEXT NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+        INSERT INTO evidence_v4 SELECT * FROM evidence;
+        UPDATE sqlite_sequence SET seq=MAX(seq,COALESCE((SELECT seq FROM sqlite_sequence WHERE name='intents'),0)) WHERE name='intents_v4';
+        UPDATE sqlite_sequence SET seq=MAX(seq,COALESCE((SELECT seq FROM sqlite_sequence WHERE name='evidence'),0)) WHERE name='evidence_v4';
+        DROP TABLE attempts;
+        DROP TABLE intents;
+        DROP TABLE reservations;
+        DROP TABLE evidence;
+        DROP TABLE tasks;
+        ALTER TABLE tasks_v4 RENAME TO tasks;
+        ALTER TABLE attempts_v4 RENAME TO attempts;
+        ALTER TABLE intents_v4 RENAME TO intents;
+        ALTER TABLE reservations_v4 RENAME TO reservations;
+        ALTER TABLE evidence_v4 RENAME TO evidence;
+        CREATE UNIQUE INDEX tasks_one_unabandoned_issue ON tasks(tracker_repo_id,issue_node_id) WHERE state!='abandoned';
+        CREATE UNIQUE INDEX reservations_one_active_per_task ON reservations(task_id) WHERE status='reserved';")?;
+    Ok(())
+}
+
+fn initialize_schema(
+    tx: &rusqlite::Transaction<'_>,
+    version: i32,
+    capacity: usize,
+) -> Result<(), StateError> {
     if version == 0 {
         tx.execute_batch("CREATE TABLE tasks (id TEXT PRIMARY KEY, tracker_repo_id TEXT NOT NULL, issue_node_id TEXT NOT NULL, repository TEXT NOT NULL, issue_number INTEGER NOT NULL, state TEXT NOT NULL, config_revision TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(tracker_repo_id, issue_node_id));
                 CREATE TABLE attempts (id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id), lifecycle TEXT NOT NULL, outcome TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
@@ -94,10 +137,9 @@ fn open_store(root: impl AsRef<Path>, capacity: usize) -> Result<StateStore, Sta
                 CREATE UNIQUE INDEX reservations_one_active_per_task ON reservations(task_id) WHERE status='reserved';")?;
         tx.pragma_update(None, "user_version", 3)?;
     }
-    tx.commit()?;
-    Ok(StateStore {
-        connection,
-        _lock: StateLock(lock),
-        root: root.to_path_buf(),
-    })
+    if version < 4 {
+        migrate_task_identity(tx)?;
+        tx.pragma_update(None, "user_version", 4)?;
+    }
+    Ok(())
 }

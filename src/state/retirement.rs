@@ -61,9 +61,9 @@ pub struct Retirement {
 /// every attempt has a durable, verified exit. A running task is held with an
 /// attempt that has no exit yet, so it never qualifies. A cleanup in progress
 /// owns the task until it finishes.
-const RETIRABLE: &str = "t.state IN ('attention','held','paused','pr_complete')
+const RETIRABLE: &str = "t.state IN ('preparing','selected','claimed','attention','held','paused','pr_complete')
     AND NOT EXISTS(SELECT 1 FROM attempts a WHERE a.task_id=t.id AND NOT EXISTS(
-        SELECT 1 FROM evidence e WHERE e.task_id=t.id AND e.attempt_id=a.id AND e.kind='attempt_exit'))
+        SELECT 1 FROM evidence e WHERE e.task_id=t.id AND e.attempt_id=a.id AND e.kind='attempt_exit') AND a.id IS NOT ?2)
     AND NOT EXISTS(SELECT 1 FROM intents WHERE task_id=t.id AND kind='cleanup')";
 
 /// Tasks the reconciliation sweep inspects. `pr_complete` tasks are left to
@@ -74,7 +74,10 @@ pub(crate) fn candidates(store: &StateStore) -> Result<Vec<String>, StateError> 
         .prepare(&format!(
             "SELECT t.id FROM tasks t WHERE {RETIRABLE} AND t.state!='pr_complete' ORDER BY t.rowid"
         ))?
-        .query_map([], |row| row.get(0))?
+        .query_map(
+            params![Option::<String>::None, Option::<String>::None],
+            |row| row.get(0),
+        )?
         .collect::<Result<_, _>>()?)
 }
 
@@ -85,10 +88,11 @@ pub fn retire(
     task: &str,
     retirement: &Retirement,
 ) -> Result<(), StateError> {
+    let never_dispatched = never_dispatched_abandonment(store, task, retirement.phase)?;
     let tx = store.connection.transaction()?;
     let qualified: bool = tx.query_row(
         &format!("SELECT EXISTS(SELECT 1 FROM tasks t WHERE {RETIRABLE} AND t.id=?1)"),
-        [task],
+        params![task, never_dispatched],
         |row| row.get(0),
     )?;
     if !qualified {
@@ -115,6 +119,7 @@ pub fn retire(
     )?;
     let mut payload = serde_json::to_value(retirement)?;
     payload["previous_phase"] = Value::from(previous_phase);
+    payload["never_dispatched_attempt"] = never_dispatched.map_or(Value::Null, Value::from);
     payload["previous_hold_reason"] = previous_reason.map_or(Value::Null, Value::from);
     tx.execute(
         "INSERT INTO evidence(task_id,attempt_id,kind,payload) VALUES(?1,NULL,'task_retired',?2)",
@@ -139,7 +144,7 @@ fn refusal(tx: &Connection, task: &str) -> Result<&'static str, StateError> {
     }
     if !matches!(
         phase.as_str(),
-        "attention" | "held" | "paused" | "pr_complete"
+        "preparing" | "selected" | "claimed" | "attention" | "held" | "paused" | "pr_complete"
     ) {
         return Ok("task has not reached a phase that can be retired");
     }
@@ -177,6 +182,32 @@ pub(crate) fn latest(conn: &Connection, task: &str) -> rusqlite::Result<Option<V
             })
         })
         .transpose()
+}
+
+fn never_dispatched_abandonment(
+    store: &StateStore,
+    task: &str,
+    phase: RetiredPhase,
+) -> Result<Option<String>, StateError> {
+    if phase != RetiredPhase::Abandoned {
+        return Ok(None);
+    }
+    let latest: Option<String> = store
+        .connection
+        .query_row(
+            "SELECT id FROM attempts WHERE task_id=?1 ORDER BY rowid DESC LIMIT 1",
+            [task],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(attempt) = latest else {
+        return Ok(None);
+    };
+    match store.never_dispatched_context(task, &attempt) {
+        Ok(_) => Ok(Some(attempt)),
+        Err(StateError::LaunchBlocked | StateError::Serialization(_)) => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 #[cfg(test)]

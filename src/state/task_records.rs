@@ -51,7 +51,7 @@ pub fn create_task(
     let tx = store.connection.transaction()?;
     let exists: Option<String> = tx
         .query_row(
-            "SELECT id FROM tasks WHERE tracker_repo_id=?1 AND issue_node_id=?2",
+            "SELECT id FROM tasks WHERE tracker_repo_id=?1 AND issue_node_id=?2 AND state!='abandoned'",
             params![repo_id, issue_node_id],
             |r| r.get(0),
         )
@@ -83,7 +83,7 @@ pub fn existing_issue(
     issue_id: &str,
 ) -> Result<bool, StateError> {
     Ok(store.connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM tasks WHERE tracker_repo_id=?1 AND issue_node_id=?2)",
+        "SELECT EXISTS(SELECT 1 FROM tasks WHERE tracker_repo_id=?1 AND issue_node_id=?2 AND state!='abandoned')",
         params![repo_id, issue_id],
         |row| row.get(0),
     )?)
@@ -98,9 +98,9 @@ pub fn existing_target(
     if repository.trim().is_empty() || issue_number == 0 {
         return Err(StateError::InvalidTarget);
     }
-    let mut statement = store
-        .connection
-        .prepare("SELECT COUNT(*) FROM tasks WHERE repository=?1 AND issue_number=?2")?;
+    let mut statement = store.connection.prepare(
+        "SELECT COUNT(*) FROM tasks WHERE repository=?1 AND issue_number=?2 AND state!='abandoned'",
+    )?;
     let count: i64 = statement.query_row(params![repository, issue_number], |row| row.get(0))?;
     match count {
         0 => Ok(false),
@@ -190,6 +190,41 @@ pub fn source_claim_intent(
     task_id: &str,
 ) -> Result<Option<String>, StateError> {
     proofs::unique_payload(&store.connection, false, task_id, None, "claim_assignment")
+}
+
+/// Confirm the single durable claim intent without reissuing a GitHub write.
+pub fn confirm_claim(store: &mut StateStore, task_id: &str) -> Result<(), StateError> {
+    let selection = selection_evidence(store, task_id)?.ok_or(StateError::InvalidSelection)?;
+    let candidate = &selection.candidate;
+    let expected = serde_json::json!({"principal": selection.effective_config.assignment_login,
+        "repository": candidate.repository, "number": candidate.issue_number});
+    let detail = source_claim_intent(store, task_id)?.ok_or(StateError::InvalidSelection)?;
+    if serde_json::from_str::<serde_json::Value>(&detail)? != expected {
+        return Err(StateError::InvalidSelection);
+    }
+    let tx = store.connection.transaction()?;
+    let login = &selection.effective_config.assignment_login;
+    match proofs::unique_payload(&tx, true, task_id, None, "claim_verified")? {
+        Some(payload) if payload == *login => {}
+        Some(_) => return Err(StateError::InvalidSelection),
+        None => {
+            tx.execute("INSERT INTO evidence(task_id,attempt_id,kind,payload) VALUES(?1,NULL,'claim_verified',?2)",
+                params![task_id, login])?;
+        }
+    }
+    let changed = tx.execute("UPDATE tasks SET state='claimed' WHERE id=?1 AND state IN ('preparing','selected','claimed','held') AND NOT EXISTS(SELECT 1 FROM attempts WHERE task_id=?1)", [task_id])?;
+    if changed != 1 {
+        return Err(StateError::InvalidSelection);
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+pub fn source_claim_verified(
+    store: &StateStore,
+    task_id: &str,
+) -> Result<Option<String>, StateError> {
+    proofs::unique_payload(&store.connection, true, task_id, None, "claim_verified")
 }
 
 pub fn record_claim_intent(

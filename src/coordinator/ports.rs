@@ -197,3 +197,13 @@ fn verify_local_pr_tip(
     }
     Ok(())
 }
+
+#[derive(Debug, Error)]
+pub enum ScheduleError {
+    #[error(transparent)]
+    Dispatch(#[from] DispatchError),
+    #[error(transparent)]
+    State(#[from] StateError),
+    #[error("ID generation failed: {0}")]
+    Id(#[from] std::io::Error),
+}

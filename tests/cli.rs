@@ -102,8 +102,8 @@ fn pause_and_reconcile_reject_bad_arguments_and_unknown_tasks() {
 #[cfg(unix)]
 mod resume_cli {
     #[test]
-    fn dispatch_execute_holds_unresolved_source_before_project_selection_with_spare_capacity() {
-        super::cli::dispatch::dispatch_execute_holds_unresolved_source_before_project_selection_with_spare_capacity();
+    fn dispatch_execute_continues_project_selection_with_task_local_source_hold() {
+        super::cli::dispatch::dispatch_execute_continues_project_selection_with_task_local_source_hold();
     }
 
     #[test]

@@ -435,9 +435,10 @@ pub(crate) fn scheduler_with_precomputed_blocked_startup_does_not_select_candida
     let mut assignments = FakeWriter::default();
     let mut launcher = FakeLauncher::default();
     let startup = luthor::coordinator::StartupReport {
-        source_holds: vec![luthor::coordinator::SourceHold {
+        attempts: vec![luthor::coordinator::AttemptReport {
             task_id: "task-source".into(),
-            kind: "claim".into(),
+            attempt_id: "unsafe-attempt".into(),
+            review: luthor::coordinator::AttemptReview::Error("unsafe state".into()),
         }],
         ..Default::default()
     };

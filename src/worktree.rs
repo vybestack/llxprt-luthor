@@ -3,46 +3,14 @@ use crate::{
     config::Mapping,
     state::{StateError, StateStore, WorktreeIdentity, WorktreeIntent, WorktreeRecord},
 };
-use std::{
-    fs,
-    path::{Component, Path, PathBuf},
-    process::{Command, Output},
-};
-use thiserror::Error;
+use std::{fs, path::Path};
 
-#[derive(Debug, Error)]
-pub enum WorktreeError {
-    #[error("invalid task id")]
-    InvalidTaskId,
-    #[error("task has no verified claim")]
-    NotClaimed,
-    #[error("worktree conflict: {0}")]
-    Conflict(&'static str),
-    #[error("git operation failed: {0}")]
-    Git(&'static str),
-    #[error("remote base fetch failed; dispatch held (no stale local fallback)")]
-    BaseFetch,
-    #[error(transparent)]
-    Io(#[from] std::io::Error),
-    #[error(transparent)]
-    State(#[from] StateError),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum WorktreeResult {
-    Created(WorktreeIdentity),
-    Existing(WorktreeIdentity),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WorktreeInspection {
-    UnverifiedPathPresent,
-    UnverifiedPathAbsent,
-    IdentityMatches,
-    IdentityMismatch,
-}
-
+mod types;
+pub use types::{WorktreeError, WorktreeInspection, WorktreeResult};
+mod git;
+pub(crate) use git::check_root;
+use git::*;
+mod recovery;
 /// A never-dispatched worker must start on its exact clean saved tip, rather
 /// than the descendant tip accepted when reconciling an already-run worker.
 pub fn verify_never_dispatched(
@@ -200,246 +168,6 @@ pub fn inspect_record(
     }
 }
 
-fn git(dir: &Path, args: &[&str]) -> Result<Output, WorktreeError> {
-    Ok(Command::new("git")
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_COMMON_DIR")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .output()?)
-}
-
-fn read_git(dir: &Path, args: &[&str]) -> Result<String, WorktreeError> {
-    let out = git(dir, args)?;
-    if !out.status.success() {
-        return Err(WorktreeError::Git("read failed"));
-    }
-    String::from_utf8(out.stdout)
-        .map(|s| s.trim().to_owned())
-        .map_err(|_| WorktreeError::Git("invalid UTF-8"))
-}
-
-fn repo_from_url(url: &str) -> Option<&str> {
-    let path = if let Some((_, path)) = url.split_once("://") {
-        let (_, path) = path.split_once('/')?;
-        path
-    } else if let Some((_, path)) = url.split_once(':') {
-        path
-    } else {
-        return None;
-    };
-    Some(path.strip_suffix(".git").unwrap_or(path))
-}
-
-fn common_directory(dir: &Path) -> Result<PathBuf, WorktreeError> {
-    let path = PathBuf::from(read_git(dir, &["rev-parse", "--git-common-dir"])?);
-    Ok(fs::canonicalize(if path.is_absolute() {
-        path
-    } else {
-        dir.join(path)
-    })?)
-}
-
-fn validate_checkout(mapping: &Mapping) -> Result<(PathBuf, PathBuf, String), WorktreeError> {
-    let checkout = fs::canonicalize(&mapping.checkout)?;
-    if Path::new(&read_git(&checkout, &["rev-parse", "--show-toplevel"])?) != checkout {
-        return Err(WorktreeError::Conflict(
-            "checkout is not the repository root",
-        ));
-    }
-    let git_dir = common_directory(&checkout)?;
-    let origin = read_git(&checkout, &["remote", "get-url", "origin"])?;
-    if repo_from_url(&origin) != Some(mapping.code_repository.as_str()) {
-        return Err(WorktreeError::Conflict(
-            "checkout origin differs from code repository",
-        ));
-    }
-    let remote = if mapping.push_remote.contains(':') || mapping.push_remote.contains('/') {
-        mapping.push_remote.clone()
-    } else {
-        read_git(&checkout, &["remote", "get-url", &mapping.push_remote])?
-    };
-    if ![
-        mapping.code_repository.as_str(),
-        mapping.allowed_pr_head_repository.as_str(),
-    ]
-    .contains(&repo_from_url(&remote).unwrap_or_default())
-    {
-        return Err(WorktreeError::Conflict(
-            "push remote differs from mapped repositories",
-        ));
-    }
-    if !git(
-        &checkout,
-        &[
-            "check-ref-format",
-            &format!("refs/heads/{}", mapping.base_branch),
-        ],
-    )?
-    .status
-    .success()
-    {
-        return Err(WorktreeError::Conflict("invalid base branch ref"));
-    }
-    Ok((checkout, git_dir, remote))
-}
-
-#[cfg(target_os = "macos")]
-fn system_alias(path: &Path, metadata: &fs::Metadata) -> Result<bool, WorktreeError> {
-    use std::os::unix::fs::MetadataExt;
-    let target = match path.to_str() {
-        Some("/var") => Path::new("private/var"),
-        Some("/tmp") => Path::new("private/tmp"),
-        Some("/etc") => Path::new("private/etc"),
-        _ => return Ok(false),
-    };
-    Ok(metadata.uid() == 0 && fs::read_link(path)? == target)
-}
-
-fn validate_root_components(root: &Path) -> Result<(), WorktreeError> {
-    if !root.is_absolute()
-        || root
-            .components()
-            .any(|part| matches!(part, Component::CurDir | Component::ParentDir))
-    {
-        return Err(WorktreeError::Conflict("invalid worktree root path"));
-    }
-    for ancestor in root.ancestors().collect::<Vec<_>>().into_iter().rev() {
-        match fs::symlink_metadata(ancestor) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                #[cfg(target_os = "macos")]
-                if system_alias(ancestor, &metadata)? {
-                    continue;
-                }
-                return Err(WorktreeError::Conflict("worktree root contains a symlink"));
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
-            Err(error) => return Err(error.into()),
-        }
-    }
-    Ok(())
-}
-
-fn normalized_root(root: &Path) -> Result<PathBuf, WorktreeError> {
-    validate_root_components(root)?;
-    let existing = root
-        .ancestors()
-        .find(|ancestor| ancestor.exists())
-        .ok_or(WorktreeError::Conflict("invalid worktree root path"))?;
-    let canonical = fs::canonicalize(existing)?;
-    Ok(canonical.join(
-        root.strip_prefix(existing)
-            .expect("ancestor must be a prefix of root"),
-    ))
-}
-
-#[cfg(unix)]
-fn file_identity(path: &Path) -> Result<(u64, u64), WorktreeError> {
-    use std::os::unix::fs::MetadataExt;
-    let metadata = fs::metadata(path)?;
-    Ok((metadata.dev(), metadata.ino()))
-}
-
-/// Reject a replaced directory before asking Git to discover its repository.
-/// Otherwise Git may fail generically or discover an unrelated parent checkout.
-#[cfg(unix)]
-fn verify_path_identity(expected: &WorktreeIdentity) -> Result<(), WorktreeError> {
-    use std::os::unix::fs::MetadataExt;
-    let metadata = fs::symlink_metadata(&expected.path)?;
-    if !metadata.is_dir() || metadata.dev() != expected.device || metadata.ino() != expected.inode {
-        return Err(WorktreeError::Conflict(
-            "worktree repository, path or branch changed",
-        ));
-    }
-    Ok(())
-}
-
-fn identity(
-    path: &Path,
-    intent: &WorktreeIntent,
-    git_dir: &Path,
-    remote: &str,
-) -> Result<WorktreeIdentity, WorktreeError> {
-    let canonical = fs::canonicalize(path)?;
-    let (device, inode) = file_identity(path)?;
-    let actual_git_dir = common_directory(path)?;
-    let branch = read_git(path, &["symbolic-ref", "--quiet", "HEAD"])?;
-    let head = read_git(path, &["rev-parse", "HEAD"])?;
-    let top = read_git(path, &["rev-parse", "--show-toplevel"])?;
-    if canonical != intent.path
-        || top != canonical
-        || actual_git_dir != git_dir
-        || branch != format!("refs/heads/{}", intent.branch)
-    {
-        return Err(WorktreeError::Conflict(
-            "worktree repository, path or branch changed",
-        ));
-    }
-    Ok(WorktreeIdentity {
-        path: canonical,
-        device,
-        inode,
-        branch: intent.branch.clone(),
-        base: intent.base.clone(),
-        base_commit: intent.base_commit.clone(),
-        head,
-        repository: intent.repository.clone(),
-        git_directory: actual_git_dir,
-        remote: remote.to_owned(),
-    })
-}
-
-fn validate_task_id(task_id: &str) -> Result<(), WorktreeError> {
-    if task_id.is_empty()
-        || task_id.len() > 128
-        || !task_id
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-        || task_id.starts_with('-')
-    {
-        return Err(WorktreeError::InvalidTaskId);
-    }
-    Ok(())
-}
-
-pub(crate) fn check_root(root: &Path) -> Result<PathBuf, WorktreeError> {
-    let normalized = normalized_root(root)?;
-    match fs::symlink_metadata(root) {
-        Ok(meta) if !meta.is_dir() || meta.file_type().is_symlink() => {
-            return Err(WorktreeError::Conflict(
-                "worktree root is not a real directory",
-            ));
-        }
-        Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error.into()),
-    }
-    Ok(normalized)
-}
-
-fn check_new_worktree(checkout: &Path, intent: &WorktreeIntent) -> Result<(), WorktreeError> {
-    if intent.path.starts_with(checkout) || checkout.starts_with(&intent.path) {
-        return Err(WorktreeError::Conflict("worktree path overlaps checkout"));
-    }
-    match fs::symlink_metadata(&intent.path) {
-        Ok(_) => return Err(WorktreeError::Conflict("worktree path already exists")),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error.into()),
-    }
-    let branch_ref = format!("refs/heads/{}", intent.branch);
-    let branch_check = git(checkout, &["show-ref", "--verify", "--quiet", &branch_ref])?;
-    if branch_check.status.code() != Some(1) {
-        return Err(WorktreeError::Conflict(
-            "branch exists or cannot be checked",
-        ));
-    }
-    Ok(())
-}
-
 /// Checks worktree feasibility without creating files, branches, or Git worktrees.
 pub fn preflight(
     task_id: &str,
@@ -462,7 +190,7 @@ pub fn preflight(
 }
 
 /// Returns existing evidence only after comparing it to the current filesystem and Git identity.
-/// An unfinished intent is never retried or inferred complete from Git state.
+/// An unfinished intent is completed only at its exact clean pinned base.
 pub fn ensure_worktree(
     store: &mut StateStore,
     task_id: &str,
@@ -494,7 +222,9 @@ pub fn ensure_worktree_with_hooks(
     };
     let (checkout, git_dir, remote) = validate_checkout(mapping)?;
     if let Some(record) = worktree_records::worktree_record(store, task_id)? {
-        return reuse_worktree(store, task_id, record, &intent, &git_dir, &remote);
+        return reuse_worktree(
+            store, task_id, record, &intent, &checkout, &git_dir, &remote,
+        );
     }
     check_new_worktree(&checkout, &intent)?;
     intent.base_commit = Some(match fetch_base(&checkout, mapping, task_id) {
@@ -548,6 +278,7 @@ fn reuse_worktree(
     task_id: &str,
     record: WorktreeRecord,
     intent: &WorktreeIntent,
+    checkout: &Path,
     git_dir: &Path,
     remote: &str,
 ) -> Result<WorktreeResult, WorktreeError> {
@@ -559,10 +290,7 @@ fn reuse_worktree(
         ));
     }
     let Some(expected) = record.identity else {
-        task_records::set_task_phase(store, task_id, "held")?;
-        return Err(WorktreeError::Conflict(
-            "unfinished worktree intent requires inspection",
-        ));
+        return recovery::recover_intent(store, task_id, &record.intent, checkout, git_dir, remote);
     };
     let result = identity(&intent.path, &record.intent, git_dir, remote);
     match result {
@@ -573,79 +301,4 @@ fn reuse_worktree(
             "persisted worktree identity differs from disk",
         )),
     }
-}
-
-fn create_worktree_root(
-    worktree_root: &Path,
-    root: &Path,
-    after_root_created: impl FnOnce(),
-) -> Result<(), WorktreeError> {
-    if check_root(worktree_root)? != root {
-        return Err(WorktreeError::Conflict("worktree root changed"));
-    }
-    fs::create_dir_all(worktree_root)?;
-    after_root_created();
-    if check_root(worktree_root)? != root || fs::canonicalize(worktree_root)? != root {
-        return Err(WorktreeError::Conflict("worktree root changed"));
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(root, fs::Permissions::from_mode(0o700))?;
-    }
-    Ok(())
-}
-
-fn add_worktree(checkout: &Path, intent: &WorktreeIntent) -> Result<(), WorktreeError> {
-    let output = git(
-        checkout,
-        &[
-            "worktree",
-            "add",
-            "-b",
-            &intent.branch,
-            intent
-                .path
-                .to_str()
-                .ok_or(WorktreeError::Conflict("non-UTF8 worktree path"))?,
-            intent
-                .base_commit
-                .as_deref()
-                .ok_or(WorktreeError::Conflict(
-                    "new worktree has no fetched base commit",
-                ))?,
-        ],
-    )?;
-    if !output.status.success() {
-        return Err(WorktreeError::Git("worktree add failed"));
-    }
-    Ok(())
-}
-
-/// Pin each task's fetch in its own ref: FETCH_HEAD and remote-tracking refs can
-/// be changed by another dispatch. Never update the operator's local base branch.
-fn fetch_base(checkout: &Path, mapping: &Mapping, task_id: &str) -> Result<String, WorktreeError> {
-    let source = format!("refs/heads/{}", mapping.base_branch);
-    let target = format!("refs/luthor/task-bases/{task_id}");
-    let refspec = format!("+{source}:{target}");
-    let output = git(
-        checkout,
-        &[
-            "fetch",
-            "--no-tags",
-            "--no-write-fetch-head",
-            "--",
-            &mapping.push_remote,
-            &refspec,
-        ],
-    )
-    .map_err(|_| WorktreeError::BaseFetch)?;
-    if !output.status.success() {
-        return Err(WorktreeError::BaseFetch);
-    }
-    read_git(
-        checkout,
-        &["rev-parse", "--verify", &format!("{target}^{{commit}}")],
-    )
-    .map_err(|_| WorktreeError::BaseFetch)
 }

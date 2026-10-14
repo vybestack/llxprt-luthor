@@ -31,7 +31,13 @@ pub(crate) fn source_reconcile_observes_claim_intent_without_attempt_or_assignme
     assert_eq!(report.project_membership, Some(true));
     assert_eq!(report.marker_present, Some(true));
     assert_eq!(report.assignees, Some(vec!["bot".into()]));
-    assert!(report.reasons.contains(&"claim_intent_unverified"));
+    assert!(!report.reasons.contains(&"claim_intent_unverified"));
+    assert_eq!(
+        task_records::source_claim_verified(&store, "task")
+            .unwrap()
+            .as_deref(),
+        Some("bot")
+    );
     assert_eq!(writer.calls, 0);
     assert_eq!(task_records::latest_attempt(&store, "task").unwrap(), None);
     assert_eq!(
@@ -42,7 +48,7 @@ pub(crate) fn source_reconcile_observes_claim_intent_without_attempt_or_assignme
         scheduling::unresolved_sources(&store)
             .unwrap()
             .iter()
-            .any(|(_, kind)| kind == "claim_assignment")
+            .all(|(_, kind)| kind != "claim_assignment")
     );
     let db = Connection::open(dir.path().join("state.sqlite3")).unwrap();
     let observed: String = db
@@ -92,6 +98,7 @@ pub(crate) fn source_reconcile_partial_worktree_and_source_errors_stay_held() {
         "{report:?}"
     );
     assert!(report.reasons.contains(&"worktree_unverified"));
+    assert!(!report.reasons.contains(&"claim_intent_unverified"));
     projects.item.item_id = "other".into();
     let mismatch =
         luthor::coordinator::reconcile_source(&mut store, "task", &mut projects).unwrap();

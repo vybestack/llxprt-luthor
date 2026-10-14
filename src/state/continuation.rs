@@ -210,7 +210,8 @@ fn validate_proof_scope(
         .collect();
     let evidence_kinds: Vec<_> = evidence
         .iter()
-        .filter(|r| r.2 != "held_reason" && r.2 != KIND)
+        // Source observations, like hold reasons, are not dispatch authority.
+        .filter(|r| r.2 != "held_reason" && r.2 != "source_observation" && r.2 != KIND)
         .map(|r| r.2.as_str())
         .collect();
     if intent_kinds != ["claim_assignment", "worktree_create", "launch"]

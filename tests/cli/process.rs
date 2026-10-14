@@ -217,7 +217,7 @@ esac
     assert_eq!(report["marker_present"], true);
     assert_eq!(report["assignees"], serde_json::json!(["agent"]));
     assert!(
-        report["reasons"]
+        !report["reasons"]
             .as_array()
             .unwrap()
             .contains(&serde_json::json!("claim_intent_unverified"))
@@ -239,7 +239,15 @@ esac
         Some("held")
     );
     assert_eq!(
-        scheduling::unresolved_sources(&store).unwrap()[0].1,
-        "claim_assignment"
+        task_records::source_claim_verified(&store, "task")
+            .unwrap()
+            .as_deref(),
+        Some("agent")
+    );
+    assert!(
+        scheduling::unresolved_sources(&store)
+            .unwrap()
+            .iter()
+            .all(|(_, kind)| kind != "claim_assignment")
     );
 }

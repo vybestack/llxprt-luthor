@@ -148,3 +148,12 @@ fn audited_pr_completion_missing_any_recovery_evidence_is_not_terminal() {
 fn exit_lookup_capacity_uses_latest_evidence_only() {
     state::recovery::exit_lookup_capacity_uses_latest_evidence_only();
 }
+
+#[test]
+fn v3_migration_preserves_history_foreign_keys_and_abandoned_reselection() {
+    state::migrations::v3_migration_preserves_history_foreign_keys_and_abandoned_reselection();
+}
+#[test]
+fn failed_v3_migration_rolls_back_every_table_and_version() {
+    state::migrations::failed_v3_migration_rolls_back_every_table_and_version();
+}

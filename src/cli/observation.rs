@@ -111,8 +111,8 @@ fn source_summary(observation: &Observation<'_>, payload: &str) -> Option<Value>
     let source = serde_json::from_value::<SourceObservation>(value).ok()?;
     if source.task_id != observation.task
         || observation.attempt.is_some()
-        || source.status != "held"
-        || source.reasons.is_empty()
+        || !matches!(source.status.as_str(), "held" | "verified")
+        || (source.status == "held" && source.reasons.is_empty())
         || source
             .reasons
             .iter()
@@ -122,6 +122,13 @@ fn source_summary(observation: &Observation<'_>, payload: &str) -> Option<Value>
     }
     let seconds = observation.recorded_secs?;
     let observed_at_utc = utc(observation.conn, seconds)?;
+    if source.status == "verified" && source.reasons.is_empty() {
+        return Some(
+            json!({"stage":observation.stage,"attempt_id":null,"category":"verified",
+            "observed_at_utc":observed_at_utc,"observed_at_unix_secs":seconds,
+            "code":null,"http_status":null}),
+        );
+    }
     let code = if source
         .reasons
         .iter()
