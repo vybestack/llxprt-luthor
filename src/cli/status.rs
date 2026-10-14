@@ -99,6 +99,7 @@ fn present_task(conn: &Connection, root: &Path, saved: &mut StatusTask) -> Resul
     let active_attempt = &saved.active_attempt;
     let task = &mut saved.output;
     super::checks::present(conn, task_id, task)?;
+    super::retry_outcome::present(conn, task_id, task)?;
     task["worker_build"] = super::history::worker_build(conn, task_id)?;
     task["cleanup_failure"] = json!(super::history::cleanup_failure(conn, task_id)?);
     task["verified_pr"] = Value::Null;

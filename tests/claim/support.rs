@@ -298,6 +298,7 @@ fn fixture_config(root: &std::path::Path) -> Config {
         state_root: root.into(),
         worktree_root: root.join("worktrees"),
         capacity: 1,
+        retry_policy: Default::default(),
         cleanup: luthor::config::CleanupPolicy::disabled(),
         min_free_space_bytes: 0,
         assignment_login: "bot".into(),

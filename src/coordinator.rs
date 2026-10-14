@@ -1,5 +1,10 @@
 use crate::state::{launches, scheduling, task_records};
 mod active;
+mod auto_retry;
+pub use auto_retry::{
+    AutoRetryDependencies, AutoRetryReport, OutcomeObservation, RetryDecision, RetryObservation,
+    WorkerOutcome, retry_attention_tasks,
+};
 mod failed_checks;
 mod notes;
 pub use notes::TaskNote;
@@ -230,7 +235,7 @@ where
     L: SupervisorLauncher,
     I: IdCreator,
 {
-    let d = dependencies;
+    let mut d = dependencies;
     let mut report = ScheduleReport {
         startup,
         ..Default::default()
@@ -238,17 +243,7 @@ where
     if report.startup.scheduling_blocked() {
         return Ok(report);
     }
-    source_dispatch::dispatch_reconciled_sources(
-        store,
-        &mut report,
-        source_dispatch::SourceDispatchDependencies {
-            config: d.config,
-            projects: d.projects,
-            prs: d.prs,
-            launcher: d.launcher,
-            ids: d.ids,
-        },
-    )?;
+    schedule_continuations(store, &mut report, &mut d)?;
     let mut seen = HashSet::new();
     for candidate in candidates {
         let identity = (
@@ -291,6 +286,45 @@ where
         report.launched.push(plan);
     }
     Ok(report)
+}
+
+fn schedule_continuations<P, Q, W, L, I>(
+    store: &mut StateStore,
+    report: &mut ScheduleReport,
+    d: &mut ScheduleDependencies<'_, P, Q, W, L, I>,
+) -> Result<(), ScheduleError>
+where
+    P: ProjectReader,
+    Q: PullRequestReader,
+    W: AssignmentWriter,
+    L: SupervisorLauncher,
+    I: IdCreator,
+{
+    let retries = retry_attention_tasks(
+        store,
+        AutoRetryDependencies {
+            config: d.config,
+            config_revision: d.config_revision,
+            projects: d.projects,
+            prs: d.prs,
+            launcher: d.launcher,
+            ids: d.ids,
+        },
+    )?;
+    report.automatic_retries = retries.observations;
+    report.launched.extend(retries.launched);
+    source_dispatch::dispatch_reconciled_sources(
+        store,
+        report,
+        source_dispatch::SourceDispatchDependencies {
+            config: d.config,
+            projects: d.projects,
+            prs: d.prs,
+            launcher: d.launcher,
+            ids: d.ids,
+        },
+    )?;
+    Ok(())
 }
 
 fn record_dispatch_space(

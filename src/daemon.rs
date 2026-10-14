@@ -275,7 +275,7 @@ fn print_schedule_report(report: &ScheduleReport, cleanup: &crate::cleanup::Clea
         "{}",
         json!({"mode":"execute", "cleanup":cleanup, "reconciliation":attempts,
         "source_holds":report.startup.source_holds.iter().map(|hold| json!({"task_id":hold.task_id,"kind":hold.kind})).collect::<Vec<_>>(),
-        "pr_repair":report.pr_repair,
+        "pr_repair":report.pr_repair, "automatic_retries":report.automatic_retries,
         "candidate_read_failures":report.candidate_read_failures,
         "source_read_failures":report.source_read_failures,
         "launched":report.launched.iter().map(|plan| json!({"task_id":plan.task_id,"attempt_id":plan.attempt_id})).collect::<Vec<_>>(),

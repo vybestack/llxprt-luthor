@@ -706,3 +706,63 @@ fn mapping_required_checks_rejects_malformed_or_ambiguous_policies() {
         );
     }
 }
+
+#[test]
+fn retry_policy_defaults_disabled_and_round_trips_a_bounded_opt_in() {
+    use luthor::config::{RetryPolicy, TransientFailure};
+    assert_eq!(
+        Config::from_json(valid()).unwrap().retry_policy,
+        RetryPolicy::Disabled {}
+    );
+    let mut value: serde_json::Value = serde_json::from_str(valid()).unwrap();
+    value["retry_policy"] = serde_json::json!({"kind":"bounded","max_attempts":3,"backoff_secs":90,
+        "classes":["rate_limit","transient_server","connectivity"]});
+    let config = Config::from_json(&value.to_string()).unwrap();
+    assert_eq!(
+        config.retry_policy,
+        RetryPolicy::Bounded {
+            max_attempts: 3,
+            backoff_secs: 90,
+            classes: vec![
+                TransientFailure::RateLimit,
+                TransientFailure::TransientServer,
+                TransientFailure::Connectivity
+            ]
+        }
+    );
+    assert_eq!(
+        Config::from_json(&serde_json::to_string(&config).unwrap())
+            .unwrap()
+            .retry_policy,
+        config.retry_policy
+    );
+    value["retry_policy"] = serde_json::json!({"kind":"disabled"});
+    assert_eq!(
+        Config::from_json(&value.to_string()).unwrap().retry_policy,
+        RetryPolicy::Disabled {}
+    );
+}
+
+#[test]
+fn retry_policy_rejects_unbounded_ambiguous_and_unknown_configuration() {
+    let mut value: serde_json::Value = serde_json::from_str(valid()).unwrap();
+    for policy in [
+        serde_json::json!({"kind":"bounded","max_attempts":1,"backoff_secs":60,"classes":["connectivity"]}),
+        serde_json::json!({"kind":"bounded","max_attempts":3,"backoff_secs":0,"classes":["connectivity"]}),
+        serde_json::json!({"kind":"bounded","max_attempts":3,"backoff_secs":60,"classes":[]}),
+        serde_json::json!({"kind":"bounded","max_attempts":3,"backoff_secs":60,"classes":["connectivity","connectivity"]}),
+        serde_json::json!({"kind":"bounded","max_attempts":3,"backoff_secs":60,"classes":["timeout"]}),
+        serde_json::json!({"kind":"bounded","max_attempts":3,"backoff_secs":60,"classes":["quota_exhausted"]}),
+        serde_json::json!({"kind":"bounded","max_attempts":3,"backoff_secs":60,"classes":["connectivity"],"fallback":true}),
+        serde_json::json!({"kind":"bounded","backoff_secs":60,"classes":["connectivity"]}),
+        serde_json::json!({"kind":"disabled","max_attempts":3}),
+        serde_json::json!({"kind":"unlimited"}),
+    ] {
+        value["retry_policy"] = policy;
+        assert!(
+            Config::from_json(&value.to_string()).is_err(),
+            "{}",
+            value["retry_policy"]
+        );
+    }
+}
