@@ -68,13 +68,24 @@ pub(crate) fn error(
     }
 }
 
+/// A verified failed job may belong to a workflow that cannot be rerun yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailedJobsRerun {
+    Pending,
+    Accepted,
+}
+
 pub trait PrHealthReader: PullRequestReader {
-    fn rerun_failed_jobs(
+    /// Validate identity and the exact run/head/repository before calling
+    /// `before_post` to persist intent. Pending runs call neither it nor POST.
+    /// An intent error must prevent POST; Accepted means GitHub accepted POST.
+    fn rerun_failed_jobs<E: From<LookupError>>(
         &mut self,
         repository: &str,
         run_id: u64,
         head: &str,
-    ) -> Result<(), LookupError>;
+        before_post: impl FnOnce() -> Result<(), E>,
+    ) -> Result<FailedJobsRerun, E>;
     fn failed_job_logs(&mut self, repository: &str, job_id: u64) -> Result<String, LookupError>;
     fn health(
         &mut self,

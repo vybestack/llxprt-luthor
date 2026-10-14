@@ -1,5 +1,5 @@
 //! Actions reruns are writes: freshly verify identity and exact head first.
-use super::types::{ErrorCategory, LookupError, error};
+use super::types::{ErrorCategory, FailedJobsRerun, LookupError, error};
 use serde_json::Value;
 use std::{
     io::Read,
@@ -7,26 +7,32 @@ use std::{
     process::{Command, Stdio},
 };
 
-pub(crate) fn rerun(
+pub(crate) fn rerun<E: From<LookupError>>(
     executable: &Path,
     repository: &str,
     run: u64,
     head: &str,
     mut api: impl FnMut(&[&str]) -> Result<Value, LookupError>,
-) -> Result<(), LookupError> {
+    before_post: impl FnOnce() -> Result<(), E>,
+) -> Result<FailedJobsRerun, E> {
     let user = api(&["api", "user"])?;
     if user["login"].as_str() != Some("acoliver") {
-        return Err(error(ErrorCategory::Permission, "identity-mismatch", None));
+        return Err(error(ErrorCategory::Permission, "identity-mismatch", None).into());
     }
     let path = format!("repos/{repository}/actions/runs/{run}");
     let evidence = api(&["api", &path])?;
     if evidence["id"].as_u64() != Some(run)
         || evidence["head_sha"].as_str() != Some(head)
         || evidence["repository"]["full_name"].as_str() != Some(repository)
-        || evidence["status"].as_str() != Some("completed")
     {
-        return Err(error(ErrorCategory::Malformed, "invalid-failed-run", None));
+        return Err(error(ErrorCategory::Malformed, "invalid-failed-run", None).into());
     }
+    match evidence["status"].as_str() {
+        Some("queued" | "in_progress") => return Ok(FailedJobsRerun::Pending),
+        Some("completed") => {}
+        _ => return Err(error(ErrorCategory::Malformed, "invalid-failed-run", None).into()),
+    }
+    before_post()?;
     let status = Command::new(executable)
         .args([
             "api",
@@ -39,9 +45,9 @@ pub(crate) fn rerun(
         .status()
         .map_err(|_| error(ErrorCategory::Transport, "rerun-command-failed", None))?;
     if !status.success() {
-        return Err(error(ErrorCategory::Unknown, "rerun-command-failed", None));
+        return Err(error(ErrorCategory::Unknown, "rerun-command-failed", None).into());
     }
-    Ok(())
+    Ok(FailedJobsRerun::Accepted)
 }
 
 /// Bound the excerpt in memory; the gh process drains normally rather than

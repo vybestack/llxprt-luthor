@@ -30,9 +30,9 @@ mod merge_write_tests;
 
 use evidence::parse_evidence;
 pub use reader::GhPullRequestReader;
-pub use types::PrHealthReader;
 use types::error;
 pub use types::{ErrorCategory, LookupError, LookupResult, PullRequestEvidence, PullRequestReader};
+pub use types::{FailedJobsRerun, PrHealthReader};
 
 pub fn lookup<R: PullRequestReader>(
     reader: &mut R,

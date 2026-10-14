@@ -120,6 +120,7 @@ pub(crate) fn events(conn: &Connection, table: &str, task: &str) -> Result<Vec<V
                 | "cleanup_complete"
                 | "pr_health"
                 | "pr_repair_result"
+                | "pr_failed_jobs_rerun_intent"
                 | "pr_failed_jobs_rerun"
                 | "pr_failed_jobs_rerun_acknowledged"
                 | "pr_repair_pr_lookup"

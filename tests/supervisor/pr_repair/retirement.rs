@@ -496,8 +496,14 @@ impl PullRequestReader for LaggingSearch<'_> {
     }
 }
 impl PrHealthReader for LaggingSearch<'_> {
-    fn rerun_failed_jobs(&mut self, a: &str, b: u64, c: &str) -> Result<(), LookupError> {
-        self.open.rerun_failed_jobs(a, b, c)
+    fn rerun_failed_jobs<E: From<LookupError>>(
+        &mut self,
+        a: &str,
+        b: u64,
+        c: &str,
+        before_post: impl FnOnce() -> Result<(), E>,
+    ) -> Result<FailedJobsRerun, E> {
+        self.open.rerun_failed_jobs(a, b, c, before_post)
     }
     fn failed_job_logs(&mut self, a: &str, b: u64) -> Result<String, LookupError> {
         self.open.failed_job_logs(a, b)

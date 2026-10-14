@@ -7,7 +7,7 @@ use luthor::{
 use serde_json::{Value, json};
 use std::os::unix::fs::PermissionsExt;
 
-fn configure_gh(f: &mut Fixture) {
+pub(super) fn configure_gh(f: &mut Fixture) {
     let gh = f._dir.path().join("gh");
     fs::write(&gh, r#"#!/bin/sh
 printf '%s\n' "$*" >> "$0.calls"
@@ -27,7 +27,7 @@ esac
     health_page(f, 1, "FAILURE");
 }
 
-fn health_page(f: &Fixture, attempt: u64, conclusion: &str) {
+pub(super) fn health_page(f: &Fixture, attempt: u64, conclusion: &str) {
     let gh = &f.prs.gh_health.as_ref().unwrap().executable;
     let check = |name: &str, result: &str| {
         json!({

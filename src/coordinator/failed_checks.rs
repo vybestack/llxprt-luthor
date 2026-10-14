@@ -1,7 +1,7 @@
 //! Rerun each failed Actions run once for this verified head, before coding.
 use super::ports::DispatchError;
 use crate::{
-    github::pull_request::{PrHealth, PrHealthReader},
+    github::pull_request::{FailedJobsRerun, PrHealth, PrHealthReader},
     model::VerifiedOpenPr,
     state::{StateStore, journal, task_records},
 };
@@ -99,7 +99,7 @@ pub(crate) fn inspect(
 }
 
 fn recorded(store: &StateStore, task: &str, head: &str) -> Result<Vec<Rerun>, DispatchError> {
-    let values: Vec<String> = store.connection.prepare("SELECT payload FROM evidence WHERE task_id=?1 AND kind='pr_failed_jobs_rerun' AND json_extract(payload,'$.head')=?2").map_err(crate::model::StateError::from)?.query_map(params![task, head], |row| row.get(0)).map_err(crate::model::StateError::from)?.collect::<Result<_, _>>().map_err(crate::model::StateError::from)?;
+    let values: Vec<String> = store.connection.prepare("SELECT DISTINCT payload FROM evidence WHERE task_id=?1 AND kind IN ('pr_failed_jobs_rerun_intent','pr_failed_jobs_rerun') AND json_extract(payload,'$.head')=?2").map_err(crate::model::StateError::from)?.query_map(params![task, head], |row| row.get(0)).map_err(crate::model::StateError::from)?.collect::<Result<_, _>>().map_err(crate::model::StateError::from)?;
     values.into_iter().map(|payload| {
         let audit: Rerun = serde_json::from_str(&payload).map_err(crate::model::StateError::from)?;
         // A crash or ambiguous POST without acknowledgement never authorizes
@@ -134,21 +134,35 @@ fn rerun_once(
             .map(|j| j.name.clone())
             .collect(),
     };
-    // Intent precedes POST; an ambiguous write is held, never repeated.
+    let payload = serde_json::to_string(&audit).map_err(crate::model::StateError::from)?;
+    let outcome = prs.rerun_failed_jobs(&saved.repository, run_id, &health.head, || {
+        // Only a completed, verified run reaches this point. Persist intent
+        // immediately before POST so an ambiguous write is never repeated.
+        journal::record_evidence(
+            store,
+            task,
+            Some(&saved.attempt_id),
+            "pr_failed_jobs_rerun_intent",
+            &payload,
+        )?;
+        Ok::<(), DispatchError>(())
+    })?;
+    if outcome == FailedJobsRerun::Pending {
+        return Ok(());
+    }
     journal::record_evidence(
         store,
         task,
         Some(&saved.attempt_id),
         "pr_failed_jobs_rerun",
-        &serde_json::to_string(&audit).map_err(crate::model::StateError::from)?,
+        &payload,
     )?;
-    prs.rerun_failed_jobs(&saved.repository, run_id, &health.head)?;
     journal::record_evidence(
         store,
         task,
         Some(&saved.attempt_id),
         "pr_failed_jobs_rerun_acknowledged",
-        &serde_json::to_string(&audit).map_err(crate::model::StateError::from)?,
+        &payload,
     )?;
     Ok(())
 }
