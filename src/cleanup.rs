@@ -6,7 +6,9 @@ use crate::{
     config::{CleanupPolicy, Config},
     github::pull_request::PullRequestReader,
     ownership::{OwnershipError, WorktreeOwner, WorktreeOwnerInternal},
-    state::{StateError, StateStore, cleanup_records, journal, task_records},
+    state::{
+        StateError, StateStore, cleanup_records, journal, merge_followup, pr_merge, task_records,
+    },
     supervisor, worktree,
 };
 use serde::Serialize;
@@ -71,6 +73,9 @@ fn clean_one<Q: PullRequestReader>(
             "unfinished cleanup intent requires operator inspection",
         ));
     }
+    if tracker_closure_outstanding(store, config, task)? {
+        return Ok(false);
+    }
     let saved = cleanup_records::verified_pr(store, task)?;
     verify_configuration(store, config, task)?;
     let owner = match WorktreeOwner::acquire_existing(store.root(), task) {
@@ -126,6 +131,24 @@ fn clean_one<Q: PullRequestReader>(
         &json!({"policy":config.cleanup,"observed_at_unix_secs":observed_at}).to_string(),
     )?;
     Ok(true)
+}
+
+/// A merge Luthor made keeps its task, worktree and branch until the merge
+/// sweep has recorded the tracker closure, even when that step failed in an
+/// earlier cycle and was held rather than failing the cycle.
+fn tracker_closure_outstanding(
+    store: &StateStore,
+    config: &Config,
+    task: &str,
+) -> Result<bool, CleanupError> {
+    if !pr_merge::completed(store, task)? || merge_followup::closure(store, task)?.is_some() {
+        return Ok(false);
+    }
+    let selection =
+        task_records::selection_evidence(store, task)?.ok_or(StateError::InvalidSelection)?;
+    Ok(config.mappings.iter().any(|mapping| {
+        mapping.tracker_repository == selection.candidate.repository && !mapping.merge.is_disabled()
+    }))
 }
 
 fn verify_configuration(

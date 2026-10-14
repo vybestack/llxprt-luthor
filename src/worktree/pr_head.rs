@@ -12,12 +12,7 @@ pub(crate) fn synchronize(
     recorded: &str,
     head: &str,
 ) -> Result<serde_json::Value, WorktreeError> {
-    if ![recorded, head]
-        .iter()
-        .all(|sha| matches!(sha.len(), 40 | 64) && sha.bytes().all(|byte| byte.is_ascii_hexdigit()))
-    {
-        return Err(WorktreeError::Conflict("invalid PR commit SHA"));
-    }
+    require_commit_ids(&[recorded, head])?;
     let before = verify_existing_worktree(store, task)?;
     if !fs::symlink_metadata(before.path.join(".git"))?.is_file() {
         return Err(WorktreeError::Conflict("PR worktree has no .git file"));
@@ -32,18 +27,15 @@ pub(crate) fn synchronize(
     let selection = task_records::selection_evidence(store, task)?
         .ok_or(WorktreeError::Conflict("missing selection"))?;
     let mapping = &selection.candidate.mapping;
-    let head_ref = format!("refs/luthor/pr-heads/{task}");
-    let base_ref = format!("refs/luthor/pr-bases/{task}");
     let (_, _, _) = validate_checkout(mapping)?;
-    fetch(&before.path, &before.remote, &before.branch, &head_ref)?;
-    // The configured base belongs to the code repository, not a permitted fork.
     let origin = read_git(&mapping.checkout, &["remote", "get-url", "origin"])?;
-    fetch(&before.path, &origin, &before.base, &base_ref)?;
-    let fetched_head = read_git(&before.path, &["rev-parse", &head_ref])?;
-    let base = read_git(&before.path, &["rev-parse", &base_ref])?;
-    if fetched_head != head {
-        return Err(WorktreeError::Conflict("fetched PR head changed"));
-    }
+    let base = fetch_lineage(
+        &before,
+        task,
+        (&format!("refs/heads/{}", before.branch), &before.remote),
+        &origin,
+        head,
+    )?;
     let merges = base_merges(&before.path, recorded, head, &base)?;
     if before.head != recorded && !merges.contains(&before.head) {
         return Err(WorktreeError::Conflict(
@@ -54,6 +46,69 @@ pub(crate) fn synchronize(
     Ok(
         serde_json::json!({"recorded_head":recorded,"head":head,"local_before":before.head,"base":base,"merges":merges}),
     )
+}
+
+/// Read-only lineage proof for a PR that GitHub already merged. The head branch
+/// may be deleted by then, so the head comes from the PR's own ref on the code
+/// repository. Nothing in the task worktree is changed.
+pub(crate) fn verify_merged_lineage(
+    store: &StateStore,
+    task: &str,
+    recorded: &str,
+    head: &str,
+    pull_number: u64,
+) -> Result<serde_json::Value, WorktreeError> {
+    require_commit_ids(&[recorded, head])?;
+    let worktree = verify_existing_worktree(store, task)?;
+    let selection = task_records::selection_evidence(store, task)?
+        .ok_or(WorktreeError::Conflict("missing selection"))?;
+    let mapping = &selection.candidate.mapping;
+    let (_, _, _) = validate_checkout(mapping)?;
+    let origin = read_git(&mapping.checkout, &["remote", "get-url", "origin"])?;
+    let base = fetch_lineage(
+        &worktree,
+        task,
+        (&format!("refs/pull/{pull_number}/head"), &origin),
+        &origin,
+        head,
+    )?;
+    let merges = base_merges(&worktree.path, recorded, head, &base)?;
+    Ok(serde_json::json!({"recorded_head":recorded,"head":head,"base":base,"merges":merges}))
+}
+
+/// Fetches the PR head and the configured base into task-private refs and
+/// returns the base tip. The base belongs to the code repository, not a
+/// permitted fork, so it always comes from the checkout's `origin`.
+fn fetch_lineage(
+    worktree: &crate::state::WorktreeIdentity,
+    task: &str,
+    (head_source, head_remote): (&str, &str),
+    origin: &str,
+    head: &str,
+) -> Result<String, WorktreeError> {
+    let head_ref = format!("refs/luthor/pr-heads/{task}");
+    let base_ref = format!("refs/luthor/pr-bases/{task}");
+    fetch(&worktree.path, head_remote, head_source, &head_ref)?;
+    fetch(
+        &worktree.path,
+        origin,
+        &format!("refs/heads/{}", worktree.base),
+        &base_ref,
+    )?;
+    if read_git(&worktree.path, &["rev-parse", &head_ref])? != head {
+        return Err(WorktreeError::Conflict("fetched PR head changed"));
+    }
+    read_git(&worktree.path, &["rev-parse", &base_ref])
+}
+
+fn require_commit_ids(ids: &[&str]) -> Result<(), WorktreeError> {
+    if ids
+        .iter()
+        .all(|sha| matches!(sha.len(), 40 | 64) && sha.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    {
+        return Ok(());
+    }
+    Err(WorktreeError::Conflict("invalid PR commit SHA"))
 }
 
 fn require_clean(path: &Path) -> Result<(), WorktreeError> {
@@ -67,8 +122,8 @@ fn require_clean(path: &Path) -> Result<(), WorktreeError> {
     Ok(())
 }
 
-fn fetch(path: &Path, remote: &str, branch: &str, target: &str) -> Result<(), WorktreeError> {
-    let refspec = format!("+refs/heads/{branch}:{target}");
+fn fetch(path: &Path, remote: &str, source: &str, target: &str) -> Result<(), WorktreeError> {
+    let refspec = format!("+{source}:{target}");
     if !git(
         path,
         &[

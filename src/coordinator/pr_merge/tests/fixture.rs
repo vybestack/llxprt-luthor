@@ -75,6 +75,22 @@ impl Fixture {
         merge_verified_prs(&mut self.store, &self.config, &mut self.prs)
     }
 
+    /// A merge-step error never fails the sweep: the task is held with its
+    /// reason and the error is journaled.
+    pub fn held(&mut self) -> String {
+        let report = self
+            .run()
+            .expect("a merge-step error must not fail the sweep");
+        assert!(report.merged.is_empty() && report.delivered.is_empty());
+        assert_eq!(report.waiting.len(), 1);
+        assert!(
+            journal::evidence_kinds(&self.store, "task")
+                .unwrap()
+                .contains(&"pr_merge_error".into())
+        );
+        report.waiting[0].reason.clone()
+    }
+
     pub fn evidence(&self) -> MergeEvidence {
         let payload: String = self
             .store

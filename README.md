@@ -555,7 +555,15 @@ MERGEABLE and CLEAN. For an owned green BEHIND PR, it first requests a
 head-pinned **merge** of the base, never a rebase or force push, and waits for
 existing lineage verification and checks on the new head. Conflicts go through
 the existing repair path. It journals updates, merges and tracker closure;
-uncertain writes stop the cycle rather than being retried. See
+uncertain writes are never retried. A merge-step failure for one task (an
+unreadable or changed PR, an uncertain write, a refused closure) is journaled
+as `pr_merge_error`, reported under `pr_merge.waiting` with its reason and
+holds only that task: the cycle still exits 0 and schedules other work. A
+verified PR that was merged outside Luthor after its head advanced is recorded
+as delivered (`pr_merged` retirement, reported under `pr_merge.delivered`) only
+when its identity is unchanged and the head moved purely by merges of the
+configured base from the saved verified head; any other change holds the
+task. Luthor writes no merge evidence for a merge it did not make. See
 [merge policy and recovery](dev-docs/config-and-state.md#opt-in-verified-head-merging-issue-40)
 for named/GitHub-required check rules, draft promotion, evidence and recovery.
 This does not enable merging in any operator config or bypass hosted CI or

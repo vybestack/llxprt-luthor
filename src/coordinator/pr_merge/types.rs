@@ -20,6 +20,8 @@ pub enum MergeError {
 pub struct MergeReport {
     pub merged: Vec<String>,
     pub waiting: Vec<crate::coordinator::notes::TaskNote>,
+    /// Merged by someone else, with the delivery verified and the task retired.
+    pub delivered: Vec<crate::coordinator::notes::TaskNote>,
 }
 
 pub(crate) fn now() -> Result<u64, MergeError> {
