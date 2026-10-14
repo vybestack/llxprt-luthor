@@ -3,7 +3,7 @@
 use super::*;
 use luthor::{
     coordinator::repair_verified_prs,
-    github::pull_request::{PrHealth, PrHealthReader},
+    github::pull_request::{FailedJobsRerun, PrHealth, PrHealthReader},
     pr_repair::{MAX_PR_REPAIRS, REPAIR_RESULT_FILE},
     state::{journal, scheduling, task_records, worktree_records},
 };
@@ -44,19 +44,27 @@ impl PullRequestReader for RepairPr {
     }
 }
 impl PrHealthReader for RepairPr {
-    fn rerun_failed_jobs(&mut self, repo: &str, run: u64, head: &str) -> Result<(), LookupError> {
+    fn rerun_failed_jobs<E: From<LookupError>>(
+        &mut self,
+        repo: &str,
+        run: u64,
+        head: &str,
+        before_post: impl FnOnce() -> Result<(), E>,
+    ) -> Result<FailedJobsRerun, E> {
         self.reruns += 1;
         if let Some(gh) = &mut self.gh_health {
-            return gh.rerun_failed_jobs(repo, run, head);
+            return gh.rerun_failed_jobs(repo, run, head, before_post);
         }
+        before_post()?;
         if self.rerun_error {
             return Err(LookupError {
                 category: ErrorCategory::Transport,
                 code: "offline",
                 status: None,
-            });
+            }
+            .into());
         }
-        Ok(())
+        Ok(FailedJobsRerun::Accepted)
     }
     fn failed_job_logs(&mut self, repo: &str, job: u64) -> Result<String, LookupError> {
         if let Some(gh) = &mut self.gh_health {
@@ -750,6 +758,7 @@ fn unacknowledged_job_rerun_intent_holds_instead_of_repeating_post() {
 
 mod configured_checks;
 mod history;
+mod pending_runs;
 mod retirement;
 
 #[test]

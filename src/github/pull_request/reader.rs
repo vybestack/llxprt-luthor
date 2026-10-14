@@ -191,15 +191,21 @@ fn status_value(value: &Value) -> Option<u16> {
         .or_else(|| value.as_u64().and_then(|s| u16::try_from(s).ok()))
 }
 impl PrHealthReader for GhPullRequestReader {
-    fn rerun_failed_jobs(
+    fn rerun_failed_jobs<E: From<LookupError>>(
         &mut self,
         repository: &str,
         run_id: u64,
         head: &str,
-    ) -> Result<(), LookupError> {
-        super::job_reader::rerun(&self.executable, repository, run_id, head, |args| {
-            self.api(args)
-        })
+        before_post: impl FnOnce() -> Result<(), E>,
+    ) -> Result<super::FailedJobsRerun, E> {
+        super::job_reader::rerun(
+            &self.executable,
+            repository,
+            run_id,
+            head,
+            |args| self.api(args),
+            before_post,
+        )
     }
     fn failed_job_logs(&mut self, repository: &str, job_id: u64) -> Result<String, LookupError> {
         super::job_reader::logs(&self.executable, repository, job_id)

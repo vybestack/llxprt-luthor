@@ -208,7 +208,13 @@ impl PullRequestReader for FakePrs {
     }
 }
 impl PrHealthReader for FakePrs {
-    fn rerun_failed_jobs(&mut self, _: &str, _: u64, _: &str) -> Result<(), LookupError> {
+    fn rerun_failed_jobs<E: From<LookupError>>(
+        &mut self,
+        _: &str,
+        _: u64,
+        _: &str,
+        _: impl FnOnce() -> Result<(), E>,
+    ) -> Result<crate::github::pull_request::FailedJobsRerun, E> {
         panic!("merge cannot rerun jobs")
     }
     fn failed_job_logs(&mut self, _: &str, _: u64) -> Result<String, LookupError> {
