@@ -125,6 +125,7 @@ fn commit(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecoveryResult {
     RecoveredHeld,
+    RecoveredAttention,
     RecoveredPrComplete { pr_id: u64 },
     Held(String),
 }

@@ -91,7 +91,6 @@ where
         return Err(SupervisorError::Conflict);
     }
     let logs = LogCapture::open(store_root, plan)?;
-    let mut child = spawn_gated_worker(plan, store_root, binary, control.is_some(), owner)?;
     if control.is_some() {
         let root = store_root.parent().ok_or(SupervisorError::Conflict)?;
         let db = rusqlite::Connection::open_with_flags(
@@ -101,7 +100,14 @@ where
         owner
             .verify_protocol(&db, root, &plan.task_id, &plan.attempt_id)
             .map_err(|_| SupervisorError::Conflict)?;
+        match super::dispatch_abort::require_coordinator() {
+            Err(SupervisorError::GateClosed) => {
+                return Err(super::dispatch_abort::record(store_root, plan, None)?);
+            }
+            result => result?,
+        }
     }
+    let mut child = spawn_gated_worker(plan, store_root, binary, control.is_some(), owner)?;
     let (registered, _shim_gate) =
         release_registered_worker(&mut child, &mut gate, plan, store_root, control.is_some())?;
     let (stdout_path, stderr_path, drains) = logs.start(&mut child, writers);

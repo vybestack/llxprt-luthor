@@ -274,10 +274,42 @@ Use pause only when you intend to stop that task. Reconciliation can leave a tas
 For state layout, migrations, and configuration details, see [Configuration and state](dev-docs/config-and-state.md). For what validation has and has not established, see [WP05 validation](dev-docs/wp05-validation.md).
 
 
+### Recover an aborted supervisor dispatch
+
+The coordinator's handshake pipe is also the cancellation token. A supervisor
+that observes cancellation before spawning does not start a child. If the READY
+pipe closes after an unreleased worker shim was spawned, the supervisor closes
+its gate and reaps it; it never releases the worker. A closed READY pipe is an
+error, not a stdout panic. The private `ATTEMPT.dispatch-aborted.json` terminal
+marker records the exact launch plan, supervisor identity and, when present,
+the stopped shim identity. Handshake deadlines are unchanged.
+
+```sh
+luthor recover TASK --attempt ATTEMPT --config /private/luthor.json --actor acoliver --reason 'Supervisor dispatch cancelled before worker release' --execute
+```
+
+Recovery requires the latest held reservation, an exclusive worktree owner,
+matching private plan/marker/child records, the same boot session, and absence of
+each recorded PID and process group. Any worker-release intent, contradictory
+execution evidence, receipt, unsafe marker, changed claim/worktree or uncertain
+PR lookup keeps the task held. With fresh claim and **absent PR** evidence,
+recovery audits `dispatch_abort_recovered`, completes the attempt as
+`dispatch_aborted`, releases capacity and returns the task to `attention`.
+It does not invent a worker receipt or start a worker. This marker cannot repair
+old failed dispatches that did not record it; they remain held without proof.
+
+An explicit `retry` may then continue the same task/session/worktree with a new
+attempt and config revision, rechecking the exact audited marker, process
+absence, claim, PR absence, worker pin and capacity. An aborted dispatch does
+not qualify for natural-exit automatic retry or `--revalidate-terminal-exit`.
+Missing-receipt recovery for workers that actually ran retains its existing
+held/PR-completion behavior.
+
 ### Continue after a natural worker exit
 
 `retry` is an explicit authorization for one existing task in `attention`, naming
-its latest completed, released attempt. It requires a natural exit with no signal
+its latest completed, released attempt. Except for the audited dispatch abort
+described above, it requires a natural exit with no signal
 or stop intent, rechecks the private receipt and registered process absence, then
 reads the source claim and exhaustive open-PR list again. It never reassigns the
 issue or creates another task or worktree. Startup reconciliation alone never

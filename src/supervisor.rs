@@ -1,8 +1,12 @@
 //! Launch planning and the Unix gated child runner.
+#[cfg(unix)]
+pub(crate) mod abort_recovery;
 mod binding;
 #[cfg(unix)]
 mod binding_gate;
 mod command;
+#[cfg(unix)]
+pub(crate) mod dispatch_abort;
 mod environment;
 mod error;
 mod evidence;

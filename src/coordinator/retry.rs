@@ -46,7 +46,7 @@ pub fn retry_one<P: ProjectReader, Q: PullRequestReader, L: SupervisorLauncher>(
         prs,
         launcher,
     } = dependencies;
-    let (previous, _) = crate::state::retry_context_for_task(store, task_id, previous_attempt_id)?;
+    let previous = crate::state::retry_plan_for_task(store, task_id, previous_attempt_id)?;
     let selection = crate::state::selection_for_attempt(store, &previous)?;
     validate_retry_config(
         store,
@@ -190,6 +190,28 @@ fn verified_retry_exit(
     owner: &crate::ownership::WorktreeOwner,
     revalidate_terminal_exit: bool,
 ) -> Result<Option<crate::model::TerminalExitProof>, DispatchError> {
+    if let Some(abort) = crate::state::dispatch_abort::recovered_abort(
+        &store.connection,
+        task_id,
+        previous_attempt_id,
+    )? {
+        if revalidate_terminal_exit
+            || supervisor::dispatch_abort::read(&store.root().join("attempts"), previous_attempt_id)
+                .as_ref()
+                != Some(&abort)
+            || !supervisor::abort_recovery::inspect(
+                store,
+                &store.root().join("attempts"),
+                &abort.plan,
+                owner,
+            )?
+        {
+            return Err(DispatchError::RetryHeld {
+                reason: "dispatch abort quiescence changed".into(),
+            });
+        }
+        return Ok(None);
+    }
     let mut terminal_exit = None;
     match supervisor::recheck_retry_exit(
         store,
