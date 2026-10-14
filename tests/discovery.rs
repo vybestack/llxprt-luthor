@@ -442,3 +442,87 @@ fn pagination_and_malformed_relevant_project_evidence_fail_closed() {
         Err(EligibilityError::Project(ProjectError::Read(_)))
     ));
 }
+
+#[test]
+fn cycle_discovery_reports_one_unreadable_candidate_and_keeps_other_candidates() {
+    let fixture = Fixture::shared_project();
+    let mut reader = fixture.reader();
+    let executable = fixture.dir.path().join("gh");
+    let script = fs::read_to_string(&executable)
+        .unwrap()
+        .replace("cat issue0.json;;", "printf '%s' 'HTTP 500' >&2; exit 1;;");
+    fs::write(executable, script).unwrap();
+    let report = luthor::eligibility::discover(
+        &mut reader,
+        &[source("org/tracker")],
+        &[mapping("org/tracker")],
+        None,
+    )
+    .unwrap();
+    assert_eq!(report.candidates.len(), 2);
+    assert!(
+        report
+            .candidates
+            .iter()
+            .all(|candidate| candidate.issue_number != 1)
+    );
+    assert!(report.source_read_failures.is_empty());
+    let failure = serde_json::to_value(&report.candidate_read_failures).unwrap();
+    assert_eq!(failure[0]["item"], "ITEM_org/tracker_1");
+    assert_eq!(failure[0]["issue"], "ISSUE_org/tracker_1");
+    assert_eq!(failure[0]["http_status"], 500);
+    assert_eq!(
+        fixture
+            .reads()
+            .iter()
+            .filter(|read| read.ends_with("issues/1?per_page=100"))
+            .count(),
+        3
+    );
+}
+
+#[test]
+fn cycle_discovery_discards_partial_source_on_later_page_failure() {
+    let fixture = Fixture::shared_project();
+    let mut reader = fixture.reader();
+    let executable = fixture.dir.path().join("gh");
+    let script = fs::read_to_string(&executable)
+        .unwrap()
+        .replace("cat page1.json;;", "printf '%s' 'HTTP 500' >&2; exit 1;;");
+    fs::write(executable, script).unwrap();
+    let report = luthor::eligibility::discover(
+        &mut reader,
+        &[source("org/tracker")],
+        &[mapping("org/tracker")],
+        None,
+    )
+    .unwrap();
+    assert!(report.candidates.is_empty());
+    assert_eq!(report.source_read_failures.len(), 1);
+    assert_eq!(report.source_read_failures[0].project_id, "PROJECT");
+    assert_eq!(report.source_read_failures[0].http_status, Some(500));
+    assert_eq!(
+        fixture
+            .reads()
+            .iter()
+            .filter(|read| read.as_str() == "api graphql")
+            .count(),
+        4
+    );
+}
+
+#[test]
+fn cycle_discovery_never_hides_malformed_or_inconsistent_evidence() {
+    let fixture = Fixture::shared_project();
+    let mut reader = fixture.reader();
+    fs::write(fixture.dir.path().join("issue0.json"), "not-json").unwrap();
+    assert!(matches!(
+        luthor::eligibility::discover(
+            &mut reader,
+            &[source("org/tracker")],
+            &[mapping("org/tracker")],
+            None
+        ),
+        Err(EligibilityError::Project(ProjectError::IssueRead(_)))
+    ));
+}

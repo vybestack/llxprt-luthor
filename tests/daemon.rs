@@ -320,3 +320,54 @@ fn suspended_account_blocks_execution_even_for_differing_assignee() {
     assert!(calls.contains("api user --jq .login"));
     assert!(!calls.contains("POST") && !calls.contains("PATCH"));
 }
+
+#[test]
+fn execute_external_discovery_failures_exit_zero_with_cycle_json_and_no_claims() {
+    for (route, field) in [
+        ("graphql", "source_read_failures"),
+        (
+            "repos/org/tracker/issues/7?per_page=100",
+            "candidate_read_failures",
+        ),
+    ] {
+        let dir = tempdir();
+        let (config, path) = fixture(dir.path(), "acoliver");
+        let gh = dir.path().join("gh");
+        let script = fs::read_to_string(&gh).unwrap();
+        let marker = format!("{route})");
+        assert_eq!(script.matches(&marker).count(), 1);
+        fs::write(
+            &gh,
+            script.replace(&marker, &format!("{marker} printf 'HTTP 500' >&2; exit 1;")),
+        )
+        .unwrap();
+        let result = run(&config, &path, &["--issues", "7", "--execute"]);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(result.stderr.is_empty());
+        let report: Value = serde_json::from_slice(&result.stdout).unwrap();
+        assert_eq!(report["mode"], "execute");
+        assert_eq!(report[field][0]["http_status"], 500);
+        assert!(report["launched"].as_array().unwrap().is_empty());
+        if field == "candidate_read_failures" {
+            assert_eq!(report[field][0]["item"], "ITEM");
+            assert_eq!(report[field][0]["issue"], "ISSUE_NODE");
+        } else {
+            assert_eq!(report[field][0]["project_id"], "PROJECT");
+        }
+        let calls = fs::read_to_string(dir.path().join("calls")).unwrap();
+        assert_eq!(
+            calls
+                .lines()
+                .filter(|line| line.starts_with(&format!("api {route}")))
+                .count(),
+            3
+        );
+        assert!(!calls.contains("POST"));
+        assert!(!dir.path().join("assigned").exists());
+        assert!(!dir.path().join("worktrees").exists());
+    }
+}

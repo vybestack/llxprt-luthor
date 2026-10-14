@@ -65,4 +65,6 @@ pub struct ScheduleReport {
     pub capacity_full: bool,
     pub disk_space: Option<crate::disk::DiskSpace>,
     pub pr_repair: PrRepairReport,
+    pub candidate_read_failures: Vec<crate::github::project::CandidateReadFailure>,
+    pub source_read_failures: Vec<crate::github::project::SourceReadFailure>,
 }

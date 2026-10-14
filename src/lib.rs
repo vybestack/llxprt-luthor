@@ -13,6 +13,7 @@ pub mod github {
     pub mod identity;
     pub mod project;
     pub mod pull_request;
+    pub(crate) mod read;
 }
 pub mod state;
 pub mod supervisor;

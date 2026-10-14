@@ -81,47 +81,62 @@ where
     R: ProjectReader,
     F: FnMut(&mut R, &Source) -> Result<Vec<(ProjectItem, Issue)>, ProjectError>,
 {
+    let mut candidates = HashMap::new();
+    for source in sources {
+        add_candidates(
+            &mut candidates,
+            source,
+            mappings,
+            enumerate_source(reader, source)?,
+        )?;
+    }
+    Ok(candidates.into_values().collect())
+}
+
+fn add_candidates(
+    candidates: &mut HashMap<String, Candidate>,
+    source: &Source,
+    mappings: &[Mapping],
+    items: Vec<(ProjectItem, Issue)>,
+) -> Result<(), EligibilityError> {
     let mapping_by_repo: HashMap<_, _> = mappings
         .iter()
         .map(|m| (m.tracker_repository.as_str(), m))
         .collect();
-    let mut candidates = HashMap::new();
-    for source in sources {
-        for (item, issue) in enumerate_source(reader, source)? {
-            if !source
-                .repositories
-                .iter()
-                .any(|repo| repo == &issue.repository)
-            {
-                continue;
-            }
-            let Some(mapping) = mapping_by_repo.get(issue.repository.as_str()) else {
-                return Err(EligibilityError::MissingMapping(issue.repository.clone()));
-            };
-            if let Marker::ProjectField { name, .. } = &source.ready_marker
-                && item.unsupported_fields.iter().any(|field| field == name)
-            {
-                return Err(EligibilityError::UnsupportedMarkerField {
-                    project_id: source.project_id.clone(),
-                    item_id: item.item_id,
-                    name: name.clone(),
-                });
-            }
-            if issue.state != "open"
-                || !issue.assignees.is_empty()
-                || !marker_matches(&source.ready_marker, &item, &issue)
-                || source
-                    .milestone
-                    .as_ref()
-                    .is_some_and(|required| issue.milestone.as_ref() != Some(required))
-            {
-                continue;
-            }
-            let candidate = observed_candidate(source, item, issue, mapping);
-            merge_candidate(&mut candidates, candidate)?;
+    for (item, issue) in items {
+        if !source
+            .repositories
+            .iter()
+            .any(|repo| repo == &issue.repository)
+        {
+            continue;
         }
+        let Some(mapping) = mapping_by_repo.get(issue.repository.as_str()) else {
+            return Err(EligibilityError::MissingMapping(issue.repository.clone()));
+        };
+        if let Marker::ProjectField { name, .. } = &source.ready_marker
+            && item.unsupported_fields.iter().any(|field| field == name)
+        {
+            return Err(EligibilityError::UnsupportedMarkerField {
+                project_id: source.project_id.clone(),
+                item_id: item.item_id,
+                name: name.clone(),
+            });
+        }
+        if issue.state != "open"
+            || !issue.assignees.is_empty()
+            || !marker_matches(&source.ready_marker, &item, &issue)
+            || source
+                .milestone
+                .as_ref()
+                .is_some_and(|required| issue.milestone.as_ref() != Some(required))
+        {
+            continue;
+        }
+        let candidate = observed_candidate(source, item, issue, mapping);
+        merge_candidate(candidates, candidate)?;
     }
-    Ok(candidates.into_values().collect())
+    Ok(())
 }
 
 fn observed_candidate(
@@ -177,4 +192,51 @@ fn marker_matches(marker: &Marker, item: &ProjectItem, issue: &Issue) -> bool {
             .iter()
             .any(|(field, actual)| field == name && actual == value),
     }
+}
+
+/// Cycle discovery retains external failures as bounded evidence and never selects
+/// an unreadable candidate or a partially enumerated source.
+#[derive(Debug, Default)]
+pub struct DiscoverySelection {
+    pub candidates: Vec<Candidate>,
+    pub candidate_read_failures: Vec<crate::github::project::CandidateReadFailure>,
+    pub source_read_failures: Vec<crate::github::project::SourceReadFailure>,
+}
+
+pub fn discover<R: ProjectReader>(
+    reader: &mut R,
+    sources: &[Source],
+    mappings: &[Mapping],
+    target: Option<(&str, u64)>,
+) -> Result<DiscoverySelection, EligibilityError> {
+    let mut report = DiscoverySelection::default();
+    let mut candidates = HashMap::new();
+    for source in sources {
+        let reads = crate::github::project::discover(
+            reader,
+            &source.project_id,
+            &source.repositories,
+            target,
+        )?;
+        add_candidates(&mut candidates, source, mappings, reads.items)?;
+        report
+            .candidate_read_failures
+            .extend(reads.candidate_read_failures);
+        report
+            .source_read_failures
+            .extend(reads.source_read_failures);
+    }
+    // An identity observed elsewhere must not bypass a failed source's rules.
+    candidates.retain(|_, candidate| {
+        !report
+            .candidate_read_failures
+            .iter()
+            .any(|failure| failure.issue == candidate.issue_node_id)
+            && !report
+                .source_read_failures
+                .iter()
+                .any(|failure| failure.project_id == candidate.project_id)
+    });
+    report.candidates = candidates.into_values().collect();
+    Ok(report)
 }
