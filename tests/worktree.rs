@@ -408,9 +408,15 @@ fn interruption_after_root_creation_leaves_durable_intent_and_never_adopts_a_pat
     fs::create_dir(&intent.path).unwrap();
     let outcome = ensure_worktree(&mut store, "task-1", &root, &f.config.mappings[0]);
     assert!(
-        matches!(outcome, Err(WorktreeError::Conflict(_))),
+        matches!(
+            outcome,
+            Err(WorktreeError::Conflict(
+                "worktree path is not a verifiable git worktree"
+            ))
+        ),
         "{outcome:?}"
     );
+    assert!(fs::read_dir(&intent.path).unwrap().next().is_none());
     assert_eq!(
         task_records::task_phase(&store, "task-1")
             .unwrap()
@@ -422,6 +428,123 @@ fn interruption_after_root_creation_leaves_durable_intent_and_never_adopts_a_pat
             .unwrap()
             .map(|r| r.intent),
         Some(intent)
+    );
+}
+
+fn interrupt_after_root_creation(f: &mut Fixture) -> luthor::state::WorktreeIntent {
+    let root = f.config.worktree_root.clone();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        ensure_worktree_with_hooks(
+            &mut f.store,
+            "task-1",
+            &root,
+            &f.config.mappings[0],
+            |_| {},
+            || panic!("interrupted after mkdir"),
+        )
+    }));
+    assert!(result.is_err());
+    worktree_records::worktree_record(&f.store, "task-1")
+        .unwrap()
+        .unwrap()
+        .intent
+}
+
+#[test]
+fn interrupted_creation_adopts_a_path_that_verifies_exactly() {
+    let mut f = Fixture::new();
+    f.task("task-1", 1, true);
+    let intent = interrupt_after_root_creation(&mut f);
+    let checkout = f.config.mappings[0].checkout.clone();
+    git(
+        &checkout,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            &intent.branch,
+            intent.path.to_str().unwrap(),
+            intent.base_commit.as_deref().unwrap(),
+        ],
+    );
+    let WorktreeResult::Created(identity) = f.create("task-1").unwrap() else {
+        panic!("a verified path must be recorded as created")
+    };
+    assert_eq!(identity.path, intent.path);
+    assert_eq!(Some(identity.head.as_str()), intent.base_commit.as_deref());
+    assert_ne!(
+        task_records::task_phase(&f.store, "task-1")
+            .unwrap()
+            .as_deref(),
+        Some("held")
+    );
+    assert_eq!(
+        worktree_records::worktree_record(&f.store, "task-1")
+            .unwrap()
+            .and_then(|r| r.identity),
+        Some(identity)
+    );
+}
+
+#[test]
+fn interrupted_creation_never_adopts_dirty_or_foreign_paths() {
+    let mut f = Fixture::new();
+    f.task("task-1", 1, true);
+    let intent = interrupt_after_root_creation(&mut f);
+    let checkout = f.config.mappings[0].checkout.clone();
+    git(
+        &checkout,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            &intent.branch,
+            intent.path.to_str().unwrap(),
+            intent.base_commit.as_deref().unwrap(),
+        ],
+    );
+    fs::write(intent.path.join("local-change"), "dirty").unwrap();
+    assert!(matches!(
+        f.create("task-1"),
+        Err(WorktreeError::Conflict(
+            "unfinished worktree is changed or dirty"
+        ))
+    ));
+    assert_eq!(
+        task_records::task_phase(&f.store, "task-1")
+            .unwrap()
+            .as_deref(),
+        Some("held")
+    );
+    assert!(
+        worktree_records::worktree_record(&f.store, "task-1")
+            .unwrap()
+            .unwrap()
+            .identity
+            .is_none()
+    );
+
+    let mut g = Fixture::new();
+    g.task("task-1", 1, true);
+    let intent = interrupt_after_root_creation(&mut g);
+    fs::create_dir(&intent.path).unwrap();
+    git(&intent.path, &["init", "-b", &intent.branch]);
+    assert!(matches!(
+        g.create("task-1"),
+        Err(WorktreeError::Conflict(_))
+    ));
+    assert_eq!(
+        task_records::task_phase(&g.store, "task-1")
+            .unwrap()
+            .as_deref(),
+        Some("held")
+    );
+    assert!(
+        worktree_records::worktree_record(&g.store, "task-1")
+            .unwrap()
+            .unwrap()
+            .identity
+            .is_none()
     );
 }
 

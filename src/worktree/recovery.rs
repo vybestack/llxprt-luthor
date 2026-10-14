@@ -36,14 +36,13 @@ pub(crate) fn recover_intent(
             }
             Err(error) => return Err(error.into()),
         }
-        let actual = identity(&intent.path, intent, git_dir, remote)?;
-        if actual.head != base
-            || !read_git(
-                &intent.path,
-                &["status", "--porcelain=v1", "--untracked-files=all"],
-            )?
-            .is_empty()
-        {
+        let actual = identity(&intent.path, intent, git_dir, remote).map_err(unverifiable)?;
+        let status = read_git(
+            &intent.path,
+            &["status", "--porcelain=v1", "--untracked-files=all"],
+        )
+        .map_err(unverifiable)?;
+        if actual.head != base || !status.is_empty() {
             return Err(WorktreeError::Conflict(
                 "unfinished worktree is changed or dirty",
             ));
@@ -56,4 +55,16 @@ pub(crate) fn recover_intent(
         task_records::hold_task(store, task_id, "unfinished worktree could not be verified")?;
     }
     result
+}
+
+/// A path that git cannot read as a worktree (empty or partial directory) is
+/// an unverifiable path, not a git failure, so every environment reports it
+/// the same way regardless of whether a parent repository encloses the path.
+fn unverifiable(error: WorktreeError) -> WorktreeError {
+    match error {
+        WorktreeError::Git(_) => {
+            WorktreeError::Conflict("worktree path is not a verifiable git worktree")
+        }
+        other => other,
+    }
 }
