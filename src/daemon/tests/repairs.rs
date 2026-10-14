@@ -33,14 +33,18 @@ fn serve_pr_42(f: &Fixture, open: bool) {
 
 /// The open-PR search and the read by id can disagree while GitHub catches up.
 pub(super) fn serve_pr_42_with(f: &Fixture, listed_open: bool, detail_open: bool) {
+    serve_pr_42_detail(f, listed_open, &pr_detail(detail_open));
+}
+
+/// Serves exactly this detail for PR 42, with the open-PR search listing it or not.
+pub(super) fn serve_pr_42_detail(f: &Fixture, listed_open: bool, detail: &serde_json::Value) {
     let list = if listed_open {
         json!([{"number":42,"body":format!("Tracker-Issue: {TRACKER_ISSUE}")}])
     } else {
         json!([])
     };
     let routes = format!(
-        "\"repos/org/code/pulls?state=open&per_page=100&page=1\") printf '%s\\n' '{list}' ;;\n  repos/org/code/pulls/42) printf '%s\\n' '{}' ;;",
-        pr_detail(detail_open)
+        "\"repos/org/code/pulls?state=open&per_page=100&page=1\") printf '%s\\n' '{list}' ;;\n  repos/org/code/pulls/42) printf '%s\\n' '{detail}' ;;"
     );
     let script = fs::read_to_string(&f.gh).unwrap();
     assert!(script.contains(LIST_ROUTE));

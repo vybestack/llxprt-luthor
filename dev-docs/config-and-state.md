@@ -369,11 +369,11 @@ must agree on the merge commit; `pr_merged` records the authorization, merged
 head, merge commit and confirmation time. The task remains in `pr_complete`
 until the existing cleanup/retirement path settles it.
 
-An interrupted/uncertain mutation stops the execute cycle, records a bounded
-`pr_merge_error`, and is not blindly repeated. The next enabled sweep can recover
-only from exact terminal merged-PR proof on the authorized head. An unresolved
-open PR requires operator inspection; it is not reported as merged or sent to a
-repair worker. With policy disabled, the sweep performs no upstream reads or
+An interrupted/uncertain mutation records a bounded `pr_merge_error`, is not
+blindly repeated, and holds only that task (see "Task isolation" below). The next
+enabled sweep can recover only from exact terminal merged-PR proof on the
+authorized head. An unresolved open PR requires operator inspection; it is not
+reported as merged or sent to a repair worker. With policy disabled, the sweep performs no upstream reads or
 writes, including recovery writes. Policy drift never allows a different head
 or repository to satisfy an old intent.
 
@@ -407,11 +407,49 @@ This works for non-default PR bases and separate tracker repositories.
 An interrupted closure retains the merge evidence. A later sweep can recover
 from a fresh exact closed-issue read without remerging/reclosing; an unresolved
 open issue requires inspection rather than replaying an uncertain comment or
-close. Closure failure stops the cycle before cleanup can retire the task.
+close. While a Luthor merge has no recorded closure, the task is held and
+terminal cleanup retains its worktree and branch, so the sweep can finish it.
 No tracker issue is closed before confirmed merge evidence exists. Disabled
 policy performs neither branch updates nor tracker closure, even on restart.
 
-Daemon JSON reports `pr_merge.merged` and `pr_merge.waiting`; failing check names
+### Task isolation and externally merged PRs (issue 78)
+
+An error in the merge step for one task never fails the execute cycle. Upstream
+read/write errors and verification refusals are journaled as `pr_merge_error`
+(an identical latest error is not appended again), the task is reported under
+`pr_merge.waiting` as `merge step failed: <reason>`, stays `pr_complete`, and the
+remaining tasks and scheduling continue with exit 0. Only a failure of Luthor's
+own state store (unreadable or inconsistent local records) still stops the cycle.
+
+The identity checks that precede a Luthor merge, draft promotion, branch update
+or tracker closure are unchanged: the saved verified head must still equal the
+live head, and nothing is written otherwise.
+
+When no Luthor merge intent exists and GitHub reports the saved PR `merged` at
+a head different from the saved verified head, the sweep decides whether the
+delivery is verifiable without writing to GitHub:
+
+1. Every identity field except the head (PR id, number, URL, repositories,
+   branches, author, creation time and the exact `Tracker-Issue` line) must
+   match the saved proof, with the PR `closed`, a `merged_at` time and a merge
+   commit.
+2. The head must have advanced from the saved verified head only by first-parent
+   merges of the configured base, using the same lineage proof as PR repair
+   (`worktree::pr_head`, issue 69). The head comes from the PR's own
+   `refs/pull/N/head`, because the head branch is commonly deleted on merge; the
+   task worktree is read but never changed.
+
+If both hold, the existing retirement path records the task as `pr_merged`. The
+`task_retired` evidence carries the saved and observed heads, merge commit and
+base-merge lineage, and `luthor_merge_evidence: "none"`: no `pr_merge`/`pr_merged`
+authorization or merge proof is fabricated and the tracker is left to GitHub or
+the operator as for any other external merge. The sweep reports it under
+`pr_merge.delivered`. Any other difference (changed identity, a non-base-merge
+commit, a merge parent not on the base, an unreadable lineage, a task whose
+attempt has no verified exit) holds only that task with that reason. A PR merged
+at the saved head is unchanged: it waits as "not open and unmerged" for cleanup.
+
+Daemon JSON reports `pr_merge.merged`, `pr_merge.delivered` and `pr_merge.waiting`; failing check names
 are included in waiting reasons even for UNSTABLE PRs. `status` and `show`
 expose cached `last_merge_checks`, `merge_evidence`, `merge_error`,
 `last_branch_update` and `tracker_closure`, as well as the existing

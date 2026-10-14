@@ -5,11 +5,42 @@ use crate::{
     pr_merge::{MergeAuthorization, MergeEvidence},
     state::{StateError, StateStore, cleanup_records, journal, pr_merge, task_records},
 };
+mod external;
 mod followup;
 use serde_json::Value;
 mod types;
+use super::notes::TaskNote;
 pub use types::{MergeError, MergeReport};
 use types::{audit_error, now, verify_account};
+
+/// What the sweep concluded about one task.
+enum Outcome {
+    /// Luthor's own merge is confirmed and the tracker handled.
+    Merged,
+    /// Nothing is written; the reason is reported and the task stays as it is.
+    Waiting(String),
+    /// GitHub merged the PR outside Luthor and the delivery is verified.
+    Delivered(String),
+}
+
+/// A failure of one task's merge step is journaled and held with its reason so
+/// the rest of the queue keeps running. Only a failure of local state, which
+/// no task can be trusted past, stops the sweep.
+fn isolate(
+    store: &mut StateStore,
+    task: &str,
+    result: Result<Outcome, MergeError>,
+) -> Result<Outcome, MergeError> {
+    let error = match result {
+        Ok(outcome) => return Ok(outcome),
+        Err(error) => error,
+    };
+    pr_merge::record_error(store, task, &audit_error(&error).to_string())?;
+    if matches!(error, MergeError::State(_)) {
+        return Err(error);
+    }
+    Ok(Outcome::Waiting(format!("merge step failed: {error}")))
+}
 
 /// Runs before terminal cleanup so interrupted writes retain their evidence.
 /// Disabled mappings are not read or mutated, even with an old merge intent.
@@ -41,30 +72,22 @@ pub fn merge_verified_prs<Q: PrMerger>(
         {
             continue;
         }
-        let reason = if !mapping.same_worker_mapping(&selection.candidate.mapping) {
-            Some("merge mapping differs from saved selection".into())
+        let outcome = if mapping.same_worker_mapping(&selection.candidate.mapping) {
+            let result = inspect_and_finish(store, &task, &mapping.merge, prs);
+            isolate(store, &task, result)?
         } else {
-            match inspect_and_finish(store, &task, &mapping.merge, prs) {
-                Ok(reason) => reason,
-                Err(error) => {
-                    journal::record_evidence(
-                        store,
-                        &task,
-                        None,
-                        "pr_merge_error",
-                        &audit_error(&error).to_string(),
-                    )?;
-                    return Err(error);
-                }
-            }
+            Outcome::Waiting("merge mapping differs from saved selection".into())
         };
-        if let Some(reason) = reason {
-            report.waiting.push(super::notes::TaskNote {
+        match outcome {
+            Outcome::Merged => report.merged.push(task),
+            Outcome::Waiting(reason) => report.waiting.push(TaskNote {
                 task_id: task,
                 reason,
-            });
-        } else {
-            report.merged.push(task);
+            }),
+            Outcome::Delivered(reason) => report.delivered.push(TaskNote {
+                task_id: task,
+                reason,
+            }),
         }
     }
     Ok(report)
@@ -75,12 +98,12 @@ fn inspect_and_finish<Q: PrMerger>(
     task: &str,
     policy: &MergePolicy,
     prs: &mut Q,
-) -> Result<Option<String>, MergeError> {
-    let reason = inspect(store, task, policy, prs)?;
-    if reason.is_none() {
+) -> Result<Outcome, MergeError> {
+    let outcome = inspect(store, task, policy, prs)?;
+    if matches!(outcome, Outcome::Merged) {
         followup::close_tracker(store, task, prs)?;
     }
-    Ok(reason)
+    Ok(outcome)
 }
 
 fn inspect<Q: PrMerger>(
@@ -88,7 +111,7 @@ fn inspect<Q: PrMerger>(
     task: &str,
     policy: &MergePolicy,
     prs: &mut Q,
-) -> Result<Option<String>, MergeError> {
+) -> Result<Outcome, MergeError> {
     let saved = cleanup_records::verified_pr(store, task)?;
     if pr_merge::completed(store, task)? && pr_merge::authorization(store, task)?.is_none() {
         return Err(MergeError::Refused("merge evidence without authorization"));
@@ -100,7 +123,7 @@ fn inspect<Q: PrMerger>(
             ));
         }
         let detail = prs.detail(&auth.pr.repository, auth.pr.number)?;
-        return confirm(store, task, auth, &detail).map(|()| None);
+        return confirm(store, task, auth, &detail).map(|()| Outcome::Merged);
     }
     inspect_open(store, task, policy, &saved, prs)
 }
@@ -111,7 +134,7 @@ fn inspect_open<Q: PrMerger>(
     policy: &MergePolicy,
     saved: &crate::model::VerifiedOpenPr,
     prs: &mut Q,
-) -> Result<Option<String>, MergeError> {
+) -> Result<Outcome, MergeError> {
     let MergePolicy::Enabled {
         method,
         required_checks,
@@ -121,15 +144,18 @@ fn inspect_open<Q: PrMerger>(
         return Err(MergeError::Refused("policy disabled"));
     };
     let detail = prs.detail(&saved.repository, saved.number)?;
+    if external::applies(saved, &detail) {
+        return external::deliver(store, task, saved, &detail).map(Outcome::Delivered);
+    }
     if followup::updated_head(store, task, saved, &detail)? {
-        return Ok(Some(
+        return Ok(Outcome::Waiting(
             "base update head awaits existing PR repair verification".into(),
         ));
     }
     validate_identity(&detail, saved)?;
     let eligibility_reason = eligibility(&detail, *allow_draft)?;
     if detail["state"] != "open" || (detail["draft"] == true && !allow_draft) {
-        return Ok(eligibility_reason);
+        return Ok(eligibility_reason.map_or(Outcome::Merged, Outcome::Waiting));
     }
     verify_account(prs, saved)?;
     let checks = prs.merge_checks(&saved.repository, saved.number, required_checks)?;
@@ -137,13 +163,13 @@ fn inspect_open<Q: PrMerger>(
         return Err(MergeError::Refused("check head differs from verified PR"));
     }
     if let Some(reason) = check_gate(store, task, saved, &checks)? {
-        return Ok(Some(reason));
+        return Ok(Outcome::Waiting(reason));
     }
     if detail["mergeable_state"] == "behind" && detail["mergeable"] == true {
-        return followup::update_branch(store, task, saved, prs).map(Some);
+        return followup::update_branch(store, task, saved, prs).map(Outcome::Waiting);
     }
     if let Some(reason) = eligibility_reason {
-        return Ok(Some(reason));
+        return Ok(Outcome::Waiting(reason));
     }
     let auth = MergeAuthorization {
         pr: saved.clone(),
@@ -157,7 +183,7 @@ fn inspect_open<Q: PrMerger>(
         prs.ready_for_review(saved)?;
     }
     merge_authorized(store, task, auth, *method, prs)?;
-    Ok(None)
+    Ok(Outcome::Merged)
 }
 
 fn merge_authorized<Q: PrMerger>(

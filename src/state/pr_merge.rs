@@ -1,5 +1,6 @@
 use super::{StateError, StateStore, cleanup_records, journal, proofs};
 use crate::pr_merge::{MergeAuthorization, MergeEvidence};
+use rusqlite::OptionalExtension;
 
 pub(crate) fn authorization(
     store: &StateStore,
@@ -64,5 +65,27 @@ pub(crate) fn complete(
         "pr_merged",
         &serde_json::to_string(evidence)?,
     )?;
+    Ok(())
+}
+
+/// Appends the bounded error unless the latest recorded one is identical, so a
+/// task held for the same reason on every cycle does not grow the journal.
+pub(crate) fn record_error(
+    store: &mut StateStore,
+    task: &str,
+    error: &str,
+) -> Result<(), StateError> {
+    let latest: Option<String> = store
+        .connection
+        .query_row(
+            "SELECT payload FROM evidence WHERE task_id=?1 AND kind='pr_merge_error' ORDER BY sequence DESC LIMIT 1",
+            [task],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if latest.as_deref() == Some(error) {
+        return Ok(());
+    }
+    journal::record_evidence(store, task, None, "pr_merge_error", error)?;
     Ok(())
 }

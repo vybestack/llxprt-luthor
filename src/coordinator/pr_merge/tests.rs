@@ -40,7 +40,7 @@ fn later_pushed_head_and_changes_to_pr_ownership_are_never_merged() {
     ] {
         let mut f = Fixture::new();
         *f.prs.detail.pointer_mut(pointer).unwrap() = json!("changed");
-        assert!(f.run().is_err(), "{pointer}");
+        f.held();
         assert!(f.prs.writes.is_empty());
         assert!(pr_merge::authorization(&f.store, "task").unwrap().is_none());
     }
@@ -50,7 +50,7 @@ fn later_pushed_head_and_changes_to_pr_ownership_are_never_merged() {
 fn head_change_after_check_read_is_not_adopted_or_merged() {
     let mut f = Fixture::new();
     f.prs.race = true;
-    assert!(f.run().is_err());
+    f.held();
     assert!(f.prs.writes.is_empty());
     assert!(pr_merge::authorization(&f.store, "task").unwrap().is_some());
 }
@@ -112,11 +112,11 @@ fn draft_policy_defaults_to_excluded_and_opt_in_promotes_before_merging() {
 fn changed_authenticated_identity_or_check_head_fails_before_any_write() {
     let mut f = Fixture::new();
     f.prs.login = "other".into();
-    assert!(f.run().is_err());
+    f.held();
     assert!(f.prs.writes.is_empty());
     f.prs.login = "acoliver".into();
     f.prs.checks.health.head = "b".repeat(40);
-    assert!(f.run().is_err());
+    f.held();
     assert!(f.prs.writes.is_empty());
 }
 
@@ -124,10 +124,10 @@ fn changed_authenticated_identity_or_check_head_fails_before_any_write() {
 fn failed_write_is_recorded_and_never_replayed_or_reported_as_merged() {
     let mut f = Fixture::new();
     f.prs.fail_write = true;
-    assert!(f.run().is_err());
+    f.held();
     assert!(!pr_merge::completed(&f.store, "task").unwrap());
     f.prs.fail_write = false;
-    assert!(f.run().is_err());
+    f.held();
     assert_eq!(f.prs.writes.len(), 1);
     assert!(
         journal::evidence_kinds(&f.store, "task")
@@ -140,7 +140,7 @@ fn failed_write_is_recorded_and_never_replayed_or_reported_as_merged() {
 fn interrupted_success_recovers_exact_terminal_proof_without_another_write() {
     let mut f = Fixture::new();
     f.prs.fail_terminal = true;
-    assert!(f.run().is_err());
+    f.held();
     assert!(!pr_merge::completed(&f.store, "task").unwrap());
     f.prs.fail_terminal = false;
     assert_eq!(f.run().unwrap().merged, ["task"]);
@@ -189,14 +189,14 @@ fn recovery_rejects_a_different_terminal_head_and_closed_unmerged_pr() {
     for changed_head in [true, false] {
         let mut f = Fixture::new();
         f.prs.fail_terminal = true;
-        assert!(f.run().is_err());
+        f.held();
         f.prs.fail_terminal = false;
         if changed_head {
             f.prs.detail["head"]["sha"] = json!("b".repeat(40));
         } else {
             f.prs.detail["merged"] = json!(false);
         }
-        assert!(f.run().is_err());
+        f.held();
         assert!(!pr_merge::completed(&f.store, "task").unwrap());
         assert_eq!(f.prs.writes.len(), 1);
     }
@@ -207,7 +207,7 @@ fn malformed_api_state_fails_instead_of_hiding_an_upstream_error() {
     for field in ["state", "draft", "merged", "mergeable", "mergeable_state"] {
         let mut f = Fixture::new();
         f.prs.detail.as_object_mut().unwrap().remove(field);
-        assert!(f.run().is_err(), "{field}");
+        f.held();
         assert!(f.prs.writes.is_empty());
     }
 }
@@ -215,7 +215,7 @@ fn malformed_api_state_fails_instead_of_hiding_an_upstream_error() {
 #[test]
 fn merge_preserves_existing_acoliver_live_write_restriction_even_for_another_mapping_author() {
     let mut f = Fixture::with_login("release-bot");
-    assert!(f.run().is_err());
+    f.held();
     assert!(f.prs.writes.is_empty());
     assert!(pr_merge::authorization(&f.store, "task").unwrap().is_none());
 }
@@ -244,6 +244,64 @@ fn corrupt_terminal_evidence_fails_instead_of_being_treated_as_a_completed_merge
     journal::record_evidence(&mut f.store, "task", None, "pr_merged", "{}").unwrap();
     assert!(f.run().is_err());
     assert!(f.prs.writes.is_empty());
+}
+
+#[test]
+fn external_merge_with_changed_identity_holds_the_task_without_retiring_it() {
+    for pointer in [
+        "/user/login",
+        "/base/ref",
+        "/head/ref",
+        "/body",
+        "/created_at",
+    ] {
+        let mut f = Fixture::new();
+        f.prs.merged();
+        f.prs.detail["head"]["sha"] = json!("b".repeat(40));
+        *f.prs.detail.pointer_mut(pointer).unwrap() = json!("changed");
+        assert_eq!(
+            f.held(),
+            "merge step failed: merge verification failed: merged PR identity differs from the verified PR",
+            "{pointer}"
+        );
+        assert_not_delivered(&f);
+    }
+}
+
+#[test]
+fn external_merge_without_verifiable_lineage_holds_the_task_with_its_reason() {
+    let mut f = Fixture::new();
+    f.prs.merged();
+    f.prs.detail["head"]["sha"] = json!("b".repeat(40));
+    let reason = f.held();
+    assert!(reason.starts_with("merge step failed:"), "{reason}");
+    assert_not_delivered(&f);
+}
+
+#[test]
+fn external_merge_at_the_saved_head_keeps_the_existing_waiting_behavior() {
+    let mut f = Fixture::new();
+    f.prs.merged();
+    let report = f.run().unwrap();
+    assert!(report.delivered.is_empty() && report.merged.is_empty());
+    assert_eq!(report.waiting[0].reason, "PR is not open and unmerged");
+    assert_not_delivered(&f);
+}
+
+fn assert_not_delivered(f: &Fixture) {
+    assert_eq!(
+        task_records::task_phase(&f.store, "task")
+            .unwrap()
+            .as_deref(),
+        Some("pr_complete")
+    );
+    assert!(!pr_merge::completed(&f.store, "task").unwrap());
+    assert!(f.prs.writes.is_empty());
+    assert!(
+        !journal::evidence_kinds(&f.store, "task")
+            .unwrap()
+            .contains(&"task_retired".into())
+    );
 }
 
 mod followup;
