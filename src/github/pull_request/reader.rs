@@ -1,4 +1,4 @@
-use std::{path::PathBuf, process::Command};
+use std::path::PathBuf;
 
 use super::{health::PrHealth, health_reader::observe as observe_health, types::PrHealthReader};
 use serde_json::Value;
@@ -46,9 +46,7 @@ impl GhPullRequestReader {
     }
 
     pub(crate) fn api(&self, args: &[&str]) -> Result<Value, LookupError> {
-        let output = Command::new(&self.executable)
-            .args(args)
-            .output()
+        let output = crate::github::read::api(&self.executable, args)
             .map_err(|_| error(ErrorCategory::Transport, "transport-error", None))?;
         let parsed = serde_json::from_slice::<Value>(&output.stdout);
         if !output.status.success() {
@@ -98,9 +96,7 @@ fn valid_repository_segment(segment: &str) -> bool {
 
 impl PullRequestReader for GhPullRequestReader {
     fn authenticated_identity(&mut self) -> Result<String, LookupError> {
-        let output = Command::new(&self.executable)
-            .args(["api", "user", "--jq", ".login"])
-            .output()
+        let output = crate::github::read::api(&self.executable, &["api", "user", "--jq", ".login"])
             .map_err(|_| error(ErrorCategory::Transport, "identity-command-failed", None))?;
         if !output.status.success() {
             return Err(error(

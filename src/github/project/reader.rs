@@ -1,4 +1,4 @@
-use std::{collections::HashMap, path::PathBuf, process::Command};
+use std::{collections::HashMap, path::PathBuf};
 
 use serde_json::Value;
 
@@ -24,10 +24,8 @@ impl GhProjectReader {
     }
 
     fn api(&self, args: &[&str]) -> Result<Value, ProjectReadError> {
-        let output = Command::new(&self.executable)
-            .args(args)
-            .output()
-            .map_err(|_| ProjectReadError {
+        let output =
+            crate::github::read::api(&self.executable, args).map_err(|_| ProjectReadError {
                 operation: ReadOperation::ProjectPage,
                 project_id: None,
                 item_id: None,
@@ -57,7 +55,15 @@ impl GhProjectReader {
                 issue_id: None,
                 category,
                 status,
-                code: "command-failed".into(),
+                code: if stderr_text
+                    .to_ascii_lowercase()
+                    .contains("connection reset")
+                {
+                    "connection-reset"
+                } else {
+                    "command-failed"
+                }
+                .into(),
             });
         }
         let value = parsed.map_err(|_| ProjectReadError {

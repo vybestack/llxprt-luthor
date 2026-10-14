@@ -1,5 +1,5 @@
 use crate::eligibility::Candidate;
-use std::{path::Path, process::Command};
+use std::path::Path;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -16,9 +16,7 @@ pub fn verify_authenticated_account(
     gh_binary: &Path,
     candidate: &Candidate,
 ) -> Result<(), IdentityError> {
-    let output = Command::new(gh_binary)
-        .args(["api", "user", "--jq", ".login"])
-        .output()
+    let output = crate::github::read::api(gh_binary, &["api", "user", "--jq", ".login"])
         .map_err(|_| IdentityError::Command)?;
     if !output.status.success() {
         return Err(IdentityError::Command);

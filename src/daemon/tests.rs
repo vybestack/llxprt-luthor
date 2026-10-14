@@ -13,6 +13,7 @@ use crate::{
     state::{StateStore, launches, scheduling, task_records},
     supervisor::{LaunchPlan, SupervisorError},
 };
+mod discovery;
 mod repairs;
 mod retirements;
 

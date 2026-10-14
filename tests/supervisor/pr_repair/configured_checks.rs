@@ -13,9 +13,9 @@ fn configure_gh(f: &mut Fixture) {
 printf '%s\n' "$*" >> "$0.calls"
 case "$*" in
   'api graphql '*) cat "$0.health" ;;
-  'api user') printf '%s\n' '{"login":"acoliver"}' ;;
-  'api repos/org/code/actions/runs/123') cat "$0.run" ;;
-  'api repos/org/code/actions/jobs/456') cat "$0.job" ;;
+  'api user --include') printf '%s\n' '{"login":"acoliver"}' ;;
+  'api repos/org/code/actions/runs/123 --include') cat "$0.run" ;;
+  'api repos/org/code/actions/jobs/456 --include') cat "$0.job" ;;
   'api repos/org/code/actions/jobs/456/logs') printf '%s\n' 'assertion failed: configured gate regression' ;;
   'api --method POST repos/org/code/actions/runs/123/rerun-failed-jobs') exit 0 ;;
   *) echo "unexpected gh call: $*" >&2; exit 1 ;;
@@ -109,7 +109,9 @@ fn configured_checks_without_branch_protection_rerun_once_then_repair() {
                 .count(),
             1
         );
-        assert!(calls.contains("api user\napi repos/org/code/actions/runs/123\napi --method POST"));
+        assert!(calls.contains(
+            "api user --include\napi repos/org/code/actions/runs/123 --include\napi --method POST"
+        ));
         assert!(calls.contains("api repos/org/code/actions/jobs/456/logs"));
         assert_eq!(scheduling::reservation_count(&f.store).unwrap(), 1);
     }

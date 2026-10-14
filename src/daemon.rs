@@ -1,4 +1,3 @@
-use crate::state::task_records;
 use crate::{
     claim::GhAssignmentWriter,
     config::Config,
@@ -7,7 +6,6 @@ use crate::{
         ScheduleDependencies, ScheduleReport, StartupReport, SupervisorLauncher,
         schedule_candidates_after_startup, startup_reconcile_all,
     },
-    eligibility::{self, Candidate},
     github::{
         identity::verify_authenticated_account, project::GhProjectReader,
         pull_request::GhPullRequestReader,
@@ -102,59 +100,8 @@ impl Options {
     }
 }
 
-fn candidates(
-    reader: &mut GhProjectReader,
-    config: &Config,
-    targets: Option<&(String, Vec<u64>)>,
-    store: Option<&StateStore>,
-) -> Result<Vec<Candidate>, Error> {
-    let mut selected = Vec::new();
-    if let Some((repository, numbers)) = targets {
-        if !config
-            .mappings
-            .iter()
-            .any(|m| &m.tracker_repository == repository)
-            || !config
-                .sources
-                .iter()
-                .any(|s| s.repositories.contains(repository))
-        {
-            return Err("target repository is not configured".into());
-        }
-        for number in numbers {
-            let mut matches = eligibility::select_target(
-                reader,
-                &config.sources,
-                &config.mappings,
-                repository,
-                *number,
-            )?;
-            if matches.is_empty()
-                && let Some(store) = store
-                && task_records::existing_target(store, repository, *number)?
-            {
-                continue;
-            }
-            if matches.len() != 1 {
-                return Err(format!("target {repository}#{number} selected {} eligible candidates; exactly one required", matches.len()).into());
-            }
-            selected.append(&mut matches);
-        }
-    } else {
-        selected = eligibility::select(reader, &config.sources, &config.mappings)?;
-    }
-    let mut identities = HashSet::new();
-    let mut numbers = HashSet::new();
-    for candidate in &selected {
-        if !identities.insert((&candidate.tracker_repo_id, &candidate.issue_node_id))
-            || !numbers.insert((&candidate.repository, candidate.issue_number))
-        {
-            return Err("duplicate selected issue".into());
-        }
-    }
-    selected.sort_by(|a, b| (&a.repository, a.issue_number).cmp(&(&b.repository, b.issue_number)));
-    Ok(selected)
-}
+mod discovery;
+use discovery::{candidates, cycle_candidates};
 
 fn cycle(config: &Config, options: &Options) -> Result<(), Error> {
     let mut launcher = ProductionLauncher;
@@ -255,19 +202,19 @@ fn cycle_with_dependencies<L: SupervisorLauncher, I: IdCreator>(
         &cleanup,
     )
     .map_err(|_| "PR repair could not record task state; inspect local task state")?;
-    let selected = candidates(
+    let selection = cycle_candidates(
         &mut projects,
         config,
         options.targets.as_ref(),
         Some(&store),
     )?;
-    for candidate in &selected {
+    for candidate in &selection.candidates {
         verify_authenticated_account(&gh, candidate)?;
     }
     let mut assignments = GhAssignmentWriter { executable: gh };
     let result = schedule_candidates_after_startup(
         &mut store,
-        selected,
+        selection.candidates,
         ScheduleDependencies {
             config,
             config_revision: &options.revision,
@@ -284,6 +231,8 @@ fn cycle_with_dependencies<L: SupervisorLauncher, I: IdCreator>(
     pr_repair.skipped = repair.skipped;
     pr_repair.held = repair.held;
     pr_repair.retired.extend(repair.retired);
+    report.candidate_read_failures = selection.candidate_read_failures;
+    report.source_read_failures = selection.source_read_failures;
     report.pr_repair = pr_repair;
     report.launched.splice(0..0, repair.launched);
     print_schedule_report(&report, &cleanup);
@@ -323,6 +272,8 @@ fn print_schedule_report(report: &ScheduleReport, cleanup: &crate::cleanup::Clea
         json!({"mode":"execute", "cleanup":cleanup, "reconciliation":attempts,
         "source_holds":report.startup.source_holds.iter().map(|hold| json!({"task_id":hold.task_id,"kind":hold.kind})).collect::<Vec<_>>(),
         "pr_repair":report.pr_repair,
+        "candidate_read_failures":report.candidate_read_failures,
+        "source_read_failures":report.source_read_failures,
         "launched":report.launched.iter().map(|plan| json!({"task_id":plan.task_id,"attempt_id":plan.attempt_id})).collect::<Vec<_>>(),
         "skipped_existing":report.skipped_existing.len(), "capacity_full":report.capacity_full,"disk_space":report.disk_space})
     );
