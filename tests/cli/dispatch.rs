@@ -3,8 +3,7 @@ use luthor::state::StateStore;
 use luthor::state::{scheduling, task_records};
 use std::fs;
 
-pub(crate) fn dispatch_execute_holds_unresolved_source_before_project_selection_with_spare_capacity()
- {
+pub(crate) fn dispatch_execute_continues_project_selection_with_task_local_source_hold() {
     let h = Harness::new();
     h.seed_held_task();
     let mut store = StateStore::open(&h.state, 2).unwrap();
@@ -29,20 +28,36 @@ pub(crate) fn dispatch_execute_holds_unresolved_source_before_project_selection_
     ]);
     assert!(!output.status.success());
     assert!(
-        stderr(&output).contains("startup reconciliation"),
+        !stderr(&output).contains("startup reconciliation"),
         "{}",
         stderr(&output)
     );
+    let calls = fs::read_to_string(&h.log).unwrap();
+    assert!(calls.contains("api graphql"), "{calls}");
+    assert!(calls.contains("api user --jq .login"), "{calls}");
+    let assignments = fs::read_to_string(assignments).unwrap();
+    assert_eq!(assignments, "");
     assert!(
-        !h.log.exists(),
-        "project selection ran before reconciliation"
+        stderr(&output).contains("worktree failed"),
+        "{}",
+        stderr(&output)
     );
-    assert_eq!(fs::read_to_string(assignments).unwrap(), "");
     assert!(!worker.exists());
     let store = StateStore::open(&h.state, 2).unwrap();
     assert_eq!(
-        scheduling::unresolved_sources(&store).unwrap()[0].1,
-        "claim_assignment"
+        task_records::source_claim_verified(&store, "task")
+            .unwrap()
+            .as_deref(),
+        Some("agent")
+    );
+    assert!(
+        task_records::latest_attempt(&store, "task")
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        task_records::task_phase(&store, "task").unwrap().as_deref(),
+        Some("held")
     );
 }
 

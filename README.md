@@ -225,7 +225,7 @@ target/debug/luthor logs TASK_ID --config /private/luthor/config.json
 target/debug/luthor logs TASK_ID --attempt ATTEMPT_ID --config /private/luthor/config.json
 ```
 
-Pause writes a stop request for the task's latest attempt. Reconcile changes local state and may read GitHub to verify source or PR evidence; it does not launch a worker. For a task with no attempt, reconcile observes unfinished source operations. With an attempt, it checks process/receipt and PR evidence. Resume launches a new attempt and therefore requires explicit `--execute`.
+Pause writes a stop request for the task's latest attempt. Reconcile changes local state and may read GitHub to verify source or PR evidence; it does not launch a worker. For a task with no attempt, reconcile confirms observable claim completion and recovers clean worktree creation at the saved base; ambiguous source operations hold only that task. With an attempt, it checks process/receipt and PR evidence. Resume launches a new attempt and therefore requires explicit `--execute`.
 
 ```sh
 target/debug/luthor pause TASK_ID --config /private/luthor/config.json
@@ -297,6 +297,38 @@ old boot identity. Ordinary historical exits stay held because escaped runtime
 workers cannot be excluded by a receipt and group probes alone. See
 [terminal startup revalidation](dev-docs/config-and-state.md#darwin-boot-identity-and-terminal-startup-revalidation)
 for the proof and refusal boundaries.
+
+## Interrupted selection and claim recovery
+
+Execute-cycle startup reconciles tasks interrupted before their first attempt.
+An existing `claim_verified` record is confirmed, not reported as an unfinished
+claim. If completion was not recorded, exact assignment to `assignment_login`,
+matching issue identity, ready marker and Project membership establish it without
+another GitHub assignment write. An unobservable claim stays held.
+
+An unfinished worktree intent is recovered only for the mapped checkout, task
+branch, exact saved base commit and a clean registered Git worktree. An absent
+path is created using that same pinned commit, without fetching a different base.
+Partial paths, foreign repositories, changed branches/tips and local changes are
+left untouched and held. Historical intents without a pinned base cannot be
+adopted automatically. Reconcile never launches; the execute scheduler may launch
+an attempt-free verified task after fresh claim, PR-absence and account checks.
+An already-recorded launch intent is never replayed automatically.
+
+Source holds keep their own capacity slot but no longer stop dispatch to free
+slots. Local state errors, unresolved stops and attempt reconciliation errors
+still block globally. To release an interrupted selection, use:
+
+```text
+luthor abandon TASK --config PATH --actor LOGIN --reason TEXT --execute
+```
+
+This accepts `preparing`/`selected`/`claimed` tasks with no attempt, or a launch
+intent proven never dispatched by the existing strict continuation proof. A busy
+worktree owner or any potentially running attempt is refused. The audit records
+actor, reason and previous phase; GitHub, worktree files and branches are not
+changed. The operator can unassign the issue separately and let discovery select
+a new task. The abandoned task's complete history remains available.
 
 ## Worker build pins
 

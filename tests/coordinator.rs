@@ -9,6 +9,7 @@ mod coordinator {
     mod isolation;
     pub(crate) mod resume_scenarios;
     pub(crate) mod scheduling_scenarios;
+    pub(crate) mod source_interruptions;
     pub(crate) mod waiting;
 
     pub(crate) use fakes::{FakeGithub, FakeLauncher, FakePr, FakeWriter, FixedIds};
@@ -290,4 +291,31 @@ fn scheduler_reports_low_disk_space_without_consuming_ids_or_reservations() {
         luthor::state::task_records::task_count(&f.store).unwrap(),
         0
     );
+}
+
+#[test]
+fn issue67_interrupted_source_child() {
+    coordinator::source_interruptions::interrupted_source_child();
+}
+#[test]
+fn issue67_every_killed_source_boundary_recovers_or_holds_only_its_task() {
+    coordinator::source_interruptions::every_killed_source_boundary_recovers_or_holds_only_its_task(
+    );
+}
+#[test]
+fn issue67_observable_claim_without_completion_is_confirmed_once() {
+    coordinator::source_interruptions::observable_claim_without_completion_is_confirmed_once();
+}
+
+#[test]
+fn issue67_partial_wrong_or_dirty_worktrees_hold_without_modification() {
+    coordinator::source_interruptions::partial_wrong_or_dirty_worktrees_hold_without_modification();
+}
+#[test]
+fn issue67_prelaunch_abandon_is_audited_and_allows_reselection() {
+    coordinator::source_interruptions::prelaunch_abandon_is_audited_and_allows_reselection();
+}
+#[test]
+fn issue67_unresolved_stop_remains_global_and_dispatched_attempt_cannot_be_abandoned() {
+    coordinator::source_interruptions::unresolved_stop_remains_global_and_dispatched_attempt_cannot_be_abandoned();
 }

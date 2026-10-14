@@ -406,12 +406,11 @@ fn interruption_after_root_creation_leaves_durable_intent_and_never_adopts_a_pat
     drop(f.store);
     let mut store = StateStore::open(&f.config.state_root, 1).unwrap();
     fs::create_dir(&intent.path).unwrap();
-    assert!(matches!(
-        ensure_worktree(&mut store, "task-1", &root, &f.config.mappings[0]),
-        Err(WorktreeError::Conflict(
-            "unfinished worktree intent requires inspection"
-        ))
-    ));
+    let outcome = ensure_worktree(&mut store, "task-1", &root, &f.config.mappings[0]);
+    assert!(
+        matches!(outcome, Err(WorktreeError::Conflict(_))),
+        "{outcome:?}"
+    );
     assert_eq!(
         task_records::task_phase(&store, "task-1")
             .unwrap()

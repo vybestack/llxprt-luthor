@@ -14,6 +14,7 @@ mod recovery;
 mod retirement;
 pub use retirement::{RetiredTask, RetirementReport, abandon_task, retire_finished_tasks};
 mod recovery_commit;
+mod source_dispatch;
 mod source_observation;
 pub use reconciliation::reconcile_with_pr;
 pub use recovery::operator_recover_missing_receipt;
@@ -45,62 +46,10 @@ pub use retry::{RetryDependencies, retry_one};
 use std::collections::HashSet;
 mod ids;
 pub use ids::{IdCreator, OsIdCreator};
-use thiserror::Error;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AttemptReview {
-    Running,
-    Completed(supervisor::Reconciliation),
-    Held(supervisor::Reconciliation),
-    Error(String),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AttemptReport {
-    pub task_id: String,
-    pub attempt_id: String,
-    pub review: AttemptReview,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SourceHold {
-    pub task_id: String,
-    pub kind: String,
-}
-
+mod reports;
 pub use recovery_commit::RecoveryResult;
-
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct StartupReport {
-    pub attempts: Vec<AttemptReport>,
-    pub source_holds: Vec<SourceHold>,
-}
-
-impl StartupReport {
-    /// Forget what reconciliation reported for tasks retired afterwards, and
-    /// recompute the source holds their retirement may have cleared.
-    pub fn settle_retired(
-        &mut self,
-        store: &StateStore,
-        retired: &[RetiredTask],
-    ) -> Result<(), StateError> {
-        self.attempts
-            .retain(|attempt| !retired.iter().any(|task| task.task_id == attempt.task_id));
-        self.source_holds = scheduling::unresolved_sources(store)?
-            .into_iter()
-            .map(|(task_id, kind)| SourceHold { task_id, kind })
-            .collect();
-        Ok(())
-    }
-
-    pub fn scheduling_blocked(&self) -> bool {
-        !self.source_holds.is_empty()
-            || self
-                .attempts
-                .iter()
-                .any(|attempt| matches!(attempt.review, AttemptReview::Error(_)))
-    }
-}
+pub use reports::{AttemptReport, AttemptReview, ScheduleReport, SourceHold, StartupReport};
 
 /// Reconcile every durable nonterminal attempt, even if a prior attempt cannot
 /// be verified. An error never releases its reservation and cannot be ignored by
@@ -126,6 +75,15 @@ pub fn startup_reconcile_all<P: ProjectReader, Q: PullRequestReader>(
             review,
         });
     }
+    let tasks = scheduling::unresolved_sources(store)?
+        .into_iter()
+        .map(|(task, _)| task)
+        .collect::<std::collections::BTreeSet<_>>();
+    for task in tasks {
+        if task_records::latest_attempt(store, &task)?.is_none() {
+            reconcile_source(store, &task, projects)?;
+        }
+    }
     report.source_holds = scheduling::unresolved_sources(store)?
         .into_iter()
         .map(|(task_id, kind)| SourceHold { task_id, kind })
@@ -146,15 +104,7 @@ impl SupervisorLauncher for ProductionLauncher {
     }
 }
 
-#[derive(Debug, Error)]
-pub enum ScheduleError {
-    #[error(transparent)]
-    Dispatch(#[from] DispatchError),
-    #[error(transparent)]
-    State(#[from] StateError),
-    #[error("ID generation failed: {0}")]
-    Id(#[from] std::io::Error),
-}
+pub use ports::ScheduleError;
 
 pub struct DispatchDependencies<'a, P, Q, W, L> {
     pub config: &'a Config,
@@ -247,16 +197,6 @@ pub struct ScheduleDependencies<'a, P, Q, W, L, I> {
     pub ids: &'a mut I,
 }
 
-#[derive(Debug, Default)]
-pub struct ScheduleReport {
-    pub startup: StartupReport,
-    pub launched: Vec<LaunchPlan>,
-    pub skipped_existing: Vec<(String, String)>,
-    pub capacity_full: bool,
-    pub disk_space: Option<crate::disk::DiskSpace>,
-    pub pr_repair: PrRepairReport,
-}
-
 /// Selected candidates are finite; no held or previously selected issue is
 /// retried. A failed dispatch stops this pass without trying another worker.
 pub fn schedule_candidates<P, Q, W, L, I>(
@@ -289,15 +229,7 @@ where
     L: SupervisorLauncher,
     I: IdCreator,
 {
-    let ScheduleDependencies {
-        config,
-        config_revision,
-        projects,
-        prs,
-        assignments,
-        launcher,
-        ids,
-    } = dependencies;
+    let d = dependencies;
     let mut report = ScheduleReport {
         startup,
         ..Default::default()
@@ -305,6 +237,17 @@ where
     if report.startup.scheduling_blocked() {
         return Ok(report);
     }
+    source_dispatch::dispatch_reconciled_sources(
+        store,
+        &mut report,
+        source_dispatch::SourceDispatchDependencies {
+            config: d.config,
+            projects: d.projects,
+            prs: d.prs,
+            launcher: d.launcher,
+            ids: d.ids,
+        },
+    )?;
     let mut seen = HashSet::new();
     for candidate in candidates {
         let identity = (
@@ -317,13 +260,6 @@ where
             report.skipped_existing.push(identity);
             continue;
         }
-        if !scheduling::unresolved_sources(store)?.is_empty() {
-            report.startup.source_holds = scheduling::unresolved_sources(store)?
-                .into_iter()
-                .map(|(task_id, kind)| SourceHold { task_id, kind })
-                .collect();
-            break;
-        }
         match scheduling::ensure_dispatch_capacity(store) {
             Ok(()) => {}
             Err(StateError::Capacity { .. }) => {
@@ -332,23 +268,23 @@ where
             }
             Err(error) => return Err(error.into()),
         }
-        if record_dispatch_space(config, &mut report)? {
+        if record_dispatch_space(d.config, &mut report)? {
             break;
         }
-        let task_id = format!("task-{}", ids.create()?);
-        let attempt_id = format!("attempt-{}", ids.create()?);
+        let task_id = format!("task-{}", d.ids.create()?);
+        let attempt_id = format!("attempt-{}", d.ids.create()?);
         let plan = dispatch_one(
             store,
             &candidate,
             DispatchDependencies {
-                config,
-                config_revision,
+                config: d.config,
+                config_revision: d.config_revision,
                 task_id: &task_id,
                 attempt_id: &attempt_id,
-                projects,
-                prs,
-                assignments,
-                launcher,
+                projects: d.projects,
+                prs: d.prs,
+                assignments: d.assignments,
+                launcher: d.launcher,
             },
         )?;
         report.launched.push(plan);

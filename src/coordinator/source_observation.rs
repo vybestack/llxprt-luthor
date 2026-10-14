@@ -20,15 +20,17 @@ pub struct SourceReconciliation {
     pub worktree: Option<WorktreeInspection>,
 }
 
-/// Observe unfinished source operations without verifying an intent, assigning,
-/// adopting a worktree, or releasing the task for scheduling.
+/// Reconcile source operations from durable intent and fresh observable proof.
+/// Never reassign an issue or launch a worker; uncertain tasks retain their slot.
 pub fn reconcile_source<P: ProjectReader>(
     store: &mut StateStore,
     task_id: &str,
     projects: &mut P,
 ) -> Result<SourceReconciliation, StateError> {
-    if task_records::task_phase(store, task_id)?.is_none()
-        || task_records::latest_attempt(store, task_id)?.is_some()
+    if !matches!(
+        task_records::task_phase(store, task_id)?.as_deref(),
+        Some("preparing" | "selected" | "claimed" | "held")
+    ) || task_records::latest_attempt(store, task_id)?.is_some()
     {
         return Err(StateError::InvalidSelection);
     }
@@ -45,12 +47,18 @@ pub fn reconcile_source<P: ProjectReader>(
     if let Some(selection) = task_records::selection_evidence(store, task_id)? {
         observe_project(&selection, projects, &mut report);
         observe_claim_intent(store, &selection, &mut report)?;
-        observe_worktree(store, &selection, &mut report)?;
+        if report.reasons.is_empty() {
+            recover_worktree(store, &selection, &mut report)?;
+        } else {
+            observe_worktree(store, &selection, &mut report)?;
+        }
     } else {
         report.reasons.push("selection_missing");
     }
     if report.reasons.is_empty() {
-        report.reasons.push("prelaunch_not_verified");
+        report.status = "verified";
+    } else {
+        task_records::hold_task(store, task_id, "source reconciliation held")?;
     }
     journal::record_evidence(
         store,
@@ -149,7 +157,7 @@ fn issue_identity_matches(candidate: &Candidate, issue: &Issue) -> bool {
 }
 
 fn observe_claim_intent(
-    store: &StateStore,
+    store: &mut StateStore,
     selection: &SelectionEvidence,
     report: &mut SourceReconciliation,
 ) -> Result<(), StateError> {
@@ -163,7 +171,76 @@ fn observe_claim_intent(
         if report.assignees.as_deref() == Some(&[][..]) {
             report.reasons.push("assignment_not_observed");
         }
+        let verified = task_records::source_claim_verified(store, &report.task_id)?;
+        let login = &selection.effective_config.assignment_login;
+        if verified.as_ref().is_some_and(|payload| payload != login) {
+            report.reasons.push("claim_intent_mismatch");
+        }
+        let assigned = report.assignees.as_deref() == Some(&[login.clone()][..]);
+        if report.reasons.is_empty() && (verified.is_some() || assigned) {
+            task_records::confirm_claim(store, &report.task_id)?;
+        } else if verified.is_none() {
+            report.reasons.push("claim_intent_unverified");
+        }
+    } else {
         report.reasons.push("claim_intent_unverified");
+    }
+    Ok(())
+}
+
+fn recover_worktree(
+    store: &mut StateStore,
+    selection: &SelectionEvidence,
+    report: &mut SourceReconciliation,
+) -> Result<(), StateError> {
+    let owner = crate::ownership::WorktreeOwner::acquire(store.root(), &report.task_id);
+    let Ok(_owner) = owner else {
+        report.reasons.push("worktree_unverified");
+        return Ok(());
+    };
+    match crate::disk::inspect(
+        &selection.effective_config.worktree_root,
+        selection.effective_config.min_free_space_bytes,
+    ) {
+        Ok(space) if space.dispatch_held => {
+            report.reasons.push("worktree_unverified");
+            return Ok(());
+        }
+        Ok(_) => {}
+        Err(worktree::WorktreeError::State(error)) => return Err(error),
+        Err(worktree::WorktreeError::Io(error)) => return Err(error.into()),
+        Err(_) => {
+            report.reasons.push("worktree_read_failed");
+            return Ok(());
+        }
+    }
+    match worktree::ensure_worktree(
+        store,
+        &report.task_id,
+        &selection.effective_config.worktree_root,
+        &selection.candidate.mapping,
+    ) {
+        Ok(_) => {
+            let record = worktree_records::worktree_record(store, &report.task_id)?
+                .ok_or(StateError::InvalidSelection)?;
+            if worktree::verify_never_dispatched(
+                &record,
+                &selection.candidate.mapping,
+                &selection.effective_config.worktree_root,
+                &report.task_id,
+            )
+            .is_err()
+            {
+                report.reasons.push("worktree_unverified");
+            } else {
+                report.worktree = Some(WorktreeInspection::IdentityMatches);
+            }
+        }
+        Err(worktree::WorktreeError::State(error)) => return Err(error),
+        Err(_) => {
+            report.reasons.push("worktree_unverified");
+            observe_worktree(store, selection, report)?;
+        }
     }
     Ok(())
 }
@@ -177,9 +254,13 @@ fn observe_worktree(
         return Ok(());
     };
     let root = &selection.effective_config.worktree_root;
-    let expected_path = std::fs::canonicalize(root)
-        .unwrap_or_else(|_| root.clone())
-        .join(&report.task_id);
+    let expected_path = match worktree::check_root(root) {
+        Ok(root) => root.join(&report.task_id),
+        Err(_) => {
+            report.reasons.push("worktree_read_failed");
+            return Ok(());
+        }
+    };
     if record.intent.path != expected_path {
         report.reasons.push("worktree_intent_mismatch");
         return Ok(());
