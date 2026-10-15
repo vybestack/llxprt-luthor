@@ -17,6 +17,61 @@ Synthetic example (all paths, IDs and names are illustrative; no key is present)
 }
 ```
 
+### Worktree root placement (issue #33)
+
+Choose a **short, dedicated absolute `worktree_root` outside the Luthor checkout
+and any other Cargo or similar build-tool workspace**. Keep the mapped checkout,
+private `state_root` and worker worktrees separate. For example, a synthetic
+layout could use `/src/luthor` for Luthor, `/src/example-code` for the mapped
+checkout, `/private/luthor/state` for state and `/private/lw` for `worktree_root`.
+The paths are illustrative, not instructions to modify a live installation.
+Validate access controls and the actual ancestor directories before use.
+
+Cargo walks up from a package to find its workspace. Git worktree isolation
+does not stop that search. A target Rust package with no `[workspace]` table,
+placed at `<luthor checkout>/tmp/worktrees/task-…`, can discover Luthor's
+`Cargo.toml` (`[workspace] members = ["xtask"]`) and fail with “current package
+believes it's in a workspace when it's not.” An ignored `tmp/` directory or a
+Git worktree `.git` file is not a Cargo workspace boundary. The same risk applies
+to an unrelated enclosing workspace, not only Luthor's own manifest. Do not
+modify a target repository's manifest just to compensate for its launch location.
+
+Before queueing a Rust repository, inspect the proposed root's ancestors for
+`Cargo.toml` and other build-tool configuration. In a disposable representative
+worktree at that location, run `cargo locate-project --workspace` and
+`cargo metadata --offline --locked --no-deps --format-version 1` with the intended
+worker environment and an existing lockfile. Confirm they identify the target's
+own workspace, not an ancestor's. These checks do not replace the target's build
+and test gates. Luthor's current config validation and worktree preflight check
+Git/path identity, **not** Cargo workspace membership or other build tools;
+a successful preflight alone does not establish a safe build environment.
+
+Keep the root short as well as separate: the generated `task-<id>` component,
+the worker's `tmp/` tree, and extracted source bundles all add path length.
+A root that fits Luthor's own stop-socket check can still yield worker test paths
+longer than the platform's Unix-domain socket limit. There is no universal safe
+root length independent of target fixture suffixes. Verify the target's fixtures;
+where supported, bind/connect sockets through bounded relative paths while
+keeping cwd stable, rather than changing a timeout or weakening an assertion.
+See [Luthor's confined fixture guidance](../xtask/README.md) for local tests.
+
+Placement is an operator configuration contract, not an environment-inheritance
+fix. In particular, an ambient `CARGO_HOME` that happens to stop Cargo's ancestor
+search masked the original failure; do not rely on it. This guidance adds no
+implicit worker environment overrides. If an installation deliberately chooses
+an environment-based solution instead, make it explicit in the configured
+worker command template/wrapper (for both initial and resume commands) and test
+that environment; exporting a variable in the daemon's launching shell is not a
+portable placement policy.
+
+Apply a corrected root **before selecting new tasks/queues**. A same-task retry
+may change command templates, but cannot change the saved `worktree_root`;
+resume also retains the original worktree. Editing the current config does not
+relocate existing tasks. Do not move a live worktree, rewrite saved state, or
+remove ownership locks to force adoption of a new location. Inspect and handle
+existing tasks through the documented operator lifecycle; this change neither
+migrates them nor edits any live configuration.
+
 ### Optional source dependency ordering
 
 A source may include `dependencies`, an array of rules with an `issue` reference,
