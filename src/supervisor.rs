@@ -46,7 +46,7 @@ pub use error::SupervisorError;
 pub use launch::execute;
 #[cfg(unix)]
 pub use launch::{execute_amended, execute_amended_with_binary, execute_with_binary};
-pub(crate) use planning::{RetryPlanAuthorization, prepare_retry};
+pub(crate) use planning::{RetryPlanAuthorization, prepare_initial_owned, prepare_retry};
 pub use planning::{ensure_distinct_resume_prompt, prepare_initial, prepare_resume};
 #[cfg(unix)]
 pub(crate) use processes::{identity, private_bytes, verified_live_process};

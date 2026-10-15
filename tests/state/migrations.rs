@@ -21,7 +21,7 @@ pub(crate) fn migrates_v2_released_reservation_and_preserves_attempt_history() {
     let version: i32 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 4);
+    assert_eq!(version, 5);
     let rows: Vec<(String, String)> = connection
         .prepare("SELECT attempt_id,status FROM reservations ORDER BY attempt_id")
         .unwrap()
@@ -70,7 +70,7 @@ pub(crate) fn migrates_v1_database_atomically_and_preserves_records_and_capacity
     let version: i32 = connection
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 4);
+    assert_eq!(version, 5);
     for (table, expected) in [
         ("tasks", 1),
         ("attempts", 1),
@@ -165,7 +165,8 @@ pub(crate) fn v3_migration_preserves_history_foreign_keys_and_abandoned_reselect
     let conn = Connection::open(dir.path().join("state.sqlite3")).unwrap();
     // Recreate the v3 issue uniqueness, leaving every durable child row intact.
     conn.execute_batch(
-        "DROP INDEX tasks_one_unabandoned_issue;
+        "DROP TABLE launch_preparations;
+        DROP INDEX tasks_one_unabandoned_issue;
         CREATE UNIQUE INDEX legacy_issue_identity ON tasks(tracker_repo_id,issue_node_id);
         UPDATE sqlite_sequence SET seq=100 WHERE name='evidence';
         UPDATE sqlite_sequence SET seq=200 WHERE name='intents';
@@ -225,7 +226,7 @@ pub(crate) fn failed_v3_migration_rolls_back_every_table_and_version() {
     journal::record_evidence(&mut store, "old", None, "observation", "original").unwrap();
     drop(store);
     let conn = Connection::open(dir.path().join("state.sqlite3")).unwrap();
-    conn.execute_batch("PRAGMA user_version=3; CREATE TABLE evidence_v4 (conflict TEXT);")
+    conn.execute_batch("DROP TABLE launch_preparations; PRAGMA user_version=3; CREATE TABLE evidence_v4 (conflict TEXT);")
         .unwrap();
     drop(conn);
     assert!(StateStore::open(dir.path(), 1).is_err());

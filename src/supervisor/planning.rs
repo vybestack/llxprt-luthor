@@ -45,6 +45,17 @@ pub fn prepare_initial(
     task_id: &str,
     attempt_id: &str,
 ) -> Result<LaunchPlan, SupervisorError> {
+    let owner = crate::ownership::WorktreeOwner::acquire(store.root(), task_id)
+        .map_err(|_| SupervisorError::Conflict)?;
+    prepare_initial_owned(store, task_id, attempt_id, &owner)
+}
+
+pub(crate) fn prepare_initial_owned(
+    store: &mut StateStore,
+    task_id: &str,
+    attempt_id: &str,
+    owner: &crate::ownership::WorktreeOwner,
+) -> Result<LaunchPlan, SupervisorError> {
     validate_stop_socket_path(store.root(), attempt_id)?;
     let selection = worktree_records::claimed_worktree_context(store, task_id)?;
     crate::disk::inspect(
@@ -70,7 +81,10 @@ pub fn prepare_initial(
         config_revision: selection.config_revision,
         session_environment,
     };
-    launches::hold_launch_intent(store, task_id, attempt_id, &serde_json::to_string(&plan)?)?;
+    let protocol = owner
+        .protocol_evidence(store.root(), task_id, attempt_id)
+        .map_err(|_| SupervisorError::Conflict)?;
+    launches::hold_prepared_initial(store, &plan, &protocol)?;
     Ok(plan)
 }
 

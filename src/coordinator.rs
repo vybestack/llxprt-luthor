@@ -181,7 +181,7 @@ where
         {
             return Err(DispatchError::ExistingPr);
         }
-        let plan = supervisor::prepare_initial(store, task_id, attempt_id)?;
+        let plan = supervisor::prepare_initial_owned(store, task_id, attempt_id, &ownership)?;
         launcher.launch(store, &plan, &ownership)?;
         Ok(plan)
     })();

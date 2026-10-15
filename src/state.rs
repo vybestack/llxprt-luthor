@@ -22,6 +22,7 @@ pub mod pr_completion;
 pub(crate) mod pr_merge;
 pub(crate) mod pr_repair;
 pub(crate) mod pr_restore;
+pub(crate) mod preparation;
 mod proofs;
 pub mod retirement;
 pub mod scheduling;
