@@ -52,7 +52,7 @@ fn open_store(root: impl AsRef<Path>, capacity: usize) -> Result<StateStore, Sta
     connection.pragma_update(None, "journal_mode", "WAL")?;
     connection.pragma_update(None, "foreign_keys", "ON")?;
     let version: i32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if version > 4 {
+    if version > 5 {
         return Err(StateError::UnsupportedDatabaseVersion(version));
     }
     let tx = connection.transaction()?;
@@ -140,6 +140,17 @@ fn initialize_schema(
     if version < 4 {
         migrate_task_identity(tx)?;
         tx.pragma_update(None, "user_version", 4)?;
+    }
+    if version < 5 {
+        // No backfill: an old reservation cannot acquire contemporaneous proof.
+        tx.execute_batch(
+            "CREATE TABLE launch_preparations (
+            attempt_id TEXT PRIMARY KEY REFERENCES attempts(id),
+            task_id TEXT NOT NULL REFERENCES tasks(id),
+            launch_sequence INTEGER NOT NULL UNIQUE REFERENCES intents(sequence),
+            owner_payload TEXT NOT NULL);",
+        )?;
+        tx.pragma_update(None, "user_version", 5)?;
     }
     Ok(())
 }

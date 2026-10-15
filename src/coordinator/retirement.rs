@@ -130,8 +130,6 @@ pub fn abandon_task(
     actor: &str,
     reason: &str,
 ) -> Result<RetiredTask, StateError> {
-    let _owner = crate::ownership::WorktreeOwner::acquire(store.root(), task)
-        .map_err(|_| StateError::NotRetirable("worktree ownership is busy or unavailable"))?;
     let abandonment = Retirement {
         phase: RetiredPhase::Abandoned,
         reason: reason.to_owned(),

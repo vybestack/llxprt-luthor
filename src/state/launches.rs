@@ -91,7 +91,22 @@ pub fn hold_launch_intent(
     attempt_id: &str,
     detail: &str,
 ) -> Result<(), StateError> {
-    hold_launch(store, task_id, attempt_id, detail, None)
+    hold_launch(store, task_id, attempt_id, detail, None, None)
+}
+
+pub(crate) fn hold_prepared_initial(
+    store: &mut StateStore,
+    plan: &crate::model::LaunchPlan,
+    owner: &crate::ownership::WorktreeOwnerProtocol,
+) -> Result<(), StateError> {
+    hold_launch(
+        store,
+        &plan.task_id,
+        &plan.attempt_id,
+        &serde_json::to_string(plan)?,
+        None,
+        Some(owner),
+    )
 }
 
 pub fn launch_intent(store: &StateStore, attempt_id: &str) -> Result<Option<String>, StateError> {
@@ -140,6 +155,14 @@ pub fn begin_supervision(
     {
         return Err(StateError::LaunchBlocked);
     }
+    let attempts: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM attempts WHERE task_id=?1",
+        [task_id],
+        |r| r.get(0),
+    )?;
+    if attempts == 1 {
+        super::preparation::verify_protocol(&tx, task_id, attempt_id, owner_protocol)?;
+    }
     let previous: i64 = tx.query_row(
         "SELECT COUNT(*) FROM intents WHERE attempt_id=?1 AND kind='supervisor_dispatch'",
         [attempt_id],
@@ -183,13 +206,9 @@ fn hold_launch(
     attempt_id: &str,
     detail: &str,
     retry: Option<&RetryAuthorization>,
+    prepared_owner: Option<&crate::ownership::WorktreeOwnerProtocol>,
 ) -> Result<(), StateError> {
-    if attempt_id.is_empty()
-        || attempt_id.len() > 128
-        || !attempt_id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
-    {
+    if !crate::cli_identifiers::valid_attempt(attempt_id) {
         return Err(StateError::LaunchBlocked);
     }
     let tx = store.connection.transaction()?;
@@ -238,6 +257,9 @@ fn hold_launch(
             params![task_id, attempt_id, serde_json::to_string(audit)?],
         )?;
         tx.execute("INSERT INTO evidence(task_id,attempt_id,kind,payload) VALUES(?1,?2,'retry_pr_lookup',?3)", params![task_id, attempt_id, serde_json::to_string(&audit.pr)?])?;
+    }
+    if let Some(owner) = prepared_owner {
+        super::preparation::record(&tx, task_id, attempt_id, owner)?;
     }
     tx.execute("UPDATE tasks SET state='held' WHERE id=?1", [task_id])?;
     tx.commit()?;
@@ -290,6 +312,7 @@ pub(crate) fn hold_retry_intent(
         &audit.plan.attempt_id,
         &serde_json::to_string(&audit.plan)?,
         Some(audit),
+        None,
     )
 }
 

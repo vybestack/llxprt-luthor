@@ -58,9 +58,10 @@ pub struct Retirement {
 }
 
 /// A task may be retired only when no worker can still be running for it:
-/// every attempt has a durable, verified exit. A running task is held with an
-/// attempt that has no exit yet, so it never qualifies. A cleanup in progress
-/// owns the task until it finishes.
+/// every attempt has a durable, verified exit, except an explicitly abandoned
+/// initial attempt with contemporaneous preparation and never-dispatched proof.
+/// Historical absence-only attempts never qualify. A cleanup in progress owns
+/// the task until it finishes.
 const RETIRABLE: &str = "t.state IN ('preparing','selected','claimed','attention','held','paused','pr_complete')
     AND NOT EXISTS(SELECT 1 FROM attempts a WHERE a.task_id=t.id AND NOT EXISTS(
         SELECT 1 FROM evidence e WHERE e.task_id=t.id AND e.attempt_id=a.id AND e.kind='attempt_exit') AND a.id IS NOT ?2)
@@ -88,8 +89,19 @@ pub fn retire(
     task: &str,
     retirement: &Retirement,
 ) -> Result<(), StateError> {
-    let never_dispatched = never_dispatched_abandonment(store, task, retirement.phase)?;
-    let tx = store.connection.transaction()?;
+    let owner = if retirement.phase == RetiredPhase::Abandoned {
+        Some(
+            crate::ownership::WorktreeOwner::acquire(store.root(), task).map_err(|_| {
+                StateError::NotRetirable("worktree ownership is busy or unavailable")
+            })?,
+        )
+    } else {
+        None
+    };
+    let tx = store
+        .connection
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let never_dispatched = never_dispatched_abandonment(&tx, &store.root, task, owner.as_ref())?;
     let qualified: bool = tx.query_row(
         &format!("SELECT EXISTS(SELECT 1 FROM tasks t WHERE {RETIRABLE} AND t.id=?1)"),
         params![task, never_dispatched],
@@ -185,15 +197,15 @@ pub(crate) fn latest(conn: &Connection, task: &str) -> rusqlite::Result<Option<V
 }
 
 fn never_dispatched_abandonment(
-    store: &StateStore,
+    db: &Connection,
+    root: &std::path::Path,
     task: &str,
-    phase: RetiredPhase,
+    owner: Option<&crate::ownership::WorktreeOwner>,
 ) -> Result<Option<String>, StateError> {
-    if phase != RetiredPhase::Abandoned {
+    let Some(owner) = owner else {
         return Ok(None);
-    }
-    let latest: Option<String> = store
-        .connection
+    };
+    let latest: Option<String> = db
         .query_row(
             "SELECT id FROM attempts WHERE task_id=?1 ORDER BY rowid DESC LIMIT 1",
             [task],
@@ -203,9 +215,11 @@ fn never_dispatched_abandonment(
     let Some(attempt) = latest else {
         return Ok(None);
     };
-    match store.never_dispatched_context(task, &attempt) {
+    let proof = super::preparation::verify_owner(db, root, task, &attempt, owner)
+        .and_then(|()| super::continuation::read_context(db, root, task, &attempt));
+    match proof {
         Ok(_) => Ok(Some(attempt)),
-        Err(StateError::LaunchBlocked | StateError::Serialization(_)) => Ok(None),
+        Err(StateError::LaunchBlocked) => Ok(None),
         Err(error) => Err(error),
     }
 }

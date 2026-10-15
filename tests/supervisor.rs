@@ -1,5 +1,6 @@
 mod git_fixture;
 mod pin_adoption_fixture;
+mod supervisor_fixture;
 use luthor::{
     claim::{AssignmentError, AssignmentWriter},
     config::{CommandTemplate, Config, Mapping, Marker, Source},
@@ -44,7 +45,6 @@ mod supervisor {
     mod cleanup_output;
     mod cleanup_refusals;
     pub(super) mod completed_pr;
-    pub(super) mod configuration;
     pub(super) mod crashed_supervisor;
     pub(super) mod descendants;
     pub(super) mod dispatch;
@@ -82,7 +82,6 @@ mod supervisor {
 }
 mod worker_exit;
 
-use configuration::*;
 use execution::*;
 use log_writers::*;
 use pr_readers::*;
@@ -91,6 +90,7 @@ use resume_fixture::*;
 use scheduler_ports::*;
 use stop_race::*;
 use supervisor::*;
+use supervisor_fixture::*;
 
 #[test]
 fn initial_prompt_distinguishes_issue_assignee_from_author() {

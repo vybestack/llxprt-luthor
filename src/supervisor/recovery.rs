@@ -67,6 +67,13 @@ pub(crate) fn inspect_recovery_quiescence_with_owner(
         return Ok(RecoveryInspection::Held("attempt exit receipt exists"));
     }
 
+    // A newly acquired lock cannot establish historical attempt ownership.
+    // Refuse before interpreting repaired storage or probing process absence.
+    if !recovery_owner_verified(store, task_id, attempt_id, owner)? {
+        return Ok(RecoveryInspection::Held(
+            "historical worktree ownership proof is missing or invalid; reservation remains held",
+        ));
+    }
     let (attempts, plan) = match recovery_plan_evidence(store, task_id, attempt_id)? {
         Ok(context) => context,
         Err(reason) => return Ok(RecoveryInspection::Held(reason)),
@@ -105,6 +112,20 @@ pub(crate) fn inspect_recovery_quiescence_with_owner(
         &plan,
         owner,
     )
+}
+
+fn recovery_owner_verified(
+    store: &StateStore,
+    task: &str,
+    attempt: &str,
+    owner: &WorktreeOwner,
+) -> Result<bool, SupervisorError> {
+    use crate::ownership::OwnershipProtocolError;
+    match owner.verify_protocol(&store.connection, store.root(), task, attempt) {
+        Ok(()) => Ok(true),
+        Err(OwnershipProtocolError::Conflict) => Ok(false),
+        Err(OwnershipProtocolError::Sql(error)) => Err(error.into()),
+    }
 }
 
 #[cfg(unix)]
@@ -293,10 +314,7 @@ fn recovery_evidence_unchanged(
     {
         return held("registered process absence proof changed during inspection");
     }
-    if owner
-        .verify_protocol(&store.connection, store.root(), task_id, attempt_id)
-        .is_err()
-    {
+    if !recovery_owner_verified(store, task_id, attempt_id, owner)? {
         return held("worktree ownership proof is missing or invalid");
     }
     Ok(RecoveryInspection::Quiescent)

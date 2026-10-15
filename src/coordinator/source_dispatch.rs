@@ -60,7 +60,7 @@ where
             continue;
         }
         let attempt = format!("attempt-{}", dependencies.ids.create()?);
-        match supervisor::prepare_initial(store, &task, &attempt) {
+        match supervisor::prepare_initial_owned(store, &task, &attempt, &owner) {
             Ok(plan) => {
                 dependencies
                     .launcher

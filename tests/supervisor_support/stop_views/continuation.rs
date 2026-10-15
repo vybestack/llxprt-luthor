@@ -158,6 +158,9 @@ fn rows(db: &Connection, table: &str) -> Vec<String> {
         "evidence" => {
             "SELECT json_array(sequence,task_id,attempt_id,kind,payload,created_at) FROM evidence ORDER BY sequence"
         }
+        "launch_preparations" => {
+            "SELECT json_array(rowid,attempt_id,task_id,launch_sequence,owner_payload) FROM launch_preparations ORDER BY rowid"
+        }
         _ => panic!("unsupported fixture table"),
     };
     db.prepare(sql)
@@ -268,9 +271,16 @@ fn rejected_mutation(sql: &str) {
     let context = store.never_dispatched_context("task", "attempt-1").unwrap();
     let db = database(&config);
     db.execute_batch(sql).unwrap();
-    let before: Vec<_> = ["tasks", "attempts", "reservations", "intents", "evidence"]
-        .map(|table| rows(&db, table))
-        .into();
+    let before: Vec<_> = [
+        "tasks",
+        "attempts",
+        "reservations",
+        "intents",
+        "evidence",
+        "launch_preparations",
+    ]
+    .map(|table| rows(&db, table))
+    .into();
     assert!(
         store.never_dispatched_context("task", "attempt-1").is_err(),
         "{sql}"
@@ -285,9 +295,16 @@ fn rejected_mutation(sql: &str) {
             .is_err(),
         "{sql}"
     );
-    for (index, table) in ["tasks", "attempts", "reservations", "intents", "evidence"]
-        .iter()
-        .enumerate()
+    for (index, table) in [
+        "tasks",
+        "attempts",
+        "reservations",
+        "intents",
+        "evidence",
+        "launch_preparations",
+    ]
+    .iter()
+    .enumerate()
     {
         assert_eq!(rows(&db, table), before[index], "{sql}");
     }
@@ -340,7 +357,10 @@ fn never_dispatched_rejects_duplicate_missing_and_attempt_scoped_prelaunch_proof
         rejected_mutation(&format!(
             "INSERT INTO intents(id,task_id,attempt_id,kind,detail) SELECT 'duplicate',task_id,attempt_id,kind,detail FROM intents WHERE kind='{kind}';"
         ));
-        rejected_mutation(&format!("DELETE FROM intents WHERE kind='{kind}';"));
+        // Remove dependent preparation only when deleting its original launch.
+        rejected_mutation(&format!(
+            "DELETE FROM launch_preparations WHERE launch_sequence IN              (SELECT sequence FROM intents WHERE kind='{kind}');              DELETE FROM intents WHERE kind='{kind}';"
+        ));
     }
     rejected_mutation("UPDATE intents SET attempt_id=NULL WHERE kind='launch';");
     rejected_mutation("UPDATE intents SET attempt_id='attempt-1' WHERE kind='claim_assignment';");
@@ -384,7 +404,12 @@ fn never_dispatched_requires_held_first_and_latest_unfinished_reserved_exact_att
         "DELETE FROM reservations;",
         "INSERT INTO attempts(id,task_id,lifecycle) VALUES('later','task','launch_intended');",
         "INSERT INTO attempts(rowid,id,task_id,lifecycle,outcome) VALUES(-1,'older','task','completed','historical');",
-        "UPDATE attempts SET id='older'; INSERT INTO attempts(id,task_id,lifecycle) VALUES('attempt-1','task','launch_intended');",
+        // Retain the original renamed-attempt mutation, first removing the new
+        // dependent proof so SQLite permits constructing the invalid history.
+        "DELETE FROM launch_preparations; UPDATE attempts SET id='older'; INSERT INTO attempts(id,task_id,lifecycle) VALUES('attempt-1','task','launch_intended');",
+        // Also preserve the current attempt's valid preparation binding while
+        // adding unfinished history; refuse for history, not a missing proof.
+        "INSERT INTO attempts(rowid,id,task_id,lifecycle) VALUES(0,'older','task','launch_intended');",
     ] {
         rejected_mutation(sql);
     }

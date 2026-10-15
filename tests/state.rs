@@ -10,6 +10,7 @@ mod state {
 
     pub(crate) mod migrations;
     pub(crate) mod persistence;
+    mod preparation;
     pub(crate) mod recovery;
     pub(crate) mod selection;
     mod support;

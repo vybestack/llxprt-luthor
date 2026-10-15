@@ -84,6 +84,12 @@ pub(crate) fn begin_amended_supervision(
     }
     let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let proof = prepare_proof(&tx, root, context, config, revision)?;
+    super::preparation::verify_protocol(
+        &tx,
+        context.task_id(),
+        context.attempt_id(),
+        owner_protocol,
+    )?;
     let owner_count: i64 = tx.query_row(
         "SELECT COUNT(*) FROM evidence WHERE task_id=?1 AND attempt_id=?2 AND kind='worktree_owner_protocol'",
         params![context.task_id(), context.attempt_id()],

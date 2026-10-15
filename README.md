@@ -438,11 +438,37 @@ luthor abandon TASK --config PATH --actor LOGIN --reason TEXT --execute
 ```
 
 This accepts `preparing`/`selected`/`claimed` tasks with no attempt, or a launch
-intent proven never dispatched by the existing strict continuation proof. A busy
+intent proven never dispatched by contemporaneous preparation ownership and the
+strict continuation proof (not merely absent dispatch rows). A busy
 worktree owner or any potentially running attempt is refused. The audit records
 actor, reason and previous phase; GitHub, worktree files and branches are not
 changed. The operator can unassign the issue separately and let discovery select
 a new task. The abandoned task's complete history remains available.
+
+## Historical attempts without sufficient proof
+
+Historical unknown attempts remain **permanently held** under the current
+contract. A free lock today, absent processes, empty logs, repaired storage,
+issue closure or PR merge cannot prove that an old worker never started or
+exited safely. In particular, a pre-owner-protocol launch cannot be adopted, and
+an old Broken-pipe dispatch without terminal abort/exit proof cannot be relabeled
+as a dispatch abort. Do not use continuation, amendment, retry, resume, abandon,
+cleanup or manual reservation edits to bypass either hold.
+
+New initial launches record attempt-bound preparation ownership atomically with
+their reservation and launch intent. Undispatched continuation/amendment and
+abandonment require that contemporaneous proof and its current owner binding;
+schema migration never backfills it for old attempts. Attempt-free selections
+and already verified terminal attempts keep their existing recovery contracts.
+
+If no authorized recovery proof exists, the only operational alternative is
+external isolation and decommissioning of the **whole queue**, preserving its
+unknown history and reserved capacity. This is not a reservation-release command.
+A replacement queue must have externally enforced non-overlapping ownership and
+resource accounting; fresh state alone is not authority to restart unknown work.
+See [the permanent-hold and controlled queue-retirement contract](dev-docs/issue27-historical-hold.md)
+for prerequisites, explicit refusals and hermetic regression coverage. This does
+not authorize modifying or retrying either live attempt from issue #27.
 
 ## Worker build pins
 

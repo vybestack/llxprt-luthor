@@ -193,7 +193,8 @@ fn snapshot(db: &Connection) {
         "CREATE TEMP TABLE saved_intents AS SELECT * FROM intents;
         CREATE TEMP TABLE saved_evidence AS SELECT * FROM evidence;
         CREATE TEMP TABLE saved_attempts AS SELECT * FROM attempts;
-        CREATE TEMP TABLE saved_reservations AS SELECT * FROM reservations;",
+        CREATE TEMP TABLE saved_reservations AS SELECT * FROM reservations;
+        CREATE TEMP TABLE saved_preparations AS SELECT * FROM launch_preparations;",
     )
     .unwrap();
 }
@@ -201,11 +202,13 @@ fn snapshot(db: &Connection) {
 fn restore(db: &Connection) {
     db.execute_batch(
         "BEGIN IMMEDIATE;
+        DELETE FROM launch_preparations;
         DELETE FROM intents; INSERT INTO intents SELECT * FROM saved_intents;
         DELETE FROM evidence; INSERT INTO evidence SELECT * FROM saved_evidence;
         DELETE FROM reservations; DELETE FROM attempts;
         INSERT INTO attempts SELECT * FROM saved_attempts;
         INSERT INTO reservations SELECT * FROM saved_reservations;
+        INSERT INTO launch_preparations SELECT * FROM saved_preparations;
         COMMIT;",
     )
     .unwrap();

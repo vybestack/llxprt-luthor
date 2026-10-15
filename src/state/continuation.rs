@@ -111,6 +111,8 @@ pub(crate) fn read_context_mode(
     validate_attempt(db, task_id, attempt_id)?;
     if dispatched {
         validate_owner_protocol(db, task_id, attempt_id)?;
+    } else {
+        super::preparation::verify(db, task_id, attempt_id)?;
     }
     let snapshot = saved_rows(db, task_id, attempt_id, dispatched)?;
     let mut intents = proof_rows(db, false, task_id, attempt_id)?;
