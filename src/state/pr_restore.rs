@@ -60,9 +60,15 @@ pub(crate) fn restore(
     Ok(())
 }
 
-/// Only the historical PR identity holds are recoverable as open PRs. Limits,
-/// semantic conflicts, config/session holds and uncertain launches stay held.
-const OPEN_REASONS: &str = "(SELECT payload FROM evidence WHERE task_id=t.id AND kind='held_reason' ORDER BY sequence DESC LIMIT 1) IN ('exit PR present','PR repair held: PR, process, receipt or ownership evidence did not verify','PR repair held: worktree identity or tip did not verify')";
+/// Exact historical and typed identity holds only. Limits, semantic conflicts,
+/// config/session holds and uncertain launches stay held.
+const OPEN_REASONS: &str = "(SELECT payload FROM evidence WHERE task_id=t.id AND kind='held_reason' ORDER BY sequence DESC LIMIT 1) IN (SELECT value FROM json_each(?1))";
+
+fn open_reasons() -> Result<String, StateError> {
+    Ok(serde_json::to_string(
+        &crate::pr_repair::open_hold_reasons(),
+    )?)
+}
 
 fn open_predicate() -> String {
     format!(
@@ -77,7 +83,7 @@ pub(crate) fn open_candidates(store: &StateStore) -> Result<Vec<String>, StateEr
             "SELECT t.id FROM tasks t WHERE {} ORDER BY t.rowid",
             open_predicate()
         ))?
-        .query_map([], |row| row.get(0))?
+        .query_map([open_reasons()?], |row| row.get(0))?
         .collect::<Result<_, _>>()?)
 }
 
@@ -89,10 +95,10 @@ pub(crate) fn restore_open(
     let tx = store.connection.transaction()?;
     let qualified: bool = tx.query_row(
         &format!(
-            "SELECT EXISTS(SELECT 1 FROM tasks t WHERE {} AND t.id=?1)",
+            "SELECT EXISTS(SELECT 1 FROM tasks t WHERE {} AND t.id=?2)",
             open_predicate()
         ),
-        [task],
+        params![open_reasons()?, task],
         |row| row.get(0),
     )?;
     if !qualified {

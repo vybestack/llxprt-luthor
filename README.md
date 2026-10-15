@@ -174,7 +174,14 @@ any state change, and the cycle's single JSON document reports it under
 unreadable PR lookup is skipped the same way and asked again next cycle. Only a
 genuine safety conflict on an open PR (unproved head change, changed author,
 claim or process evidence) holds the task, with a specific `PR repair held: ...`
-reason listed under `pr_repair.held`. One task's problem never stops the rest of the pass,
+reason listed under `pr_repair.held`. Supervisor failures now name a bounded
+cause code rather than upstream error text: for example `pr-identity-unverified`,
+`owner-lock-busy`, `owner-protocol-unverified`, `process-evidence-unverified`, or
+`receipt-unverified`. The same reason is saved as `held_reason` evidence. A busy
+owner or a verified running attempt (`attempt-settling`) says restore will retry
+next cycle: wait for the lock/process accounting to settle rather than changing
+the branch underneath a worker. These messages do not authorize a launch or
+bypass any proof. One task's problem never stops the rest of the pass,
 reconciliation or dispatch.
 
 A PR head may legitimately advance through GitHub `update-branch` or manual
@@ -190,7 +197,10 @@ are never fast-forwarded.
 
 Execute cycles also restore open-PR tasks held with `exit PR present`,
 `PR repair held: PR, process, receipt or ownership evidence did not verify`, or
-`PR repair held: worktree identity or tip did not verify`. Restoration requires
+`PR repair held: worktree identity or tip did not verify`, or the new bounded
+PR/ownership/attempt/process/receipt identity causes above. The allowlist is exact;
+launch, worker-build, session and infrastructure error codes do not qualify.
+Restoration requires
 fresh matching PR and claim evidence, accounted attempts, verified receipts,
 and an owned worktree at the matching or safely adoptable tip. An operator
 fast-forward or an interrupted adoption can therefore return to `pr_complete`
@@ -198,7 +208,8 @@ and normal bounded repair. An old `exit PR present` without a saved completion
 proof requires an exact local/PR tip match; it cannot adopt an unrecorded remote
 head. Restoration appends `pr_hold_restored` and reports the task under
 `pr_repair.restored`; unavailable evidence is reported under
-`pr_repair.restore_retained`. Live reservations, unfinished attempts, cleanup
+`pr_repair.restore_retained` with the current failed check's bounded reason.
+Live reservations, unfinished attempts, cleanup
 intents, semantic-conflict holds and incompatible/amended sessions are not
 restored. No restoration launches a worker by itself.
 

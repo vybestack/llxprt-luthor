@@ -50,6 +50,7 @@ pub(crate) use planning::{RetryPlanAuthorization, prepare_initial_owned, prepare
 pub use planning::{ensure_distinct_resume_prompt, prepare_initial, prepare_resume};
 #[cfg(unix)]
 pub(crate) use processes::{identity, private_bytes, verified_live_process};
+pub(crate) use reconciliation::recheck_pr_repair_exit;
 pub(crate) use reconciliation::recheck_retry_exit;
 pub use reconciliation::reconcile_attempt;
 pub use recovery::inspect_recovery_quiescence;

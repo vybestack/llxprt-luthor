@@ -7,13 +7,13 @@ use super::{
     ports::{DispatchError, PrVerificationStage, observation_time, verify_open_pr},
     retirement::{self, Observation, RetiredTask, Settlement},
 };
+use crate::pr_repair::RepairHoldCause;
 use crate::{
     claim,
     github::{
         project::ProjectReader,
         pull_request::{LookupResult, PrHealthReader, PullRequestEvidence, lookup},
     },
-    ownership::{WorktreeOwner, WorktreeOwnerInternal},
     pr_repair::MAX_PR_REPAIRS,
     state::{
         StateError, StateStore, journal, pr_repair, retirement::RetiredPhase, scheduling,
@@ -115,7 +115,7 @@ pub fn repair_verified_prs_after_cleanup<
                     reason,
                 }),
                 Resolution::Active => {
-                    let reason = hold_reason(&error);
+                    let reason = super::repair_hold::reason(&error);
                     task_records::hold_task(store, &task, &reason)?;
                     outcome.held.push(TaskNote {
                         task_id: task,
@@ -164,34 +164,6 @@ fn finished_instead_of_held<P: ProjectReader, Q: PrHealthReader>(
             Ok(Resolution::Active)
         }
     }
-}
-
-/// Bounded to the failing stage: upstream error text never enters task evidence.
-fn hold_reason(error: &DispatchError) -> String {
-    let cause = match error {
-        DispatchError::PullRequest(lookup) => {
-            format!("PR or check state could not be verified ({lookup})")
-        }
-        DispatchError::Claim(_) | DispatchError::ChangedClaim => {
-            "issue claim changed or could not be re-read".into()
-        }
-        DispatchError::Worktree(_) => "worktree identity or tip did not verify".into(),
-        DispatchError::Supervisor(supervisor::SupervisorError::WorkerBuildHeld(reason)) => {
-            reason.clone()
-        }
-        DispatchError::Supervisor(_) => {
-            "PR, process, receipt or ownership evidence did not verify".into()
-        }
-        DispatchError::State(StateError::LaunchBlocked) => {
-            "recorded context does not allow a repair launch (ambiguous PR or unverified history)"
-                .into()
-        }
-        DispatchError::State(_) => "task state could not be validated".into(),
-        DispatchError::RetryHeld { .. } | DispatchError::ExistingPr => {
-            "repair launch was refused".into()
-        }
-    };
-    format!("PR repair held: {cause}")
 }
 
 /// The PR is looked up before anything else: a task whose PR is no longer open
@@ -258,7 +230,9 @@ fn inspect_open_pr<P: ProjectReader, Q: PrHealthReader, L: SupervisorLauncher, I
         (pr, observation_time()?),
         PrVerificationStage::Exit,
     )
-    .map_err(|_| supervisor::SupervisorError::Conflict)?;
+    .map_err(|_| {
+        supervisor::SupervisorError::PrRepairHeld(RepairHoldCause::PrIdentityUnverified)
+    })?;
     // Release the inspection owner before the launch path acquires it anew.
     drop(super::pr_head::synchronize(
         store, task, &saved, &observed, projects,
@@ -270,7 +244,10 @@ fn inspect_open_pr<P: ProjectReader, Q: PrHealthReader, L: SupervisorLauncher, I
         &selection.candidate.mapping.required_checks,
     )?;
     if health.id != observed.id || health.head != observed.head_commit_sha {
-        return Err(supervisor::SupervisorError::Conflict.into());
+        return Err(supervisor::SupervisorError::PrRepairHeld(
+            RepairHoldCause::PrIdentityUnverified,
+        )
+        .into());
     }
     journal::record_evidence(
         store,
@@ -321,25 +298,7 @@ fn launch_repair<P: ProjectReader, L: SupervisorLauncher, I: IdCreator>(
     let selection =
         task_records::selection_evidence(store, task)?.ok_or(StateError::InvalidSelection)?;
     let (previous, _) = pr_repair::context(store, task)?;
-    let owner = WorktreeOwner::acquire_existing(store.root(), task)
-        .map_err(|_| supervisor::SupervisorError::Conflict)?;
-    owner
-        .verify_protocol(&store.connection, store.root(), task, &previous.attempt_id)
-        .map_err(|_| supervisor::SupervisorError::Conflict)?;
-    let mut terminal = None;
-    if !matches!(
-        supervisor::recheck_retry_exit(
-            store,
-            task,
-            &previous.attempt_id,
-            &owner,
-            false,
-            &mut terminal
-        )?,
-        supervisor::Reconciliation::Completed { .. }
-    ) {
-        return Err(supervisor::SupervisorError::Conflict.into());
-    }
+    let owner = super::pr_head::accounted_owner(store, task, &previous.attempt_id)?;
     let (item, issue) = claim::fresh(projects, &selection.candidate)?;
     if issue.assignees != [selection.effective_config.assignment_login.as_str()] {
         return Err(DispatchError::ChangedClaim);

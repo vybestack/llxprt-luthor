@@ -820,3 +820,5 @@ fn pin_adoption_enables_legacy_pr_repair_after_pin_hold_and_restart() {
 }
 
 mod head_advancement;
+
+mod hold_diagnostics;

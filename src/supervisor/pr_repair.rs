@@ -56,7 +56,10 @@ pub(crate) fn prepare_pr_repair(
         &previous,
         "previous PR worker",
     )?;
-    let worker_build = super::worker_pin::continuation(store, &first, &previous, &executable)?;
+    // The repair coordinator records the bounded hold. Do not first persist
+    // the worker-pin error payload (which can include paths or upstream text).
+    let worker_build =
+        super::worker_pin::continuation_build(store, &first, &previous, &executable)?;
     append_instructions(
         &mut args,
         attempt,

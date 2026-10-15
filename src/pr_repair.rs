@@ -5,6 +5,10 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 
+mod hold;
+pub use hold::RepairHoldCause;
+pub(crate) use hold::open_hold_reasons;
+
 pub const MAX_PR_REPAIRS: usize = 3;
 pub const REPAIR_RESULT_FILE: &str = ".luthor-pr-repair-result.json";
 /// The reason an earlier release wrote for any repair failure, including a

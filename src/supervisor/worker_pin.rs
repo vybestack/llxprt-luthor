@@ -1,4 +1,4 @@
-use super::SupervisorError;
+use super::error::SupervisorError;
 use crate::{
     model::LaunchPlan,
     state::{StateStore, task_records},
@@ -34,7 +34,7 @@ pub(crate) fn continuation(
     result
 }
 
-fn continuation_build(
+pub(crate) fn continuation_build(
     store: &StateStore,
     first: &LaunchPlan,
     latest: &LaunchPlan,
