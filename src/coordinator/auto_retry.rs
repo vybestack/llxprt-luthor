@@ -1,10 +1,10 @@
 //! Bounded automation for released attention tasks; all launch authority stays
 //! in the existing audited operator-retry path.
-mod outcome;
 use super::{
     IdCreator, RetryDependencies, SupervisorLauncher,
     ports::{DispatchError, observation_time},
     retry::retry_with_owner,
+    worker_outcome::{OutcomeObservation, RetryDecision, WorkerOutcome, decision, observe_outcome},
 };
 use crate::{
     config::{Config, RetryPolicy},
@@ -13,24 +13,8 @@ use crate::{
     ownership::{OwnershipError, WorktreeOwner},
     state::{StateError, StateStore, journal, scheduling},
 };
-pub use outcome::{OutcomeObservation, WorkerOutcome};
 use serde::Serialize;
 use serde_json::json;
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RetryDecision {
-    Ineligible,
-    NeedsHumanInput,
-    NonTransient,
-    Unclassified,
-    ClassDisabled,
-    Exhausted,
-    Backoff,
-    CapacityFull,
-    WorktreeBusy,
-    Launched,
-}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RetryObservation {
@@ -129,73 +113,6 @@ fn attention_tasks(store: &StateStore) -> Result<Vec<(String, String, u32)>, Sta
         )?
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
         .collect::<Result<_, _>>()?)
-}
-
-fn observe_outcome(
-    store: &mut StateStore,
-    plan: &LaunchPlan,
-    receipt: &crate::model::ExitReceipt,
-    now: u64,
-) -> Result<OutcomeObservation, DispatchError> {
-    let outcome = outcome::read(store.root(), plan, receipt)?;
-    if let Some(saved) = journal::evidence_payload(
-        store,
-        &plan.task_id,
-        Some(&plan.attempt_id),
-        "worker_outcome",
-    )? {
-        let saved: OutcomeObservation = serde_json::from_str(&saved).map_err(StateError::from)?;
-        if saved.outcome != outcome || saved.observed_at_unix_secs == 0 {
-            return Err(StateError::LaunchBlocked.into());
-        }
-        return Ok(saved);
-    }
-    let observation = OutcomeObservation {
-        outcome,
-        observed_at_unix_secs: now,
-    };
-    journal::record_evidence(
-        store,
-        &plan.task_id,
-        Some(&plan.attempt_id),
-        "worker_outcome",
-        &serde_json::to_string(&observation).map_err(StateError::from)?,
-    )?;
-    Ok(observation)
-}
-
-fn decision(
-    policy: &RetryPolicy,
-    observation: &OutcomeObservation,
-    count: u32,
-    now: u64,
-) -> Result<Option<RetryDecision>, StateError> {
-    let RetryPolicy::Bounded {
-        max_attempts,
-        backoff_secs,
-        classes,
-    } = policy
-    else {
-        return Err(StateError::InvalidConfig);
-    };
-    let class = match observation.outcome {
-        WorkerOutcome::Transient { class } => class,
-        WorkerOutcome::NeedsHumanInput => return Ok(Some(RetryDecision::NeedsHumanInput)),
-        WorkerOutcome::NonTransient => return Ok(Some(RetryDecision::NonTransient)),
-        WorkerOutcome::Unclassified => return Ok(Some(RetryDecision::Unclassified)),
-    };
-    let elapsed = now
-        .checked_sub(observation.observed_at_unix_secs)
-        .ok_or(StateError::LaunchBlocked)?;
-    Ok(if !classes.contains(&class) {
-        Some(RetryDecision::ClassDisabled)
-    } else if count >= *max_attempts {
-        Some(RetryDecision::Exhausted)
-    } else if elapsed < u64::from(*backoff_secs) {
-        Some(RetryDecision::Backoff)
-    } else {
-        None
-    })
 }
 
 fn launch_retry<P: ProjectReader, Q: PullRequestReader, L: SupervisorLauncher, I: IdCreator>(

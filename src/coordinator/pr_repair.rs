@@ -28,6 +28,7 @@ use serde::Serialize;
 #[derive(Debug, Default)]
 pub struct RepairOutcome {
     pub launched: Vec<supervisor::LaunchPlan>,
+    pub retry_scheduled: Vec<crate::pr_repair::RepairRetry>,
     pub skipped: Vec<TaskNote>,
     pub held: Vec<TaskNote>,
     pub retired: Vec<RetiredTask>,
@@ -36,6 +37,7 @@ pub struct RepairOutcome {
 /// The cycle's account of verified-PR housekeeping, reported alongside launches.
 #[derive(Debug, Default, Serialize)]
 pub struct PrRepairReport {
+    pub retry_scheduled: Vec<crate::pr_repair::RepairRetry>,
     pub restored: Vec<String>,
     pub restore_retained: Vec<TaskNote>,
     pub skipped: Vec<TaskNote>,
@@ -48,6 +50,7 @@ enum Inspection {
     Idle,
     Launched(Box<supervisor::LaunchPlan>),
     Skipped(String),
+    RetryScheduled(crate::pr_repair::RepairRetry),
 }
 
 /// Visits every `pr_complete` task once. One task's problem is recorded against
@@ -92,7 +95,10 @@ pub fn repair_verified_prs_after_cleanup<
     ids: &mut I,
     cleanup: &crate::cleanup::CleanupReport,
 ) -> Result<RepairOutcome, DispatchError> {
-    let mut outcome = RepairOutcome::default();
+    let mut outcome = RepairOutcome {
+        skipped: super::repair_retry::restore(store, config, projects, prs)?,
+        ..Default::default()
+    };
     for task in pr_repair::candidates(store)? {
         if let Some(skip) = cleanup.skipped.iter().find(|skip| skip.task_id == task) {
             outcome.skipped.push(TaskNote {
@@ -104,6 +110,7 @@ pub fn repair_verified_prs_after_cleanup<
         match inspect_task(store, config, &task, projects, prs, launcher, ids) {
             Ok(Inspection::Launched(plan)) => outcome.launched.push(*plan),
             Ok(Inspection::Idle) => {}
+            Ok(Inspection::RetryScheduled(retry)) => outcome.retry_scheduled.push(retry),
             Ok(Inspection::Skipped(reason)) => outcome.skipped.push(TaskNote {
                 task_id: task,
                 reason,
@@ -177,6 +184,9 @@ fn inspect_task<P: ProjectReader, Q: PrHealthReader, L: SupervisorLauncher, I: I
     launcher: &mut L,
     ids: &mut I,
 ) -> Result<Inspection, DispatchError> {
+    if let Some(retry) = super::repair_retry::pending(store, config, task)? {
+        return Ok(Inspection::RetryScheduled(retry));
+    }
     let saved = pr_repair::saved_pr(&store.connection, task)?;
     // Exhaustive absence covers a merged/closed PR and leaves cleanup to its
     // separate exact terminal-PR proof. It must never trigger a new PR.

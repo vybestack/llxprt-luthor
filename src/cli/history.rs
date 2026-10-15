@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 pub(crate) fn cached_verified_pr(conn: &Connection, task: &str) -> Result<Value, CliError> {
     let mut stmt = conn
         .prepare(
-            "SELECT attempt_id,COALESCE((SELECT h.payload FROM evidence h WHERE h.task_id=?1 AND h.attempt_id=evidence.attempt_id AND h.kind='pr_head_verified' ORDER BY h.sequence DESC LIMIT 1),payload) FROM evidence WHERE task_id=?1 AND attempt_id=(SELECT attempt_id FROM evidence WHERE task_id=?1 AND kind='verified_open_pr' ORDER BY sequence DESC LIMIT 1) AND kind='verified_open_pr'",
+            "SELECT attempt_id,COALESCE((SELECT h.payload FROM evidence h WHERE h.task_id=?1 AND h.attempt_id=evidence.attempt_id AND h.kind='pr_head_verified' ORDER BY h.sequence DESC LIMIT 1),payload) FROM evidence WHERE task_id=?1 AND attempt_id=(SELECT attempt_id FROM evidence WHERE task_id=?1 AND kind IN ('verified_open_pr','pr_repair_retry_scheduled') ORDER BY sequence DESC LIMIT 1) AND kind IN ('verified_open_pr','pr_repair_retry_scheduled')",
         )
         .map_err(|_| CliError::Database)?;
     let rows = stmt
