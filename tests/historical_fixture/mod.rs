@@ -84,6 +84,12 @@ use luthor::github::{
 
 pub(crate) struct NoProjects;
 impl ProjectReader for NoProjects {
+    fn dependency(
+        &mut self,
+        _: &luthor::config::IssueReference,
+    ) -> Result<luthor::dependencies::DependencyState, ProjectReadError> {
+        panic!("unexpected dependency read")
+    }
     fn page(&mut self, _: &str, _: Option<&str>) -> Result<Page<ProjectItem>, ProjectReadError> {
         panic!("historical hold must precede project reads")
     }

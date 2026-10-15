@@ -73,7 +73,7 @@ pub fn discover<R: ProjectReader>(
     Ok(report)
 }
 
-fn external_read_failure(error: &ProjectReadError) -> bool {
+pub(crate) fn external_read_failure(error: &ProjectReadError) -> bool {
     error.category != ReadCategory::Malformed
         && (error.status.is_some()
             || matches!(

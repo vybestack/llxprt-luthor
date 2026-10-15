@@ -35,6 +35,12 @@ fn read_error(operation: ReadOperation, malformed: bool) -> ProjectReadError {
 }
 
 impl ProjectReader for Reader {
+    fn dependency(
+        &mut self,
+        _: &luthor::config::IssueReference,
+    ) -> Result<luthor::dependencies::DependencyState, ProjectReadError> {
+        panic!("unexpected dependency read")
+    }
     fn page(
         &mut self,
         project: &str,
@@ -82,6 +88,7 @@ impl ProjectReader for Reader {
 fn sources() -> Vec<Source> {
     ["BAD", "GOOD"]
         .map(|project| Source {
+            dependencies: Vec::new(),
             project_id: project.into(),
             repositories: vec!["org/repo".into()],
             ready_marker: Marker::Label {

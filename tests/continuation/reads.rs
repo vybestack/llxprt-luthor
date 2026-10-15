@@ -8,6 +8,12 @@ use serde_json::{Value, json};
 
 pub(super) struct Projects<'a>(pub &'a mut FakeGithub, pub &'static str);
 impl ProjectReader for Projects<'_> {
+    fn dependency(
+        &mut self,
+        _: &luthor::config::IssueReference,
+    ) -> Result<luthor::dependencies::DependencyState, ProjectReadError> {
+        panic!("unexpected dependency read")
+    }
     fn page(
         &mut self,
         project: &str,

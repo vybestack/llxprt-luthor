@@ -46,6 +46,7 @@ fn issue(repository: &str, number: u64) -> Value {
 
 fn source(repository: &str) -> Source {
     Source {
+        dependencies: Vec::new(),
         project_id: "PROJECT".into(),
         repositories: vec![repository.into()],
         ready_marker: Marker::Label {

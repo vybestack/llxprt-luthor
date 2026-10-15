@@ -1,6 +1,12 @@
 use serde::{Deserialize, Serialize};
 use std::{collections::HashSet, path::PathBuf};
 
+mod repository;
+use repository::validate_repository;
+
+mod dependencies;
+pub use dependencies::{DependencyRule, IssueReference};
+
 mod merge_policy;
 pub use merge_policy::{MergeMethod, MergePolicy};
 
@@ -81,6 +87,8 @@ pub struct Source {
     pub repositories: Vec<String>,
     pub ready_marker: Marker,
     pub milestone: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependencies: Vec<DependencyRule>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -208,6 +216,12 @@ impl Config {
         self.retry_policy.validate()?;
         validate_sources(&self.sources, &self.mappings)?;
         validate_mappings(&self.mappings)?;
+        dependencies::validate(self.sources.iter().map(|source| {
+            (
+                source.repositories.as_slice(),
+                source.dependencies.as_slice(),
+            )
+        }))?;
         validate_command(&self.initial)?;
         validate_command(&self.resume)?;
         Ok(())
@@ -365,21 +379,6 @@ fn contains_credential(value: &str) -> bool {
     .iter()
     .any(|needle| compact.contains(needle) || compact.starts_with(needle));
     sensitive && (value.starts_with('-') || value.contains('=') || lower.starts_with("bearer "))
-}
-
-fn validate_repository(value: &str) -> Result<(), ConfigError> {
-    let parts: Vec<_> = value.split('/').collect();
-    if parts.len() != 2
-        || parts.iter().any(|part| {
-            part.is_empty()
-                || !part
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
-        })
-    {
-        return Err(ConfigError::Invalid("invalid repository name".into()));
-    }
-    Ok(())
 }
 
 fn validate_push_remote(value: &str) -> Result<(), ConfigError> {

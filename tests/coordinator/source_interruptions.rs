@@ -117,6 +117,12 @@ struct TwoIssues {
     second: FakeGithub,
 }
 impl ProjectReader for TwoIssues {
+    fn dependency(
+        &mut self,
+        _: &luthor::config::IssueReference,
+    ) -> Result<luthor::dependencies::DependencyState, ProjectReadError> {
+        panic!("unexpected dependency read")
+    }
     fn page(
         &mut self,
         id: &str,

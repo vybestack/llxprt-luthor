@@ -29,6 +29,12 @@ pub struct Candidate {
     pub source: Source,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WaitingIssue {
+    pub candidate: Candidate,
+    pub dependencies: Vec<crate::dependencies::DependencyWait>,
+}
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum EligibilityError {
     #[error(transparent)]
@@ -90,7 +96,21 @@ where
             enumerate_source(reader, source)?,
         )?;
     }
-    Ok(candidates.into_values().collect())
+    let mut selected = Vec::new();
+    for candidate in candidates.into_values() {
+        if crate::dependencies::waiting(
+            reader,
+            &candidate.source.dependencies,
+            &candidate.repository,
+            candidate.issue_number,
+        )
+        .map_err(ProjectError::IssueRead)?
+        .is_empty()
+        {
+            selected.push(candidate);
+        }
+    }
+    Ok(selected)
 }
 
 fn add_candidates(
@@ -175,6 +195,7 @@ fn merge_candidate(
         if previous.mapping != candidate.mapping
             || previous.marker != candidate.marker
             || previous.source.milestone != candidate.source.milestone
+            || dependency_rule(previous) != dependency_rule(&candidate)
         {
             return Err(EligibilityError::ConflictingSource(key));
         }
@@ -182,6 +203,12 @@ fn merge_candidate(
         candidates.insert(key, candidate);
     }
     Ok(())
+}
+
+fn dependency_rule(candidate: &Candidate) -> Option<&crate::config::DependencyRule> {
+    candidate.source.dependencies.iter().find(|rule| {
+        rule.issue.repository == candidate.repository && rule.issue.number == candidate.issue_number
+    })
 }
 
 fn marker_matches(marker: &Marker, item: &ProjectItem, issue: &Issue) -> bool {
@@ -199,6 +226,7 @@ fn marker_matches(marker: &Marker, item: &ProjectItem, issue: &Issue) -> bool {
 #[derive(Debug, Default)]
 pub struct DiscoverySelection {
     pub candidates: Vec<Candidate>,
+    pub waiting: Vec<WaitingIssue>,
     pub candidate_read_failures: Vec<crate::github::project::CandidateReadFailure>,
     pub source_read_failures: Vec<crate::github::project::SourceReadFailure>,
 }
@@ -237,6 +265,35 @@ pub fn discover<R: ProjectReader>(
                 .iter()
                 .any(|failure| failure.project_id == candidate.project_id)
     });
-    report.candidates = candidates.into_values().collect();
+    for candidate in candidates.into_values() {
+        match crate::dependencies::waiting(
+            reader,
+            &candidate.source.dependencies,
+            &candidate.repository,
+            candidate.issue_number,
+        ) {
+            Ok(dependencies) if dependencies.is_empty() => report.candidates.push(candidate),
+            Ok(dependencies) => report.waiting.push(WaitingIssue {
+                candidate,
+                dependencies,
+            }),
+            Err(error) if crate::github::project::external_read_failure(&error) => {
+                report
+                    .candidate_read_failures
+                    .push(crate::github::project::CandidateReadFailure {
+                        project_id: candidate.project_id,
+                        item: candidate.item_id,
+                        issue: candidate.issue_node_id,
+                        http_status: error.status,
+                        code: error.code,
+                    });
+            }
+            Err(error) => return Err(ProjectError::IssueRead(error).into()),
+        }
+    }
+    report.waiting.sort_by(|a, b| {
+        (&a.candidate.repository, a.candidate.issue_number)
+            .cmp(&(&b.candidate.repository, b.candidate.issue_number))
+    });
     Ok(report)
 }

@@ -7,42 +7,6 @@ use crate::{
 };
 use std::collections::HashSet;
 
-pub(crate) fn candidates(
-    reader: &mut GhProjectReader,
-    config: &Config,
-    targets: Option<&(String, Vec<u64>)>,
-    store: Option<&StateStore>,
-) -> Result<Vec<Candidate>, Error> {
-    let mut selected = Vec::new();
-    if let Some((repository, numbers)) = targets {
-        validate_target(config, repository)?;
-        for number in numbers {
-            let mut matches = eligibility::select_target(
-                reader,
-                &config.sources,
-                &config.mappings,
-                repository,
-                *number,
-            )?;
-            if matches.is_empty()
-                && let Some(store) = store
-                && task_records::existing_target(store, repository, *number)?
-            {
-                continue;
-            }
-            if matches.len() != 1 {
-                return Err(format!("target {repository}#{number} selected {} eligible candidates; exactly one required", matches.len()).into());
-            }
-            selected.append(&mut matches);
-        }
-    } else {
-        selected = eligibility::select(reader, &config.sources, &config.mappings)?;
-    }
-    validate_candidates(&selected)?;
-    selected.sort_by(|a, b| (&a.repository, a.issue_number).cmp(&(&b.repository, b.issue_number)));
-    Ok(selected)
-}
-
 pub(crate) fn cycle_candidates(
     reader: &mut GhProjectReader,
     config: &Config,
@@ -66,8 +30,10 @@ pub(crate) fn cycle_candidates(
             if selection.candidates.is_empty()
                 && (!selection.candidate_read_failures.is_empty()
                     || !selection.source_read_failures.is_empty()
+                    || !selection.waiting.is_empty()
                     || existing)
             {
+                report.waiting.append(&mut selection.waiting);
                 report
                     .candidate_read_failures
                     .append(&mut selection.candidate_read_failures);
@@ -80,6 +46,7 @@ pub(crate) fn cycle_candidates(
                 return Err(format!("target {repository}#{number} selected {} eligible candidates; exactly one required", selection.candidates.len()).into());
             }
             report.candidates.append(&mut selection.candidates);
+            report.waiting.append(&mut selection.waiting);
             report
                 .candidate_read_failures
                 .append(&mut selection.candidate_read_failures);

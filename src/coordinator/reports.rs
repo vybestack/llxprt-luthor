@@ -60,6 +60,7 @@ impl StartupReport {
 #[derive(Debug, Default)]
 pub struct ScheduleReport {
     pub startup: StartupReport,
+    pub waiting: Vec<crate::eligibility::WaitingIssue>,
     pub launched: Vec<LaunchPlan>,
     pub skipped_existing: Vec<(String, String)>,
     pub capacity_full: bool,

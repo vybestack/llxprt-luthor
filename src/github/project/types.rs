@@ -40,6 +40,7 @@ pub struct Page<T> {
 pub enum ReadOperation {
     ProjectPage,
     DirectIssue,
+    Dependency,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -128,6 +129,10 @@ pub enum ProjectError {
 }
 
 pub trait ProjectReader {
+    fn dependency(
+        &mut self,
+        reference: &crate::config::IssueReference,
+    ) -> Result<crate::dependencies::DependencyState, ProjectReadError>;
     fn page(
         &mut self,
         project_id: &str,

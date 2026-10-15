@@ -1,4 +1,5 @@
 mod continuation;
+mod dependencies;
 mod dispatch;
 mod operator;
 mod recovery;

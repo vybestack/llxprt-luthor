@@ -7,6 +7,12 @@ use super::{
 pub(crate) struct OtherProject(pub(crate) Candidate, pub(crate) usize);
 #[cfg(unix)]
 impl ProjectReader for OtherProject {
+    fn dependency(
+        &mut self,
+        _: &luthor::config::IssueReference,
+    ) -> Result<luthor::dependencies::DependencyState, ProjectReadError> {
+        panic!("unexpected dependency read")
+    }
     fn page(&mut self, _: &str, _: Option<&str>) -> Result<Page<ProjectItem>, ProjectReadError> {
         let c = &self.0;
         Ok(Page {

@@ -13,6 +13,12 @@ struct Fake {
     fail_page: bool,
 }
 impl ProjectReader for Fake {
+    fn dependency(
+        &mut self,
+        _: &luthor::config::IssueReference,
+    ) -> Result<luthor::dependencies::DependencyState, ProjectReadError> {
+        panic!("unexpected dependency read")
+    }
     fn page(
         &mut self,
         _project_id: &str,
@@ -77,6 +83,7 @@ fn source(marker: Marker, milestone: Option<&str>) -> Source {
 }
 fn source_in(project_id: &str, marker: Marker, milestone: Option<&str>) -> Source {
     Source {
+        dependencies: Vec::new(),
         project_id: project_id.into(),
         repositories: vec!["org/tracker".into()],
         ready_marker: marker,

@@ -34,6 +34,7 @@ pub(super) fn candidate(issue_id: &str, number: u64) -> Candidate {
             merge: luthor::config::MergePolicy::disabled(),
         },
         source: Source {
+            dependencies: Vec::new(),
             project_id: "project-1".into(),
             repositories: vec!["org/tracker".into()],
             ready_marker: Marker::Label {
@@ -54,6 +55,7 @@ pub(super) fn config() -> Config {
         min_free_space_bytes: 0,
         assignment_login: "bot".into(),
         sources: vec![Source {
+            dependencies: Vec::new(),
             project_id: "project-1".into(),
             repositories: vec!["org/tracker".into()],
             ready_marker: Marker::Label {

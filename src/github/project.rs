@@ -1,4 +1,6 @@
 mod discovery;
+pub(crate) use discovery::external_read_failure;
+mod dependency;
 mod enumeration;
 pub use enumeration::{enumerate, enumerate_target};
 mod issue;

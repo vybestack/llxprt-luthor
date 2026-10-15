@@ -152,6 +152,7 @@ where
         assignments,
         launcher,
     } = dependencies;
+    claim::ensure_dependencies(projects, candidate)?;
     scheduling::ensure_dispatch_capacity(store)?;
     crate::disk::inspect(&config.worktree_root, config.min_free_space_bytes)?.enforce()?;
     let ownership = crate::ownership::WorktreeOwner::acquire(store.root(), task_id)
@@ -260,6 +261,15 @@ where
             || task_records::existing_issue(store, &identity.0, &identity.1)?
         {
             report.skipped_existing.push(identity);
+            continue;
+        }
+        let dependencies =
+            claim::dependency_waiting(d.projects, &candidate).map_err(DispatchError::Claim)?;
+        if !dependencies.is_empty() {
+            report.waiting.push(crate::eligibility::WaitingIssue {
+                candidate,
+                dependencies,
+            });
             continue;
         }
         match scheduling::ensure_dispatch_capacity(store) {
