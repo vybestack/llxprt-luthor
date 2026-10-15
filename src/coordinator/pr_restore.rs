@@ -90,9 +90,9 @@ pub fn restore_open_held_prs<P: crate::github::project::ProjectReader, Q: PullRe
             Err(DispatchError::State(error)) if !matches!(error, StateError::LaunchBlocked) => {
                 return Err(error.into());
             }
-            Err(_) => report.retained.push(TaskNote {
+            Err(error) => report.retained.push(TaskNote {
                 task_id: task,
-                reason: "open PR, claim, worktree or receipt proof did not verify".into(),
+                reason: super::repair_hold::reason(&error),
             }),
         }
     }
@@ -141,7 +141,9 @@ fn restore_open_task<P: crate::github::project::ProjectReader, Q: PullRequestRea
             (*pr, observed_at),
             PrVerificationStage::Exit,
         )
-        .map_err(|_| SupervisorError::Conflict)?;
+        .map_err(|_| {
+            SupervisorError::PrRepairHeld(crate::pr_repair::RepairHoldCause::PrIdentityUnverified)
+        })?;
         let _owner = super::pr_head::synchronize(store, task, &saved, &observed, projects)?;
         pr_restore::restore_open(
             store,
@@ -157,7 +159,11 @@ fn restore_open_task<P: crate::github::project::ProjectReader, Q: PullRequestRea
             return Err(StateError::LaunchBlocked.into());
         }
         let observed = verify_finishing_pr(store, task, &attempt, prs, (*pr, observed_at))
-            .map_err(|_| SupervisorError::Conflict)?;
+            .map_err(|_| {
+                SupervisorError::PrRepairHeld(
+                    crate::pr_repair::RepairHoldCause::PrIdentityUnverified,
+                )
+            })?;
         verify_completion_claim(projects, &selection)?;
         let _owner = super::pr_head::accounted_owner(store, task, &attempt)?;
         pr_completion::record_restored_open_pr(

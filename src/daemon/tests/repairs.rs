@@ -211,3 +211,33 @@ fn cycle_restores_a_wrongly_held_merged_task_before_scheduling() {
         "hold evidence is kept"
     );
 }
+
+#[test]
+fn cycle_reports_and_persists_the_specific_repair_identity_hold() {
+    let f = Fixture::new();
+    seed_finished_issue12(&f);
+    let mut detail = pr_detail(true);
+    detail["id"] = json!(9999);
+    serve_pr_42_detail(&f, true, &detail);
+    let mut launcher = RecordingLauncher::default();
+    let report = f.cycle(&f.config, &mut launcher).unwrap().unwrap();
+    assert_eq!(report.pr_repair.held.len(), 1);
+    let reported = serde_json::to_value(&report.pr_repair).unwrap();
+    let held = &reported["held"][0];
+    assert_eq!(held["task_id"], "task-12");
+    assert_eq!(held["reason"], "PR repair held: pr-identity-unverified");
+    let store = StateStore::open(&f.config.state_root, 2).unwrap();
+    assert_eq!(
+        task_records::held_reason(&store, "task-12")
+            .unwrap()
+            .unwrap(),
+        held["reason"].as_str().unwrap()
+    );
+    assert_eq!(
+        task_records::task_phase(&store, "task-12")
+            .unwrap()
+            .as_deref(),
+        Some("held")
+    );
+    assert!(launcher.plans.iter().all(|plan| plan.task_id != "task-12"));
+}

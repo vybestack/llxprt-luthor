@@ -11,6 +11,7 @@ pub use notes::TaskNote;
 mod pr_head;
 mod pr_merge;
 mod pr_repair;
+mod repair_hold;
 pub use pr_merge::{MergeError, MergeReport, merge_verified_prs};
 pub use pr_repair::{
     PrRepairReport, RepairOutcome, repair_verified_prs, repair_verified_prs_after_cleanup,

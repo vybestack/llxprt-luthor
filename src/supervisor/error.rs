@@ -17,6 +17,8 @@ pub enum SupervisorError {
     Json(#[from] serde_json::Error),
     #[error("worker build held: {0}")]
     WorkerBuildHeld(String),
+    #[error("PR repair held: {0}")]
+    PrRepairHeld(crate::pr_repair::RepairHoldCause),
     #[error("launch plan does not match verified task or worktree")]
     Conflict,
     #[error(

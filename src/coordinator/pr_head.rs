@@ -1,5 +1,6 @@
 //! Fresh PR-head synchronization shared by monitoring and held-task restoration.
 use super::{DispatchError, ports::verify_completion_claim};
+use crate::pr_repair::RepairHoldCause;
 use crate::{
     github::project::ProjectReader,
     model::VerifiedOpenPr,
@@ -23,7 +24,7 @@ pub(crate) fn synchronize<P: ProjectReader>(
     comparable.draft = saved.draft;
     comparable.checks = saved.checks.clone();
     if comparable != *saved {
-        return Err(SupervisorError::Conflict.into());
+        return Err(SupervisorError::PrRepairHeld(RepairHoldCause::PrIdentityUnverified).into());
     }
     let selection =
         task_records::selection_evidence(store, task)?.ok_or(StateError::InvalidSelection)?;
@@ -51,16 +52,15 @@ pub(crate) fn accounted_owner(
     {
         return Err(StateError::LaunchBlocked.into());
     }
-    let owner = WorktreeOwner::acquire_existing(store.root(), task)
-        .map_err(|_| SupervisorError::Conflict)?;
+    let owner = WorktreeOwner::acquire_existing(store.root(), task).map_err(|error| {
+        SupervisorError::PrRepairHeld(match error {
+            crate::ownership::OwnershipError::Busy => RepairHoldCause::OwnerLockBusy,
+            crate::ownership::OwnershipError::Unavailable => RepairHoldCause::OwnerUnavailable,
+        })
+    })?;
     owner
         .verify_protocol(&store.connection, store.root(), task, attempt)
-        .map_err(|_| SupervisorError::Conflict)?;
-    if !matches!(
-        supervisor::recheck_retry_exit(store, task, attempt, &owner, false, &mut None)?,
-        supervisor::Reconciliation::Completed { .. }
-    ) {
-        return Err(SupervisorError::Conflict.into());
-    }
+        .map_err(|_| SupervisorError::PrRepairHeld(RepairHoldCause::OwnerProtocolUnverified))?;
+    supervisor::recheck_pr_repair_exit(store, task, attempt, &owner)?;
     Ok(owner)
 }

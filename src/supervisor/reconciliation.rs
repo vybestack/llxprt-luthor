@@ -1,5 +1,6 @@
 use super::{error::SupervisorError, evidence::*, processes::*, terminal_exit};
 use crate::ownership::{OwnershipError, WorktreeOwner};
+use crate::pr_repair::RepairHoldCause;
 use crate::state::StateStore;
 use crate::state::exits::reconcile_verified_exit as commit_exit;
 use crate::state::{exit_observation, journal, scheduling};
@@ -13,7 +14,15 @@ pub fn reconcile_attempt(
     task_id: &str,
     attempt_id: &str,
 ) -> Result<Reconciliation, SupervisorError> {
-    reconcile_attempt_inner(store, task_id, attempt_id, None, None, false)
+    reconcile_attempt_inner(
+        store,
+        task_id,
+        attempt_id,
+        None,
+        None,
+        false,
+        &mut RepairHoldCause::AttemptEvidenceUnverified,
+    )
 }
 
 #[cfg(unix)]
@@ -32,7 +41,35 @@ pub(crate) fn recheck_retry_exit(
         Some(owner),
         Some(proof),
         revalidate_terminal_exit,
+        &mut RepairHoldCause::AttemptEvidenceUnverified,
     )
+}
+
+#[cfg(unix)]
+/// Reuse the exact retry-exit checks, retaining the failed stage rather than
+/// collapsing every non-completed reconciliation into a generic conflict.
+pub(crate) fn recheck_pr_repair_exit(
+    store: &mut StateStore,
+    task: &str,
+    attempt: &str,
+    owner: &WorktreeOwner,
+) -> Result<(), SupervisorError> {
+    let mut cause = RepairHoldCause::AttemptEvidenceUnverified;
+    match reconcile_attempt_inner(
+        store,
+        task,
+        attempt,
+        Some(owner),
+        Some(&mut None),
+        false,
+        &mut cause,
+    )? {
+        Reconciliation::Completed { .. } => Ok(()),
+        Reconciliation::Running => Err(SupervisorError::PrRepairHeld(
+            RepairHoldCause::AttemptSettling,
+        )),
+        Reconciliation::Held { .. } => Err(SupervisorError::PrRepairHeld(cause)),
+    }
 }
 
 #[cfg(unix)]
@@ -43,6 +80,7 @@ fn reconcile_attempt_inner(
     borrowed_owner: Option<&WorktreeOwner>,
     terminal_exit: Option<&mut Option<TerminalExitProof>>,
     revalidate_terminal_exit: bool,
+    cause: &mut RepairHoldCause,
 ) -> Result<Reconciliation, SupervisorError> {
     if !valid_attempt(attempt_id) {
         return Err(SupervisorError::Conflict);
@@ -54,6 +92,7 @@ fn reconcile_attempt_inner(
         Ok(context) => context,
         Err(reason) => return Ok(held(reason)),
     };
+    *cause = RepairHoldCause::OwnerUnavailable;
     let owned_owner = if borrowed_owner.is_none() {
         Some(
             match WorktreeOwner::acquire_existing(store.root(), task_id) {
@@ -70,12 +109,14 @@ fn reconcile_attempt_inner(
     let owner = borrowed_owner
         .or(owned_owner.as_ref())
         .expect("owner acquired or borrowed");
+    *cause = RepairHoldCause::OwnerProtocolUnverified;
     if owner
         .verify_protocol(&store.connection, store.root(), task_id, attempt_id)
         .is_err()
     {
         return Ok(held("worktree owner protocol unverified"));
     }
+    *cause = RepairHoldCause::ProcessEvidenceUnverified;
     let processes = match reconciliation_process_evidence(store, task_id, attempt_id, &attempts)? {
         Ok(processes) => processes,
         Err(reason) => return Ok(held(reason)),
@@ -91,11 +132,13 @@ fn reconcile_attempt_inner(
             owner,
             terminal_exit,
             revalidate_terminal_exit,
+            cause,
         },
     )?;
     if matches!(result, Reconciliation::Completed { .. }) {
         let receipt = validated_receipt(&attempts, attempt_id, &processes.child)
             .map_err(|_| SupervisorError::Conflict)?;
+        *cause = RepairHoldCause::SessionUnverified;
         super::session_exit::record_format(store, &plan, &receipt)?;
         if let Some(held) = super::session_exit::hold_incompatible(store, &plan, &receipt)? {
             return Ok(held);
@@ -136,6 +179,7 @@ struct ReceiptReconciliationContext<'a> {
     owner: &'a WorktreeOwner,
     terminal_exit: Option<&'a mut Option<TerminalExitProof>>,
     revalidate_terminal_exit: bool,
+    cause: &'a mut RepairHoldCause,
 }
 
 #[cfg(unix)]
@@ -152,6 +196,7 @@ fn reconcile_receipt(
         owner,
         terminal_exit,
         revalidate_terminal_exit,
+        cause,
     } = context;
     let recheck_processes = terminal_exit.is_some();
     let held = |reason: &str| Reconciliation::Held {
@@ -163,6 +208,7 @@ fn reconcile_receipt(
         tracked,
         sent: _,
     } = processes;
+    *cause = RepairHoldCause::ReceiptUnverified;
     let receipt_path = attempts.join(format!("{attempt_id}.receipt.json"));
     if !receipt_path.exists() {
         return live_reconciliation(store, task_id, attempt_id, attempts, processes);
@@ -183,6 +229,7 @@ fn reconcile_receipt(
     {
         return Ok(completed);
     }
+    *cause = RepairHoldCause::ProcessEvidenceUnverified;
     if recheck_processes
         && revalidate_terminal_exit
         && child_file.boot_identity.starts_with("{ sec")
@@ -206,6 +253,7 @@ fn reconcile_receipt(
     if let Err(reason) = receipt_process_quiescence(&receipt, supervisor, tracked)? {
         return Ok(held(reason));
     }
+    *cause = RepairHoldCause::OwnerProtocolUnverified;
     commit_reconciled_receipt(
         store, task_id, attempt_id, owner, &evidence, &outcome, completed,
     )
@@ -413,4 +461,14 @@ fn exit_record(receipt: &ExitReceipt) -> Result<(String, String, Reconciliation)
             signal: receipt.signal,
         },
     ))
+}
+
+#[cfg(not(unix))]
+pub(crate) fn recheck_pr_repair_exit(
+    _store: &mut StateStore,
+    _task: &str,
+    _attempt: &str,
+    _owner: &WorktreeOwner,
+) -> Result<(), SupervisorError> {
+    Err(SupervisorError::ExecutionUnavailable)
 }

@@ -206,9 +206,12 @@ fn restored_phase(db: &Connection, task: &str, phase: &str) -> Result<String, St
     use rusqlite::OptionalExtension;
     let reason: Option<String> = db.query_row("SELECT payload FROM evidence WHERE task_id=?1 AND kind='held_reason' ORDER BY sequence DESC LIMIT 1", [task], |row| row.get(0)).optional()?;
     let pin_hold = reason.is_some_and(|reason| {
-        (reason.starts_with("legacy session worker ")
-            || reason.starts_with("PR repair held: legacy session worker "))
-            && reason.contains("; hash unrecorded; requested template ")
+        // legacy_plans already proved every plan is unpinned; this bounded
+        // repair code carries no executable paths or upstream error text.
+        reason == "PR repair held: worker-build-held"
+            || ((reason.starts_with("legacy session worker ")
+                || reason.starts_with("PR repair held: legacy session worker "))
+                && reason.contains("; hash unrecorded; requested template "))
     });
     if phase != "held" || !pin_hold {
         return Ok(phase.into());

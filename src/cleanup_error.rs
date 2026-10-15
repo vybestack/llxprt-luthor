@@ -74,6 +74,7 @@ fn supervisor_reason(error: &SupervisorError) -> String {
         SupervisorError::Io(error) => format!("cleanup supervisor IO failed ({:?})", error.kind()),
         SupervisorError::Sql(_) => "cleanup supervisor database failed".into(),
         SupervisorError::Json(_) => "cleanup supervisor serialization failed".into(),
+        SupervisorError::PrRepairHeld(cause) => cause.detail().into(),
         SupervisorError::WorkerBuildHeld(_) => "cleanup worker build held".into(),
         SupervisorError::Config(_) => "cleanup supervisor configuration invalid".into(),
         // The remaining supervisor variants have fixed, non-secret messages.
