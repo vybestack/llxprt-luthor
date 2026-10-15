@@ -56,6 +56,8 @@ pub enum ClaimError {
     ExistingPr,
     #[error("source evidence changed before claim")]
     Changed,
+    #[error("issue dependencies are not satisfied")]
+    Dependencies,
     #[error("assignment intent already exists; automatic retry forbidden")]
     IntentExists,
     #[error("assignment was ambiguous or failed; task held")]
@@ -71,6 +73,7 @@ pub(crate) fn fresh<R: ProjectReader>(
     let issue = reader.issue(&item).map_err(ProjectError::IssueRead)?;
     verify_issue_identity(&item, &issue)?;
     verify_claim_snapshot(c, &item, &issue)?;
+    ensure_dependencies(reader, c)?;
     Ok((item, issue))
 }
 
@@ -247,4 +250,28 @@ pub fn claim<P: ProjectReader, Q: PullRequestReader, W: AssignmentWriter>(
     journal::record_evidence(store, task_id, None, "claim_verified", principal)?;
     task_records::set_task_phase(store, task_id, "claimed")?;
     Ok(())
+}
+
+/// Re-read prerequisites before any claim or launch; discovery is not authority.
+pub(crate) fn ensure_dependencies<R: ProjectReader>(
+    reader: &mut R,
+    candidate: &Candidate,
+) -> Result<(), ClaimError> {
+    if !dependency_waiting(reader, candidate)?.is_empty() {
+        return Err(ClaimError::Dependencies);
+    }
+    Ok(())
+}
+
+pub(crate) fn dependency_waiting<R: ProjectReader>(
+    reader: &mut R,
+    candidate: &Candidate,
+) -> Result<Vec<crate::dependencies::DependencyWait>, ClaimError> {
+    Ok(crate::dependencies::waiting(
+        reader,
+        &candidate.source.dependencies,
+        &candidate.repository,
+        candidate.issue_number,
+    )
+    .map_err(ProjectError::IssueRead)?)
 }

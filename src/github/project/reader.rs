@@ -23,7 +23,7 @@ impl GhProjectReader {
         }
     }
 
-    fn api(&self, args: &[&str]) -> Result<Value, ProjectReadError> {
+    pub(crate) fn api(&self, args: &[&str]) -> Result<Value, ProjectReadError> {
         let output =
             crate::github::read::api(&self.executable, args).map_err(|_| ProjectReadError {
                 operation: ReadOperation::ProjectPage,
@@ -83,6 +83,12 @@ impl GhProjectReader {
 }
 
 impl ProjectReader for GhProjectReader {
+    fn dependency(
+        &mut self,
+        reference: &crate::config::IssueReference,
+    ) -> Result<crate::dependencies::DependencyState, ProjectReadError> {
+        self.read_dependency(reference)
+    }
     fn page(
         &mut self,
         project_id: &str,

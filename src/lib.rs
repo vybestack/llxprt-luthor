@@ -5,6 +5,7 @@ pub mod cli;
 pub mod config;
 pub mod coordinator;
 pub mod daemon;
+pub mod dependencies;
 pub mod disk;
 pub mod eligibility;
 pub mod platform;

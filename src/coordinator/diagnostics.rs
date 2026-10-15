@@ -10,6 +10,7 @@ pub fn operator_error(error: &DispatchError) -> String {
         DispatchError::Claim(ClaimError::Changed) | DispatchError::ChangedClaim => {
             "claim drift: issue assignment or source evidence changed".into()
         }
+        DispatchError::Claim(ClaimError::Dependencies) => "waiting for issue dependencies".into(),
         DispatchError::Claim(_) => "claim failed: verification unavailable".into(),
         DispatchError::Worktree(_) => "worktree failed: verification precondition".into(),
         DispatchError::ExistingPr => "PR present or ambiguous; absent PR required".into(),

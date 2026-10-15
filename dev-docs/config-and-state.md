@@ -17,6 +17,32 @@ Synthetic example (all paths, IDs and names are illustrative; no key is present)
 }
 ```
 
+### Optional source dependency ordering
+
+A source may include `dependencies`, an array of rules with an `issue` reference,
+non-empty `blocked_by` references, and optional `allow_closed_unmerged_prs`
+(default false). References are `{"repository":"owner/repo","number":123}`;
+GitHub determines whether the number names an issue or a PR. Only targets must
+belong to the source; prerequisites may be in any accessible repository.
+
+All direct prerequisites are read live. Open issues/PRs block; closed issues and
+merged PRs satisfy; closed-unmerged PRs block unless that rule explicitly opts
+in. No Project membership, readiness marker, assignee, or Luthor task completion
+is required for a prerequisite. Config validation rejects invalid references,
+empty/duplicate rules or prerequisites, self-dependencies, cross-source
+conflicts/omissions and cycles (including across repositories). Overlapping
+sources must carry the same rules for their shared repositories.
+
+No SQLite migration is needed. Rules are included in the existing source and
+effective-configuration snapshots. Omitted/empty rules preserve old snapshot
+serialization and old scheduling behavior. Live dependency rechecks run during
+selection, before creating a new task, and in claim/prelaunch verification.
+Blocked selections create no task or reservation. A prerequisite reopening after
+selection holds the existing dispatch rather than authorizing assignment or
+launch from stale evidence. Existing holds/reservations are never cleared by a
+dependency read. See [dependency-aware scheduling](../README.md#dependency-aware-scheduling)
+for JSON examples and waiting/report semantics.
+
 ### Optional task-attempt retry policy
 
 `retry_policy` defaults to `{"kind":"disabled"}`. Opt in with
@@ -90,8 +116,8 @@ bypasses GitHub's own merge requirements.
 no required checks and no mapping override was configured: check-based repair
 is effectively off**, though merge conflicts can still trigger repair. Status
 and show expose the source and cached `last_pr_health` (including PR ID/head,
-selected failed checks/jobs and pending state); these commands make no fresh
-GitHub read. Before any health observation the source is null; historical
+selected failed checks/jobs and pending state); those cached health views make no fresh
+GitHub health read (`status` may separately discover dependency waiting). Before any health observation the source is null; historical
 health evidence without a source reports `unknown`, never inferred `none`.
 
 This field is included in candidate mappings and effective configuration

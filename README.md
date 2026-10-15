@@ -56,7 +56,7 @@ Luthor requires a JSON configuration. The structs in `src/config.rs` reject unkn
 | `initial` | Executable and argv template for a new worker session. |
 | `resume` | Executable and argv template for continuing that session. |
 
-A source includes `project_id`, `repositories`, a `ready_marker`, and optional `milestone`. Markers are either `{"kind":"label","name":"…"}` or `{"kind":"project_field","name":"…","value":"…"}`. A mapping includes `tracker_repository`, `code_repository`, `checkout`, `base_branch`, `push_remote`, `allowed_pr_head_repository`, and `allowed_pr_author`. Command templates use an executable and an `args` array. They are argv templates, not shell commands, and Luthor does not validate worker flags; the worker validates its own CLI. Luthor rejects only unknown or malformed template variables and credential-bearing arguments. Supported substitutions are `{task.issue_number}`, `{task.repository}`, `{task.issue_url}`, `{task.id}`, `{attempt.id}`, and `{worktree}`.
+A source includes `project_id`, `repositories`, a `ready_marker`, optional `milestone`, and optional [dependency rules](#dependency-aware-scheduling). Markers are either `{"kind":"label","name":"…"}` or `{"kind":"project_field","name":"…","value":"…"}`. A mapping includes `tracker_repository`, `code_repository`, `checkout`, `base_branch`, `push_remote`, `allowed_pr_head_repository`, and `allowed_pr_author`. Command templates use an executable and an `args` array. They are argv templates, not shell commands, and Luthor does not validate worker flags; the worker validates its own CLI. Luthor rejects only unknown or malformed template variables and credential-bearing arguments. Supported substitutions are `{task.issue_number}`, `{task.repository}`, `{task.issue_url}`, `{task.id}`, `{attempt.id}`, and `{worktree}`.
 
 Do not copy a configuration example into a live environment without validating every repository, Project, account, path, branch, and remote. The configuration contract and a synthetic example are maintained in [Configuration and state](dev-docs/config-and-state.md); validation rules and command-template constraints are enforced by `src/config.rs` and tested in `tests/config.rs`. Keep credentials out of JSON and argv. Luthor uses the installed `gh` executable for GitHub operations and requires its authenticated identity to match the configured allowed identity for the selected task. Do not assume an alternate credential or authentication fallback.
 
@@ -68,6 +68,53 @@ Before any live scheduling, verify all of the following independently:
 - The configured SSH push remote works for the intended identity and repository. Configure SSH outside Luthor; never put credentials in the configuration or command arguments.
 - `state_root` and `worktree_root` are local paths with appropriate access controls. Use a dedicated state directory and do not share it between independent Luthor installations.
 
+## Dependency-aware scheduling
+
+Use optional `dependencies` on each source to express ordering explicitly. For
+example, issue #78 must wait for #171, and #42 must wait for #78:
+
+```json
+"dependencies": [
+  {
+    "issue": {"repository": "example/tracker", "number": 78},
+    "blocked_by": [{"repository": "example/tracker", "number": 171}]
+  },
+  {
+    "issue": {"repository": "example/tracker", "number": 42},
+    "blocked_by": [{"repository": "example/tracker", "number": 78}]
+  }
+]
+```
+
+These are direct prerequisites, not priority hints. Every prerequisite must be
+satisfied before selection, assignment, and launch. An open issue or PR always
+blocks, including when assigned/running or absent from the Project/ready queue.
+A closed issue or **merged** PR satisfies a prerequisite. A closed but unmerged
+PR still blocks by default; only an explicit `"allow_closed_unmerged_prs": true`
+on that rule allows it. Issue and PR numbers share GitHub's repository number
+space; Luthor detects PRs and reads their merge state, never inferring merge from
+`closed`. Reference a PR directly when the ordering requires merge rather than
+issue closure. Prerequisites may be in another repository, which `gh` must be
+able to read. Read failures do not satisfy prerequisites; malformed evidence
+fails the operation.
+
+Blocked issues consume no slots and do not stop independent ready issues from
+running. `discover` emits `evidence.eligibility: "waiting"` with the blocking
+references and states; `status` adds a live `waiting` array alongside cached task
+state. Daemon preview and execute reports also include `waiting`, even for
+explicit `--issues` targets. External read failures are reported separately,
+not presented as satisfied or ordinary waiting. No waiting report assigns,
+launches, closes, or merges anything.
+
+Rules default to empty for existing configurations. Targets must belong to the
+source's repositories. Duplicate, conflicting, self-dependent, or cyclic rules
+are rejected. If multiple sources include a repository, repeat its rules
+consistently on each source so another selector cannot bypass ordering. Rules
+are part of the saved source configuration: changing them does not silently
+rewrite existing task selections or their continuation authorization. This
+implements configured ordering; GitHub blocked-by/sub-issue relationships are
+not automatically imported.
+
 ## Preview and explicit execution
 
 Start with read-only discovery:
@@ -76,7 +123,7 @@ Start with read-only discovery:
 target/debug/luthor discover --config /private/luthor/config.json
 ```
 
-This calls GitHub Project and issue reads and prints eligible candidates as JSON lines. It does not assign or launch a worker.
+This calls GitHub Project and issue reads and prints selected and dependency-waiting candidates as JSON lines. It does not assign or launch a worker.
 
 Daemon mode without `--execute` performs preview cycles. Supply both `--repository` and `--issues` to restrict the selection to specific configured issue numbers; omit both to scan configured sources. `--once` exits after one cycle. Without it, preview repeats every 30 seconds.
 
@@ -298,7 +345,7 @@ for all concurrent builds, since other processes can consume space afterward.
 
 ## Inspect and control tasks
 
-The read-only inspection commands open the local state database in read-only mode. They do not perform fresh GitHub reads. `status` reports task phases, reserved versus configured capacity, output-silence warnings, and stored evidence. `show` displays a task's attempts, worktree, events, and stored evidence. `logs` reads safe local attempt log files.
+The read-only inspection commands open the local state database in read-only mode. Task/PR evidence remains cached. When dependency rules are configured, `status` additionally performs read-only GitHub discovery to report currently waiting issues; `show` and `logs` never perform fresh GitHub reads. `status` reports task phases, reserved versus configured capacity, output-silence warnings, and stored evidence. `show` displays a task's attempts, worktree, events, and stored evidence. `logs` reads safe local attempt log files.
 
 ```sh
 target/debug/luthor status --config /private/luthor/config.json

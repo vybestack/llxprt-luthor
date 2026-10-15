@@ -54,6 +54,7 @@ impl Harness {
             min_free_space_bytes: 0,
             assignment_login: "agent".into(),
             sources: vec![Source {
+                dependencies: Vec::new(),
                 project_id: "PROJECT".into(),
                 repositories: vec!["org/tracker".into()],
                 ready_marker: Marker::Label {

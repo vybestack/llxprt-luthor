@@ -191,6 +191,12 @@ pub(super) struct ClaimProjects {
     pub(super) item: ProjectItem,
 }
 impl luthor::github::project::ProjectReader for ClaimProjects {
+    fn dependency(
+        &mut self,
+        _: &luthor::config::IssueReference,
+    ) -> Result<luthor::dependencies::DependencyState, ProjectReadError> {
+        panic!("unexpected dependency read")
+    }
     fn page(
         &mut self,
         _: &str,
@@ -303,6 +309,7 @@ fn fixture_config(root: &std::path::Path) -> Config {
         min_free_space_bytes: 0,
         assignment_login: "bot".into(),
         sources: vec![Source {
+            dependencies: Vec::new(),
             project_id: "project-1".into(),
             repositories: vec!["org/tracker".into()],
             ready_marker: Marker::Label {

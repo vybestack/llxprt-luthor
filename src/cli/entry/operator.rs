@@ -1,7 +1,6 @@
 use crate::state::task_records;
 use crate::{
     config::Config,
-    eligibility,
     github::{project::GhProjectReader, pull_request::GhPullRequestReader},
     state::StateStore,
 };
@@ -29,7 +28,11 @@ pub(crate) fn operator(
     values.remove(config_pos);
     let config = Config::from_json(&fs::read_to_string(path)?)?;
     let output = crate::cli::execute(&config.state_root, &values)?;
-    println!("{output}");
+    if values.first().is_some_and(|command| command == "status") {
+        println!("{}", super::dependencies::status(&config, &output)?);
+    } else {
+        println!("{output}");
+    }
     Ok(())
 }
 
@@ -42,13 +45,7 @@ pub(crate) fn discover(args: Vec<String>) -> Result<(), Box<dyn std::error::Erro
         return Err("discover requires --config <path>".into());
     }
     let config = Config::from_json(&fs::read_to_string(&args[1])?)?;
-    let mut reader = GhProjectReader::new(PathBuf::from("gh"));
-    let candidates = eligibility::select(&mut reader, &config.sources, &config.mappings)?;
-    let lines = candidates.into_iter().map(|candidate| {
-        let output = json!({"candidate": candidate, "evidence": {"state": candidate.observed_state, "assignees": candidate.observed_assignees, "labels": candidate.observed_labels, "project_fields": candidate.observed_project_fields, "eligibility": "selected"}});
-        serde_json::to_string(&output)
-    }).collect::<Result<Vec<_>, _>>()?;
-    for line in lines {
+    for line in super::dependencies::discovery(&config)? {
         println!("{line}");
     }
     Ok(())

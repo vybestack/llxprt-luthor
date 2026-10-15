@@ -30,6 +30,12 @@ impl FakeGithub {
     }
 }
 impl ProjectReader for FakeGithub {
+    fn dependency(
+        &mut self,
+        _: &luthor::config::IssueReference,
+    ) -> Result<luthor::dependencies::DependencyState, ProjectReadError> {
+        panic!("unexpected dependency read")
+    }
     fn page(&mut self, _: &str, _: Option<&str>) -> Result<Page<ProjectItem>, ProjectReadError> {
         let c = &self.candidate;
         Ok(Page {

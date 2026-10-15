@@ -508,6 +508,12 @@ impl FakeTargetReader {
 }
 
 impl ProjectReader for FakeTargetReader {
+    fn dependency(
+        &mut self,
+        _: &luthor::config::IssueReference,
+    ) -> Result<luthor::dependencies::DependencyState, ProjectReadError> {
+        panic!("unexpected dependency read")
+    }
     fn page(
         &mut self,
         project_id: &str,

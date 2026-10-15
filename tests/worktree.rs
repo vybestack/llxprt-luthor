@@ -58,6 +58,7 @@ impl Fixture {
             min_free_space_bytes: 0,
             assignment_login: "bot".into(),
             sources: vec![Source {
+                dependencies: Vec::new(),
                 project_id: "project".into(),
                 repositories: vec!["org/tracker".into()],
                 ready_marker: Marker::Label {

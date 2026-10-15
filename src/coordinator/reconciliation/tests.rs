@@ -156,6 +156,12 @@ fn stopped_store(dir: &tempfile::TempDir) -> StateStore {
 struct NoProject;
 
 impl ProjectReader for NoProject {
+    fn dependency(
+        &mut self,
+        _: &crate::config::IssueReference,
+    ) -> Result<crate::dependencies::DependencyState, ProjectReadError> {
+        panic!("unexpected dependency read")
+    }
     fn page(&mut self, _: &str, _: Option<&str>) -> Result<Page<ProjectItem>, ProjectReadError> {
         panic!("project page should not be read")
     }

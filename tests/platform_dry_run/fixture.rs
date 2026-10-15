@@ -65,6 +65,7 @@ fn mapping(dir: &Path) -> Mapping {
 }
 fn source() -> Source {
     Source {
+        dependencies: Vec::new(),
         project_id: "project".into(),
         repositories: vec!["org/tracker".into()],
         ready_marker: Marker::Label {

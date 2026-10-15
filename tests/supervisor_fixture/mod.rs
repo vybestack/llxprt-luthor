@@ -14,6 +14,7 @@ pub(crate) fn configured(root: &Path) -> (Config, Candidate) {
         merge: luthor::config::MergePolicy::disabled(),
     };
     let source = Source {
+        dependencies: Vec::new(),
         project_id: "project".into(),
         repositories: vec!["org/tracker".into()],
         ready_marker: Marker::Label {

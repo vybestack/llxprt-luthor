@@ -101,7 +101,7 @@ impl Options {
 
 mod discovery;
 mod polling;
-use discovery::{candidates, cycle_candidates};
+use discovery::cycle_candidates;
 
 fn cycle(config: &Config, options: &Options) -> Result<(), Error> {
     let mut launcher = ProductionLauncher;
@@ -121,10 +121,13 @@ fn preview(
     config: &Config,
     options: &Options,
 ) -> Result<(), Error> {
-    let selected = candidates(projects, config, options.targets.as_ref(), None)?;
+    let selection = cycle_candidates(projects, config, options.targets.as_ref(), None)?;
     println!(
         "{}",
-        json!({"mode":"preview","candidates":selected.iter().map(|c| json!({
+        json!({"mode":"preview","waiting":selection.waiting,
+        "candidate_read_failures":selection.candidate_read_failures,
+        "source_read_failures":selection.source_read_failures,
+        "candidates":selection.candidates.iter().map(|c| json!({
         "repository":c.repository,"issue_number":c.issue_number,"issue_url":c.issue_url,
         "project_id":c.project_id,"item_id":c.item_id
     })).collect::<Vec<_>>()})
@@ -233,6 +236,7 @@ fn cycle_with_dependencies<L: SupervisorLauncher, I: IdCreator>(
     pr_repair.skipped = repair.skipped;
     pr_repair.held = repair.held;
     pr_repair.retired.extend(repair.retired);
+    report.waiting.extend(selection.waiting);
     report.candidate_read_failures = selection.candidate_read_failures;
     report.source_read_failures = selection.source_read_failures;
     report.pr_repair = pr_repair;
@@ -305,6 +309,7 @@ fn print_schedule_report(report: &ScheduleReport, cleanup: &crate::cleanup::Clea
         json!({"mode":"execute", "cleanup":cleanup, "reconciliation":attempts,
         "source_holds":report.startup.source_holds.iter().map(|hold| json!({"task_id":hold.task_id,"kind":hold.kind})).collect::<Vec<_>>(),
         "pr_repair":report.pr_repair, "pr_merge":report.pr_merge, "automatic_retries":report.automatic_retries,
+        "waiting":report.waiting,
         "candidate_read_failures":report.candidate_read_failures,
         "source_read_failures":report.source_read_failures,
         "launched":report.launched.iter().map(|plan| json!({"task_id":plan.task_id,"attempt_id":plan.attempt_id})).collect::<Vec<_>>(),
