@@ -33,6 +33,19 @@ pub fn retry_one<P: ProjectReader, Q: PullRequestReader, L: SupervisorLauncher>(
     store: &mut StateStore,
     dependencies: RetryDependencies<'_, P, Q, L>,
 ) -> Result<LaunchPlan, DispatchError> {
+    let owner =
+        crate::ownership::WorktreeOwner::acquire_existing(store.root(), dependencies.task_id)
+            .map_err(|_| SupervisorError::Conflict)?;
+    retry_with_owner(store, dependencies, &owner)
+}
+
+/// Automatic scheduling can lend the owner it acquired before journaling a
+/// request. Keep that same exclusive lock through verification and dispatch.
+pub(crate) fn retry_with_owner<P: ProjectReader, Q: PullRequestReader, L: SupervisorLauncher>(
+    store: &mut StateStore,
+    dependencies: RetryDependencies<'_, P, Q, L>,
+    ownership: &crate::ownership::WorktreeOwner,
+) -> Result<LaunchPlan, DispatchError> {
     let RetryDependencies {
         task_id,
         previous_attempt_id,
@@ -59,8 +72,6 @@ pub fn retry_one<P: ProjectReader, Q: PullRequestReader, L: SupervisorLauncher>(
     )?;
     supervisor::validate_stop_socket_path(store.root(), attempt_id)?;
     scheduling::ensure_dispatch_capacity(store)?;
-    let ownership = crate::ownership::WorktreeOwner::acquire_existing(store.root(), task_id)
-        .map_err(|_| SupervisorError::Conflict)?;
     ownership
         .verify_protocol(
             &store.connection,
@@ -73,7 +84,7 @@ pub fn retry_one<P: ProjectReader, Q: PullRequestReader, L: SupervisorLauncher>(
         store,
         task_id,
         previous_attempt_id,
-        &ownership,
+        ownership,
         revalidate_terminal_exit,
     )?;
     let claim = verified_retry_claim(store, task_id, config, &selection)?;
@@ -103,7 +114,7 @@ pub fn retry_one<P: ProjectReader, Q: PullRequestReader, L: SupervisorLauncher>(
             terminal_exit,
         },
     )?;
-    launcher.launch(store, &plan, &ownership)?;
+    launcher.launch(store, &plan, ownership)?;
     Ok(plan)
 }
 

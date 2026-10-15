@@ -4,12 +4,13 @@ mod outcome;
 use super::{
     IdCreator, RetryDependencies, SupervisorLauncher,
     ports::{DispatchError, observation_time},
-    retry_one,
+    retry::retry_with_owner,
 };
 use crate::{
     config::{Config, RetryPolicy},
     github::{project::ProjectReader, pull_request::PullRequestReader},
     model::LaunchPlan,
+    ownership::{OwnershipError, WorktreeOwner},
     state::{StateError, StateStore, journal, scheduling},
 };
 pub use outcome::{OutcomeObservation, WorkerOutcome};
@@ -27,6 +28,7 @@ pub enum RetryDecision {
     Exhausted,
     Backoff,
     CapacityFull,
+    WorktreeBusy,
     Launched,
 }
 
@@ -95,10 +97,12 @@ pub fn retry_attention_tasks<
         } else {
             match scheduling::ensure_dispatch_capacity(store) {
                 Ok(()) => {
-                    report
-                        .launched
-                        .push(launch_retry(store, &plan, &observation, count, &mut d)?);
-                    RetryDecision::Launched
+                    if let Some(plan) = launch_retry(store, &plan, &observation, count, &mut d)? {
+                        report.launched.push(plan);
+                        RetryDecision::Launched
+                    } else {
+                        RetryDecision::WorktreeBusy
+                    }
                 }
                 Err(StateError::Capacity { .. }) => RetryDecision::CapacityFull,
                 Err(error) => return Err(error.into()),
@@ -200,12 +204,24 @@ fn launch_retry<P: ProjectReader, Q: PullRequestReader, L: SupervisorLauncher, I
     observation: &OutcomeObservation,
     count: u32,
     d: &mut AutoRetryDependencies<'_, P, Q, L, I>,
-) -> Result<LaunchPlan, DispatchError> {
+) -> Result<Option<LaunchPlan>, DispatchError> {
+    let owner = match WorktreeOwner::acquire_existing(store.root(), &previous.task_id) {
+        Ok(owner) => owner,
+        Err(OwnershipError::Busy) => return Ok(None),
+        Err(OwnershipError::Unavailable) => {
+            return Err(crate::supervisor::SupervisorError::Conflict.into());
+        }
+    };
     let attempt = format!("attempt-{}", d.ids.create().map_err(StateError::from)?);
     let selection = crate::state::selection_for_attempt(store, previous)?;
     let actor = &selection.candidate.mapping.allowed_pr_author;
     let revision = format!("{}:auto:{attempt}", d.config_revision);
-    let reason = "automatic retry of typed transient worker failure";
+    let reason = match observation.outcome {
+        WorkerOutcome::Transient {
+            class: crate::config::TransientFailure::TurnBudget,
+        } => "automatic retry of typed worker turn budget",
+        _ => "automatic retry of typed transient worker failure",
+    };
     journal::record_evidence(
         store,
         &previous.task_id,
@@ -217,7 +233,7 @@ fn launch_retry<P: ProjectReader, Q: PullRequestReader, L: SupervisorLauncher, I
         })
         .to_string(),
     )?;
-    let result = retry_one(
+    let result = retry_with_owner(
         store,
         RetryDependencies {
             task_id: &previous.task_id,
@@ -232,6 +248,7 @@ fn launch_retry<P: ProjectReader, Q: PullRequestReader, L: SupervisorLauncher, I
             prs: d.prs,
             launcher: d.launcher,
         },
+        &owner,
     );
     if let Err(error) = &result {
         journal::record_evidence(
@@ -245,5 +262,5 @@ fn launch_retry<P: ProjectReader, Q: PullRequestReader, L: SupervisorLauncher, I
             .to_string(),
         )?;
     }
-    result
+    result.map(Some)
 }

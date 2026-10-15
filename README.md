@@ -369,7 +369,7 @@ or `cycle --execute`, set the optional top-level configuration field:
   "kind": "bounded",
   "max_attempts": 3,
   "backoff_secs": 90,
-  "classes": ["rate_limit", "transient_server", "connectivity"]
+  "classes": ["rate_limit", "transient_server", "connectivity", "turn_budget"]
 }
 ```
 
@@ -383,9 +383,14 @@ reservation. Manual `retry` remains a separate explicit operator authorization.
 
 The worker must emit one terminal JSON object on stdout with the matching
 `session_id`, `status:"error"`, and a typed `error.code`; transport errors must
-agree with exit code 5. Only `model-rate-limit`, `model-transient-server`, and
-`model-connectivity` map to the configured classes. Luthor does **not** infer a
-transient from stderr, summaries, stack traces, HTTP numbers, or substrings such
+agree with exit code 5. `model-rate-limit`, `model-transient-server`, and
+`model-connectivity` map to the corresponding transport classes. The separate
+opt-in `turn_budget` class matches `turn-budget` (per-turn round, assistant-byte,
+tool-argument and tool-output budgets) and `turn-time-exhausted` (turn deadline),
+both with exit code 6. A normal tool-call cap can instead finish successfully;
+`budget_exhausted` on a successful envelope does not authorize a retry. Startup
+usage errors such as `max-tool-calls` do not match. Luthor does **not** infer a
+retry class from stderr, summaries, stack traces, HTTP numbers, or substrings such
 as `body read failed` or `timeout`. Quota/permanent failures, unknown/malformed
 output, stop/signal exits, and explicit terminal verdicts never auto-retry. A
 successful worker exit without a matching PR needs human review, including
@@ -395,7 +400,12 @@ not as a transport failure.
 Automation calls the same audited retry path as the operator command: fresh
 GitHub identity, source/claim and PR-absence checks; exact task/session/worktree
 identity; receipt and registered-process absence; worktree ownership and
-capacity. It uses the configured resume command with a fresh attempt ID and an
+capacity. A busy worktree lock (including one retained by a detached gate after
+natural worker exit) reports `worktree_busy` and waits for a later execute poll;
+it consumes no attempt ID or reservation and writes no retry-request/failure
+evidence. Backoff is not reset. The same exclusive owner is retained through
+verification and dispatch once acquired; unavailable or invalid ownership still
+fails closed. It uses the configured resume command with a fresh attempt ID and an
 automatic revision suffix. Include `{attempt.id}` in the resume prompt so each
 continuation is distinct. No new assignment, task, or worktree is created; no
 historical terminal-exit exception is enabled. Safety or upstream errors fail
@@ -408,7 +418,8 @@ persists classification and observation time; `automatic_retry_requested`
 records the exact policy, prior attempt count, new attempt ID and attribution.
 `retry_authorized` retains the existing transactional launch/claim/PR audit.
 Execute reports include `automatic_retries` with classification and decisions
-such as `backoff`, `capacity_full`, `exhausted`, and `needs_human_input`. Cached
+such as `backoff`, `capacity_full`, `worktree_busy`, `exhausted`, and
+`needs_human_input`. Cached
 `status` and `show` expose the latest `worker_outcome`; those views, previews,
 plain reconciliation, and stopped-task resume do not initiate retries.
 
