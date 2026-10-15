@@ -38,6 +38,15 @@ fn database(root: &Path) -> Result<Connection, StateError> {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
     }
+    // Switching a fresh database to WAL and creating its schema take locks that
+    // SQLite refuses to wait for (SQLITE_BUSY is returned without consulting the
+    // busy handler), so concurrent first opens must be serialized outside SQLite.
+    let init_lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join("inbox.init.lock"))?;
+    init_lock.lock()?;
     let db = Connection::open(dir.join("inbox.sqlite3"))?;
     db.busy_timeout(Duration::from_secs(5))?;
     db.pragma_update(None, "journal_mode", "WAL")?;
@@ -52,6 +61,7 @@ fn database(root: &Path) -> Result<Connection, StateError> {
         CREATE UNIQUE INDEX IF NOT EXISTS one_pending_request
         ON requests(task_id,previous_attempt_id) WHERE status='pending';",
     )?;
+    init_lock.unlock()?;
     Ok(db)
 }
 
