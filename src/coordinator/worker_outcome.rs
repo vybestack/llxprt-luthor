@@ -1,7 +1,9 @@
 //! Only the worker's single terminal stdout object can identify a retry class.
+use super::ports::DispatchError;
 use crate::{
-    config::TransientFailure,
+    config::{RetryPolicy, TransientFailure},
     model::{ExitReceipt, LaunchPlan},
+    state::{StateError, StateStore, journal},
     supervisor::SupervisorError,
 };
 use serde::{Deserialize, Serialize};
@@ -119,10 +121,92 @@ fn classify_error(error: &TerminalError, exit: i32) -> WorkerOutcome {
     WorkerOutcome::Transient { class }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetryDecision {
+    Ineligible,
+    NeedsHumanInput,
+    NonTransient,
+    Unclassified,
+    ClassDisabled,
+    Exhausted,
+    Backoff,
+    CapacityFull,
+    WorktreeBusy,
+    Launched,
+}
+
+pub(crate) fn observe_outcome(
+    store: &mut StateStore,
+    plan: &LaunchPlan,
+    receipt: &crate::model::ExitReceipt,
+    now: u64,
+) -> Result<OutcomeObservation, DispatchError> {
+    let outcome = read(store.root(), plan, receipt)?;
+    if let Some(saved) = journal::evidence_payload(
+        store,
+        &plan.task_id,
+        Some(&plan.attempt_id),
+        "worker_outcome",
+    )? {
+        let saved: OutcomeObservation = serde_json::from_str(&saved).map_err(StateError::from)?;
+        if saved.outcome != outcome || saved.observed_at_unix_secs == 0 {
+            return Err(StateError::LaunchBlocked.into());
+        }
+        return Ok(saved);
+    }
+    let observation = OutcomeObservation {
+        outcome,
+        observed_at_unix_secs: now,
+    };
+    journal::record_evidence(
+        store,
+        &plan.task_id,
+        Some(&plan.attempt_id),
+        "worker_outcome",
+        &serde_json::to_string(&observation).map_err(StateError::from)?,
+    )?;
+    Ok(observation)
+}
+
+pub(crate) fn decision(
+    policy: &RetryPolicy,
+    observation: &OutcomeObservation,
+    count: u32,
+    now: u64,
+) -> Result<Option<RetryDecision>, StateError> {
+    let RetryPolicy::Bounded {
+        max_attempts,
+        backoff_secs,
+        classes,
+    } = policy
+    else {
+        return Err(StateError::InvalidConfig);
+    };
+    let class = match observation.outcome {
+        WorkerOutcome::Transient { class } => class,
+        WorkerOutcome::NeedsHumanInput => return Ok(Some(RetryDecision::NeedsHumanInput)),
+        WorkerOutcome::NonTransient => return Ok(Some(RetryDecision::NonTransient)),
+        WorkerOutcome::Unclassified => return Ok(Some(RetryDecision::Unclassified)),
+    };
+    let elapsed = now
+        .checked_sub(observation.observed_at_unix_secs)
+        .ok_or(StateError::LaunchBlocked)?;
+    Ok(if !classes.contains(&class) {
+        Some(RetryDecision::ClassDisabled)
+    } else if count >= *max_attempts {
+        Some(RetryDecision::Exhausted)
+    } else if elapsed < u64::from(*backoff_secs) {
+        Some(RetryDecision::Backoff)
+    } else {
+        None
+    })
+}
+
 #[cfg(test)]
 mod tests {
+    use super::{WorkerOutcome, classify};
     use crate::config::TransientFailure;
-    use crate::coordinator::auto_retry::outcome::{WorkerOutcome, classify};
     use serde_json::json;
 
     #[test]

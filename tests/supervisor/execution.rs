@@ -88,7 +88,7 @@ pub(crate) fn prepared_fake_worker_with_resume_prompt(
     luthor::supervisor::LaunchPlan,
     std::path::PathBuf,
 ) {
-    prepared_worker_config(dir, resume_prompt, Default::default())
+    prepared_worker_config(dir, resume_prompt, Default::default(), "operator")
 }
 
 #[cfg(unix)]
@@ -96,6 +96,7 @@ fn prepared_worker_config(
     dir: &tempfile::TempDir,
     resume_prompt: &str,
     checks: luthor::config::RequiredChecks,
+    author: &str,
 ) -> (
     Config,
     StateStore,
@@ -104,6 +105,8 @@ fn prepared_worker_config(
 ) {
     use std::os::unix::fs::PermissionsExt;
     let (mut config, mut candidate) = configured(dir.path());
+    config.mappings[0].allowed_pr_author = author.into();
+    candidate.mapping.allowed_pr_author = author.into();
     config.mappings[0].required_checks = checks.clone();
     candidate.mapping.required_checks = checks;
     config.resume.args[5] = resume_prompt.into();
@@ -130,9 +133,22 @@ pub(crate) fn dispatched_fixture_with_checks(
     code: i32,
     checks: luthor::config::RequiredChecks,
 ) -> (tempfile::TempDir, Config, StateStore) {
+    dispatched_fixture_with_author(code, checks, "operator")
+}
+
+#[cfg(unix)]
+pub(crate) fn dispatched_fixture_with_author(
+    code: i32,
+    checks: luthor::config::RequiredChecks,
+    author: &str,
+) -> (tempfile::TempDir, Config, StateStore) {
     let dir = tempfile::tempdir().unwrap();
-    let (config, mut store, plan, _) =
-        prepared_worker_config(&dir, "Continue {task.issue_url} for {attempt.id}", checks);
+    let (config, mut store, plan, _) = prepared_worker_config(
+        &dir,
+        "Continue {task.issue_url} for {attempt.id}",
+        checks,
+        author,
+    );
     if code != 0 {
         fs::write(
             plan.executable.with_extension("behavior"),

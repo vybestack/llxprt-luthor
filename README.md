@@ -526,6 +526,31 @@ such as `backoff`, `capacity_full`, `worktree_busy`, `exhausted`, and
 `status` and `show` expose the latest `worker_outcome`; those views, previews,
 plain reconciliation, and stopped-task resume do not initiate retries.
 
+### Typed failures during PR repair
+
+The same opt-in `retry_policy`, typed-code classification and exit-code
+agreement apply when an authorized PR repair fails naturally. Once the verified
+receipt, process absence and exclusive worktree ownership are rechecked, the
+execute repair pass verifies the current claim, exact PR identity and local PR
+head. A matching failure returns to `pr_complete` with a durable
+`pr_repair_retry_scheduled` audit and `worker_outcome` observation; it does not
+invent a successful repair result or an exit PR lookup. The cycle reports
+`pr_repair.retry_scheduled` with task/attempt IDs and `backoff_until_unix_secs`.
+Polling and restarting do not reset that deadline or reserve another attempt.
+After backoff, normal PR health, failed-job, identity, ownership and capacity
+checks still precede one fresh repair attempt, on the same pinned worker,
+session, task branch and worktree. It counts toward both the three-repair limit
+and the policy's total `max_attempts` (including the initial attempt).
+
+Previously held `PR repair result unavailable or invalid` tasks are reconsidered
+on execute polls under the current policy and the same fresh proofs. A still-busy
+owner (including a detached gate), missing receipt, changed claim or uncertain
+PR evidence retains the hold; no manual ledger edit is needed once the original
+proof becomes available. Semantic-conflict, session-incompatible, stopped or
+signal exits, untyped/malformed/mismatched errors, disabled classes/policies and
+exhausted limits do not gain retry authority. Cached inspection and preview
+remain read-only.
+
 ## Interrupted selection and claim recovery
 
 Execute-cycle startup reconciles tasks interrupted before their first attempt.

@@ -5,7 +5,7 @@ use crate::{
     github::project::ProjectReader,
     model::VerifiedOpenPr,
     ownership::{WorktreeOwner, WorktreeOwnerInternal},
-    state::{StateError, StateStore, journal, pr_repair, task_records},
+    state::{StateError, StateStore, pr_repair, task_records},
     supervisor::{self, SupervisorError},
 };
 
@@ -48,8 +48,20 @@ pub(crate) fn accounted_owner(
     attempt: &str,
 ) -> Result<WorktreeOwner, DispatchError> {
     if task_records::latest_attempt(store, task)?.as_deref() != Some(attempt)
-        || journal::evidence_payload(store, task, Some(attempt), "pr_repair_blocked")?.is_some()
+        || crate::state::repair_retry::blocked(store, task, attempt)?
     {
+        return Err(StateError::LaunchBlocked.into());
+    }
+    rechecked_owner(store, task, attempt)
+}
+
+/// The caller separately proves whether a repair-result hold can be restored.
+pub(crate) fn rechecked_owner(
+    store: &mut StateStore,
+    task: &str,
+    attempt: &str,
+) -> Result<WorktreeOwner, DispatchError> {
+    if task_records::latest_attempt(store, task)?.as_deref() != Some(attempt) {
         return Err(StateError::LaunchBlocked.into());
     }
     let owner = WorktreeOwner::acquire_existing(store.root(), task).map_err(|error| {

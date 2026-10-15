@@ -232,6 +232,7 @@ fn cycle_with_dependencies<L: SupervisorLauncher, I: IdCreator>(
     );
     // Keep task and attempt identities visible without echoing prompts, shell stderr or API responses.
     let mut report = result.map_err(|_| "daemon scheduling failed; inspect local task state")?;
+    pr_repair.retry_scheduled = repair.retry_scheduled;
     pr_repair.skipped = repair.skipped;
     pr_repair.held = repair.held;
     pr_repair.retired.extend(repair.retired);

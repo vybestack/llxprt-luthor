@@ -30,7 +30,8 @@ pub fn pending_attempts(store: &StateStore) -> Result<Vec<(String, String)>, Sta
              (SELECT 1 FROM reservations r WHERE r.attempt_id=a.id AND r.status='reserved') OR
              (EXISTS (SELECT 1 FROM evidence e WHERE e.task_id=a.task_id AND e.attempt_id=a.id AND e.kind='attempt_exit')
               AND NOT EXISTS (SELECT 1 FROM evidence e WHERE e.task_id=a.task_id AND e.attempt_id=a.id AND e.kind=CASE WHEN EXISTS
-                 (SELECT 1 FROM intents i WHERE i.task_id=a.task_id AND i.attempt_id=a.id AND i.kind='stop') THEN 'pause_pr_lookup' ELSE 'exit_pr_lookup' END))
+                 (SELECT 1 FROM intents i WHERE i.task_id=a.task_id AND i.attempt_id=a.id AND i.kind='stop') THEN 'pause_pr_lookup' ELSE 'exit_pr_lookup' END)
+              AND NOT EXISTS (SELECT 1 FROM evidence e WHERE e.task_id=a.task_id AND e.attempt_id=a.id AND e.kind='pr_repair_retry_scheduled'))
              OR (a.id=(SELECT id FROM attempts WHERE task_id=a.task_id ORDER BY rowid DESC LIMIT 1)
                AND EXISTS (SELECT 1 FROM tasks t WHERE t.id=a.task_id AND t.state='held')
                AND EXISTS (SELECT 1 FROM evidence e WHERE e.task_id=a.task_id AND e.attempt_id=a.id
@@ -252,7 +253,9 @@ fn unresolved_task_count(connection: &rusqlite::Connection) -> Result<usize, Sta
         |row| row.get(0),
     )?;
     let aborted = super::dispatch_abort::retryable_attention_count(connection)?;
+    let scheduled_repairs = super::repair_retry::released_count(connection)?;
     unresolved
-        .checked_sub(aborted)
+        .checked_sub(scheduled_repairs)
+        .and_then(|remaining| remaining.checked_sub(aborted))
         .ok_or(StateError::LaunchBlocked)
 }
