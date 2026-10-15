@@ -1,5 +1,6 @@
 mod git_fixture;
 mod worktree {
+    mod cargo_placement;
     mod remote_base;
 }
 use luthor::state::{journal, task_records, worktree_records};

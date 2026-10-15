@@ -48,7 +48,7 @@ Luthor requires a JSON configuration. The structs in `src/config.rs` reject unkn
 | Field | Meaning |
 | --- | --- |
 | `state_root` | Private local directory for SQLite state and attempt artifacts. |
-| `worktree_root` | Root directory for daemon-managed task worktrees. |
+| `worktree_root` | Short, dedicated directory for daemon-managed task worktrees, outside enclosing build workspaces; see [placement guidance](dev-docs/config-and-state.md#worktree-root-placement-issue-33). |
 | `capacity` | Positive maximum number of reserved task attempts. |
 | `assignment_login` | GitHub login Luthor assigns to selected issues. |
 | `sources` | Non-empty set of Project sources and eligibility selectors. |
@@ -67,6 +67,7 @@ Before any live scheduling, verify all of the following independently:
 - Each tracker repository has exactly one valid mapping. Confirm the checkout and base branch, push remote, allowed PR head repository, and authorized PR author against the intended GitHub repositories and account.
 - The configured SSH push remote works for the intended identity and repository. Configure SSH outside Luthor; never put credentials in the configuration or command arguments.
 - `state_root` and `worktree_root` are local paths with appropriate access controls. Use a dedicated state directory and do not share it between independent Luthor installations.
+- Keep `worktree_root` short and outside the Luthor checkout and any other Cargo (or similar build-tool) workspace. A Rust package without its own `[workspace]` can otherwise inherit an unrelated ancestor workspace and fail every Cargo command. Long absolute paths can also exhaust worker fixture Unix-socket limits. Luthor does not validate these build-tool constraints; follow the [placement and existing-task guidance](dev-docs/config-and-state.md#worktree-root-placement-issue-33) before queueing tasks.
 
 ## Dependency-aware scheduling
 
