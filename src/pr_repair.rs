@@ -42,3 +42,14 @@ pub enum PrRepairStatus {
     Repaired,
     SemanticConflict,
 }
+
+/// An observed typed worker failure, not a fabricated repair result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepairRetry {
+    pub task_id: String,
+    pub attempt_id: String,
+    pub backoff_until_unix_secs: u64,
+}
+
+pub(crate) const RESULT_UNAVAILABLE: &str = "PR repair result unavailable or invalid";

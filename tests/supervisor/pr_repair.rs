@@ -139,7 +139,10 @@ impl Fixture {
         Self::with_checks(Default::default())
     }
     fn with_checks(checks: luthor::config::RequiredChecks) -> Self {
-        let (dir, config, mut store) = execution::dispatched_fixture_with_checks(0, checks);
+        Self::for_author(checks, "operator")
+    }
+    fn for_author(checks: luthor::config::RequiredChecks, login: &str) -> Self {
+        let (dir, config, mut store) = execution::dispatched_fixture_with_author(0, checks, login);
         let selection = task_records::selection_evidence(&store, "task")
             .unwrap()
             .unwrap();
@@ -150,6 +153,8 @@ impl Fixture {
             .unwrap();
         let mut prs = RepairPr {
             inner: ExitPr {
+                login: Some(login.into()),
+                author: Some(login.into()),
                 matching: Some((selection.candidate.issue_url.clone(), identity.branch)),
                 ..Default::default()
             },
@@ -822,3 +827,8 @@ fn pin_adoption_enables_legacy_pr_repair_after_pin_hold_and_restart() {
 mod head_advancement;
 
 mod hold_diagnostics;
+
+mod typed_retry;
+
+mod retry_cycle;
+mod retry_guards;

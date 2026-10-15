@@ -1,10 +1,11 @@
 use crate::state::{launches, scheduling, task_records};
 mod active;
 mod auto_retry;
+mod worker_outcome;
 pub use auto_retry::{
-    AutoRetryDependencies, AutoRetryReport, OutcomeObservation, RetryDecision, RetryObservation,
-    WorkerOutcome, retry_attention_tasks,
+    AutoRetryDependencies, AutoRetryReport, RetryObservation, retry_attention_tasks,
 };
+pub use worker_outcome::{OutcomeObservation, RetryDecision, WorkerOutcome};
 mod failed_checks;
 mod notes;
 pub use notes::TaskNote;
@@ -12,6 +13,7 @@ mod pr_head;
 mod pr_merge;
 mod pr_repair;
 mod repair_hold;
+mod repair_retry;
 pub use pr_merge::{MergeError, MergeReport, merge_verified_prs};
 pub use pr_repair::{
     PrRepairReport, RepairOutcome, repair_verified_prs, repair_verified_prs_after_cleanup,

@@ -40,6 +40,11 @@ pub fn reconcile_with_pr<P: ProjectReader, Q: PullRequestReader>(
     if !matches!(result, supervisor::Reconciliation::Completed { .. }) {
         return Ok(result);
     }
+    // A completed PR proof is already committed atomically with the lookup.
+    // Reconciliation rechecks process accounting, not a second completion write.
+    if task_records::task_phase(store, task_id)?.as_deref() == Some("pr_complete") {
+        return Ok(result);
+    }
     if journal::evidence_payload(store, task_id, Some(attempt_id), "pr_repair_blocked")?.is_some() {
         // A repair held for a person may have been overtaken: the PR merged or
         // the issue closed while it waited.
@@ -50,29 +55,8 @@ pub fn reconcile_with_pr<P: ProjectReader, Q: PullRequestReader>(
             reason: "PR repair requires a person".into(),
         });
     }
-    // A completed PR proof is already committed atomically with the lookup.
-    // Reconciliation rechecks process accounting, not a second completion write.
-    if task_records::task_phase(store, task_id)?.as_deref() == Some("pr_complete") {
-        return Ok(result);
-    }
-    match supervisor::repair_result(store, task_id, attempt_id) {
-        Ok(Some(crate::pr_repair::PrRepairStatus::SemanticConflict)) => {
-            return Ok(supervisor::Reconciliation::Held {
-                reason: "semantic PR conflict requires a person".into(),
-            });
-        }
-        Ok(_) => {}
-        Err(error) => {
-            journal::record_evidence(
-                store,
-                task_id,
-                Some(attempt_id),
-                "pr_repair_blocked",
-                "PR repair result unavailable or invalid",
-            )?;
-            task_records::hold_task(store, task_id, "PR repair result unavailable or invalid")?;
-            return Err(error);
-        }
+    if let Some(held) = inspect_repair_result(store, task_id, attempt_id)? {
+        return Ok(held);
     }
     if crate::state::pr_repair::authorization(&store.connection, task_id, attempt_id)?.is_some() {
         return finish_pr_repair(store, task_id, attempt_id, projects, prs, result);
@@ -88,6 +72,40 @@ pub fn reconcile_with_pr<P: ProjectReader, Q: PullRequestReader>(
         );
     }
     Ok(result)
+}
+
+fn inspect_repair_result(
+    store: &mut StateStore,
+    task_id: &str,
+    attempt_id: &str,
+) -> Result<Option<supervisor::Reconciliation>, SupervisorError> {
+    match supervisor::repair_result(store, task_id, attempt_id) {
+        Ok(Some(crate::pr_repair::PrRepairStatus::SemanticConflict)) => {
+            return Ok(Some(supervisor::Reconciliation::Held {
+                reason: "semantic PR conflict requires a person".into(),
+            }));
+        }
+        Ok(_) => {}
+        Err(error) => {
+            // A typed error envelope has no repair result. The execute repair
+            // pass applies current policy, rechecks proofs and schedules it.
+            if super::repair_retry::defer_typed_failure(store, task_id, attempt_id)? {
+                return Ok(Some(supervisor::Reconciliation::Held {
+                    reason: "typed PR repair failure awaits retry policy".into(),
+                }));
+            }
+            journal::record_evidence(
+                store,
+                task_id,
+                Some(attempt_id),
+                "pr_repair_blocked",
+                "PR repair result unavailable or invalid",
+            )?;
+            task_records::hold_task(store, task_id, "PR repair result unavailable or invalid")?;
+            return Err(error);
+        }
+    }
+    Ok(None)
 }
 
 fn finish_pr_repair<P: ProjectReader, Q: PullRequestReader>(

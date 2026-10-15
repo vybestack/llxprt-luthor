@@ -183,9 +183,21 @@ pub(crate) fn current_pr(
     task: &str,
     attempt: &str,
 ) -> Result<VerifiedOpenPr, StateError> {
-    // Keep completion proof uniqueness strict even after head observations.
-    unique_payload(db, true, task, Some(attempt), "verified_open_pr")?
-        .ok_or(StateError::LaunchBlocked)?;
+    // A retry schedule binds a fresh PR observation to a failed repair without
+    // pretending that the worker produced a successful completion result.
+    if unique_payload(db, true, task, Some(attempt), "verified_open_pr")?.is_none() {
+        let payload = unique_payload(db, true, task, Some(attempt), "pr_repair_retry_scheduled")?
+            .ok_or(StateError::LaunchBlocked)?;
+        let retry: crate::pr_repair::RepairRetry = parse_saved(&payload)?;
+        if retry.task_id != task
+            || retry.attempt_id != attempt
+            || retry.backoff_until_unix_secs == 0
+        {
+            return Err(StateError::LaunchBlocked);
+        }
+        unique_payload(db, true, task, Some(attempt), "pr_repair_authorized")?
+            .ok_or(StateError::LaunchBlocked)?;
+    }
     let payload: String = db.query_row("SELECT payload FROM evidence WHERE task_id=?1 AND attempt_id=?2 AND kind IN ('verified_open_pr','pr_head_verified') ORDER BY sequence DESC LIMIT 1", params![task, attempt], |row| row.get(0))?;
     parse_saved(&payload)
 }
