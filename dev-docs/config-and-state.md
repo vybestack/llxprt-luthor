@@ -20,12 +20,19 @@ Synthetic example (all paths, IDs and names are illustrative; no key is present)
 ### Optional task-attempt retry policy
 
 `retry_policy` defaults to `{"kind":"disabled"}`. Opt in with
-`{"kind":"bounded","max_attempts":3,"backoff_secs":90,"classes":["rate_limit","transient_server","connectivity"]}`.
+`{"kind":"bounded","max_attempts":3,"backoff_secs":90,"classes":["rate_limit","transient_server","connectivity","turn_budget"]}`.
 `max_attempts` is an unsigned total task-attempt bound (at least two), not a
 count of provider HTTP replays. `backoff_secs` must be a positive unsigned delay;
-classes must be nonempty, distinct, and chosen from the three supported typed
-transport classifications. Unknown fields/classes and incomplete policies fail
-configuration validation. Policy is operational, like cleanup: it is not added
+classes must be nonempty, distinct, and chosen from `rate_limit`,
+`transient_server`, `connectivity`, and `turn_budget`. The first three match
+`model-rate-limit`, `model-transient-server`, and `model-connectivity` with exit
+code 5. `turn_budget` matches only typed `turn-budget` and `turn-time-exhausted`
+errors with exit code 6 and the saved session ID. `turn-budget` covers per-turn
+round/assistant-byte/tool-argument/tool-output limits; `turn-time-exhausted` covers
+the turn deadline. The ordinary tool-call cap may produce a successful summary
+instead of an error: neither that success nor its `budget_exhausted` field, nor
+startup usage errors (`max-tool-calls`, exit 2), authorize continuation. Unknown
+fields/classes and incomplete policies fail configuration validation. Policy is operational, like cleanup: it is not added
 to the immutable selection snapshot, so enabling it can authorize existing
 attention tasks. Its exact value is recorded in each automatic retry request.
 
@@ -37,7 +44,11 @@ private stdout envelope. `automatic_retry_requested` links that observation,
 policy and previous count to the new attempt; failures have bounded
 `automatic_retry_failed` evidence. Existing `retry_authorized` evidence and
 transactional reservation/launch intent are unchanged. No direct state edits
-are needed to enable policy or continue a task.
+are needed to enable policy or continue a task. A held worktree owner delays
+automation with `worktree_busy`, without a request/failure audit, new attempt ID,
+or reservation. Later execute polls acquire exclusive ownership before journaling
+a request and retain it through the existing verification/dispatch path. Missing
+or invalid ownership is still an error; a lock is never stolen.
 
 See [bounded transient retries](../README.md#opt-in-bounded-transient-retries)
 for the worker JSON/exit agreement, nonretryable and human-review outcomes,
@@ -45,7 +56,11 @@ execute-only boundaries, and safety checks. The worker's typed transport
 contract was verified at `vybestack/llxprt-code-rs` commit
 `9cc8677aa8270d810a32fcafb4a2c0f52778175e` (`src/envelope.rs`,
 `src/agent/error.rs`, `src/adapter/error.rs`, `src/transport.rs`, and
-`tests/error_contracts.rs`); no log regex or private worker wrapper is involved.
+`tests/error_contracts.rs`). The turn-budget/deadline and normal tool-call-cap
+behavior was verified at worker commit
+`d7c40c11340bab085a804339b99e3906428c2aa6` (`src/agent.rs`,
+`src/agent/deadline.rs`, `src/agent/tool_round.rs`, `src/envelope.rs`); no log
+regex or private worker wrapper is involved.
 
 ### Per-mapping required-check selection
 

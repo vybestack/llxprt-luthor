@@ -716,7 +716,7 @@ fn retry_policy_defaults_disabled_and_round_trips_a_bounded_opt_in() {
     );
     let mut value: serde_json::Value = serde_json::from_str(valid()).unwrap();
     value["retry_policy"] = serde_json::json!({"kind":"bounded","max_attempts":3,"backoff_secs":90,
-        "classes":["rate_limit","transient_server","connectivity"]});
+        "classes":["rate_limit","transient_server","connectivity","turn_budget"]});
     let config = Config::from_json(&value.to_string()).unwrap();
     assert_eq!(
         config.retry_policy,
@@ -726,7 +726,8 @@ fn retry_policy_defaults_disabled_and_round_trips_a_bounded_opt_in() {
             classes: vec![
                 TransientFailure::RateLimit,
                 TransientFailure::TransientServer,
-                TransientFailure::Connectivity
+                TransientFailure::Connectivity,
+                TransientFailure::TurnBudget
             ]
         }
     );
@@ -751,6 +752,8 @@ fn retry_policy_rejects_unbounded_ambiguous_and_unknown_configuration() {
         serde_json::json!({"kind":"bounded","max_attempts":3,"backoff_secs":0,"classes":["connectivity"]}),
         serde_json::json!({"kind":"bounded","max_attempts":3,"backoff_secs":60,"classes":[]}),
         serde_json::json!({"kind":"bounded","max_attempts":3,"backoff_secs":60,"classes":["connectivity","connectivity"]}),
+        serde_json::json!({"kind":"bounded","max_attempts":3,"backoff_secs":60,"classes":["turn_budget","turn_budget"]}),
+        serde_json::json!({"kind":"bounded","max_attempts":3,"backoff_secs":60,"classes":["turn-budget"]}),
         serde_json::json!({"kind":"bounded","max_attempts":3,"backoff_secs":60,"classes":["timeout"]}),
         serde_json::json!({"kind":"bounded","max_attempts":3,"backoff_secs":60,"classes":["quota_exhausted"]}),
         serde_json::json!({"kind":"bounded","max_attempts":3,"backoff_secs":60,"classes":["connectivity"],"fallback":true}),

@@ -1,6 +1,7 @@
 #![cfg(unix)]
 use super::*;
 mod fixture;
+mod turn_budget;
 use fixture::Fixture;
 use luthor::state::{
     journal::evidence_payloads,

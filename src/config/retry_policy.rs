@@ -9,6 +9,8 @@ pub enum TransientFailure {
     RateLimit,
     TransientServer,
     Connectivity,
+    /// Typed per-turn worker limits, not provider transport failures.
+    TurnBudget,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -41,7 +43,7 @@ impl RetryPolicy {
             || unique.len() != classes.len()
         {
             return Err(ConfigError::Invalid(
-                "retry policy requires at least two total attempts, positive backoff, and distinct transient classes".into(),
+                "retry policy requires at least two total attempts, positive backoff, and distinct retry classes".into(),
             ));
         }
         Ok(())

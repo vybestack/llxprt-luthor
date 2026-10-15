@@ -1,4 +1,4 @@
-//! Only the worker's single terminal stdout object can identify a transient.
+//! Only the worker's single terminal stdout object can identify a retry class.
 use crate::{
     config::TransientFailure,
     model::{ExitReceipt, LaunchPlan},
@@ -112,6 +112,7 @@ fn classify_error(error: &TerminalError, exit: i32) -> WorkerOutcome {
         ("model-rate-limit", 5) => TransientFailure::RateLimit,
         ("model-transient-server", 5) => TransientFailure::TransientServer,
         ("model-connectivity", 5) => TransientFailure::Connectivity,
+        ("turn-budget" | "turn-time-exhausted", 6) => TransientFailure::TurnBudget,
         ("model-quota-exhausted" | "model-permanent", 5) => return WorkerOutcome::NonTransient,
         _ => return WorkerOutcome::Unclassified,
     };
@@ -125,23 +126,30 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn only_typed_terminal_transport_codes_authorize_retry() {
-        for (code, class) in [
-            ("model-rate-limit", TransientFailure::RateLimit),
-            ("model-transient-server", TransientFailure::TransientServer),
-            ("model-connectivity", TransientFailure::Connectivity),
+    fn only_typed_terminal_codes_with_matching_exit_family_authorize_retry() {
+        for (code, class, exit, wrong_exit) in [
+            ("model-rate-limit", TransientFailure::RateLimit, 5, 6),
+            (
+                "model-transient-server",
+                TransientFailure::TransientServer,
+                5,
+                6,
+            ),
+            ("model-connectivity", TransientFailure::Connectivity, 5, 6),
+            ("turn-budget", TransientFailure::TurnBudget, 6, 5),
+            ("turn-time-exhausted", TransientFailure::TurnBudget, 6, 5),
         ] {
             let bytes = json!({"status":"error","session_id":"task","error":{"code":code,"message":"not parsed"}}).to_string();
             assert_eq!(
-                classify(bytes.as_bytes(), "task", Some(5)),
+                classify(bytes.as_bytes(), "task", Some(exit)),
                 WorkerOutcome::Transient { class }
             );
             assert_eq!(
-                classify(bytes.as_bytes(), "other", Some(5)),
+                classify(bytes.as_bytes(), "other", Some(exit)),
                 WorkerOutcome::Unclassified
             );
             assert_eq!(
-                classify(bytes.as_bytes(), "task", Some(6)),
+                classify(bytes.as_bytes(), "task", Some(wrong_exit)),
                 WorkerOutcome::Unclassified
             );
             assert_eq!(
@@ -149,11 +157,15 @@ mod tests {
                 WorkerOutcome::Unclassified
             );
             assert_eq!(
-                classify(format!("prompt echo\n{bytes}").as_bytes(), "task", Some(5)),
+                classify(
+                    format!("prompt echo\n{bytes}").as_bytes(),
+                    "task",
+                    Some(exit)
+                ),
                 WorkerOutcome::Unclassified
             );
             assert_eq!(
-                classify(format!("{bytes}\n{bytes}").as_bytes(), "task", Some(5)),
+                classify(format!("{bytes}\n{bytes}").as_bytes(), "task", Some(exit)),
                 WorkerOutcome::Unclassified
             );
         }
