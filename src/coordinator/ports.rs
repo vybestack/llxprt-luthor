@@ -207,3 +207,32 @@ pub enum ScheduleError {
     #[error("ID generation failed: {0}")]
     Id(#[from] std::io::Error),
 }
+
+/// Only idempotent reads may be deferred. Never retry a failed/uncertain launch
+/// or assignment by classifying its error text as a transient read failure.
+pub(crate) fn transient_read(error: &DispatchError) -> bool {
+    use crate::github::{
+        project::{ProjectError, ReadCategory},
+        pull_request::ErrorCategory,
+    };
+    match error {
+        DispatchError::PullRequest(error) => matches!(
+            error.category,
+            ErrorCategory::Transport | ErrorCategory::RateLimit
+        ),
+        DispatchError::Claim(ClaimError::Source(
+            ProjectError::Read(error) | ProjectError::IssueRead(error),
+        )) => matches!(
+            error.category,
+            ReadCategory::Transport | ReadCategory::RateLimit
+        ),
+        _ => false,
+    }
+}
+
+/// Capacity is always waitable; transient reads are waitable only when the
+/// operator decision has already been committed to the durable inbox.
+pub(crate) fn defer_resume_error(error: &DispatchError, durable_request: bool) -> bool {
+    matches!(error, DispatchError::State(StateError::Capacity { .. }))
+        || durable_request && transient_read(error)
+}

@@ -47,7 +47,13 @@ fn open_store(root: impl AsRef<Path>, capacity: usize) -> Result<StateStore, Sta
         .read(true)
         .write(true)
         .open(root.join("coordinator.lock"))?;
-    lock.try_lock_exclusive().map_err(StateError::Io)?;
+    lock.try_lock_exclusive().map_err(|error| {
+        if error.kind() == std::io::ErrorKind::WouldBlock {
+            StateError::CoordinatorBusy
+        } else {
+            StateError::Io(error)
+        }
+    })?;
     let mut connection = Connection::open(root.join("state.sqlite3"))?;
     connection.pragma_update(None, "journal_mode", "WAL")?;
     connection.pragma_update(None, "foreign_keys", "ON")?;

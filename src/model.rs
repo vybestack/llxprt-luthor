@@ -9,6 +9,8 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum StateError {
+    #[error("coordinator busy; try again")]
+    CoordinatorBusy,
     #[error(transparent)]
     Sql(#[from] rusqlite::Error),
     #[error(transparent)]

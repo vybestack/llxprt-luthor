@@ -24,6 +24,8 @@ pub(crate) mod pr_repair;
 pub(crate) mod pr_restore;
 pub(crate) mod preparation;
 mod proofs;
+pub(crate) mod request_context;
+pub mod requests;
 pub mod retirement;
 pub mod scheduling;
 pub mod task_records;

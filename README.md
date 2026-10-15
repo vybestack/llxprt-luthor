@@ -107,6 +107,51 @@ Capacity counts reserved attempts, including uncertain attempts. A slot is not r
 
 A worker process exit does not complete a task. Completion requires a verified matching open PR in the mapped code repository, with the exact tracker issue linkage, expected base and allowed head repository, and authorized identity. Draft status and pending or failing checks are reported, but do not by themselves negate a verified matching open PR. An absent, ambiguous, or unreadable PR result does not establish completion. Luthor does not automatically retry work, review or repair a PR, merge without an explicit mapping policy, or unassign an issue.
 
+## Retry/resume while the daemon is busy
+
+An explicit `retry ... --execute` or `resume ... --execute` can be submitted
+while the daemon holds the coordinator lock or capacity is full. After read-only
+admission checks, the CLI durably queues the request and returns JSON with
+`status: "queued"`, a stable `request_id`/`attempt_id`, and a reason such as
+`coordinator busy; request queued` or `capacity full: limit 1, reserved or
+unresolved 1; request queued`. No second coordinator is allowed to launch work.
+Invalid requests still fail immediately: for example, `config revision unchanged`,
+claim drift, an unauthorized actor, or a present/ambiguous PR. Retry and resume
+still require `--execute`; there is no implicit launch authorization.
+
+The private `state_root/operator-requests/` inbox persists the exact task,
+previous attempt, retry config/revision and operator decision independently of
+the coordinator lock. Matching duplicate submissions coalesce; a conflicting
+pending decision is refused instead of replaced. Keep this directory with the
+rest of the private state when backing it up. Requests need an **execute** daemon
+cycle to run; a preview cycle never drains the inbox.
+
+After startup reconciliation, execute cycles drain pending requests before
+selecting automatic retries, PR repairs or new work. Every request is checked
+again against the latest attempt, authenticated identity, task phase, exit and
+process evidence, ownership, claim, PR, config and capacity. Changed preconditions
+produce a recorded refusal rather than launching stale work. Full capacity or a
+transient GitHub read failure leaves the request pending, including a paused
+resume's task state. This deferral applies to durable queued requests; a direct,
+one-shot resume still holds on a failed claim/PR lookup as before. Once a launch intent is recorded, restart recovery never
+redispatches that request, even if the launch outcome is uncertain.
+
+`status` and `show TASK` expose `operator_requests`, including each request's
+stable attempt ID, status and bounded non-secret reason. `pending` means waiting;
+`applied` means a launch was authorized, **not** that the task completed;
+`refused` means a precondition no longer permits it. `recorded` means an attempt
+already existed when recovering an unacknowledged request: inspect the task's
+normal reconciliation evidence rather than resubmitting it blindly. Capacity
+refusals name the limit and reserved/unresolved count. Do not remove ownership,
+reservation or inbox records to force dispatch.
+
+Continuous execute mode reports typed transient cycle failures and startup
+reconciliation barriers on stderr, then retries with bounded exponential backoff
+(30, 60, 120, 240, then at most 300 seconds). A successful cycle resets the delay.
+Invalid configuration, malformed upstream data and storage/integrity errors
+still fail fast. `--once` reports the first cycle result without sleeping or
+retrying.
+
 ## Terminal-task cleanup and disk-space dispatch holds
 
 Cleanup is **disabled by default**. Set the optional top-level `cleanup` policy

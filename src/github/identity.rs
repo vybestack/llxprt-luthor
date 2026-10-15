@@ -4,6 +4,8 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum IdentityError {
+    #[error("GitHub account verification temporarily unavailable")]
+    Transient,
     #[error("GitHub account verification failed")]
     Command,
     #[error("GitHub account verification returned missing or ambiguous account output")]
@@ -19,7 +21,12 @@ pub fn verify_authenticated_account(
     let output = crate::github::read::api(gh_binary, &["api", "user", "--jq", ".login"])
         .map_err(|_| IdentityError::Command)?;
     if !output.status.success() {
-        return Err(IdentityError::Command);
+        let status = crate::github::read::http_status(&output.stdout, &output.stderr);
+        return Err(if crate::github::read::transient(status, &output.stderr) {
+            IdentityError::Transient
+        } else {
+            IdentityError::Command
+        });
     }
     let stdout = std::str::from_utf8(&output.stdout).map_err(|_| IdentityError::Output)?;
     let mut lines = stdout.lines();

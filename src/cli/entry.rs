@@ -2,6 +2,7 @@ mod continuation;
 mod dispatch;
 mod operator;
 mod recovery;
+mod requests;
 mod resume;
 mod support;
 
