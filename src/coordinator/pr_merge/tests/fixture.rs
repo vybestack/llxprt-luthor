@@ -56,6 +56,14 @@ impl Fixture {
             &serde_json::to_string(&saved).unwrap(),
         )
         .unwrap();
+        journal::record_evidence(
+            &mut store,
+            "task",
+            Some("attempt"),
+            "attempt_exit",
+            r#"{"stop_signals":[]}"#,
+        )
+        .unwrap();
         let prs = FakePrs::new(&saved);
         let mut config = config;
         config.mappings[0].merge = MergePolicy::Enabled {
@@ -272,6 +280,16 @@ impl PrMerger for FakePrs {
         }
         self.detail["head"]["sha"] = json!("b".repeat(40));
         self.detail["mergeable_state"] = json!("unknown");
+        Ok(())
+    }
+    fn close_finished_tracker(
+        &mut self,
+        _: &crate::model::VerifiedOpenPr,
+        _: &serde_json::Value,
+        _: &crate::pr_merge::TrackerTarget,
+    ) -> Result<(), LookupError> {
+        self.tracker_writes += 1;
+        self.tracker_closed = true;
         Ok(())
     }
     fn ready_for_review(&mut self, _: &VerifiedOpenPr) -> Result<(), LookupError> {

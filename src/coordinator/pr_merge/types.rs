@@ -1,6 +1,6 @@
 use crate::{
     github::pull_request::{LookupError, PrMerger},
-    state::StateError,
+    state::{StateError, StateStore, pr_merge},
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -18,6 +18,8 @@ pub enum MergeError {
 
 #[derive(Debug, Default, Serialize)]
 pub struct MergeReport {
+    #[serde(skip_serializing)]
+    pub(crate) cleanup: crate::cleanup::CleanupReport,
     pub merged: Vec<String>,
     pub waiting: Vec<crate::coordinator::notes::TaskNote>,
     /// Merged by someone else, with the delivery verified and the task retired.
@@ -47,4 +49,36 @@ pub(crate) fn audit_error(error: &MergeError) -> Value {
         }
         MergeError::Refused(reason) => json!({"category":"verification","reason":reason}),
     }
+}
+
+/// What the sweep concluded about one task.
+pub(crate) enum Outcome {
+    /// Luthor's own merge is confirmed and the tracker handled.
+    Merged(crate::cleanup::CleanupReport),
+    /// Nothing is written; the reason is reported and the task stays as it is.
+    Waiting(String),
+    /// GitHub merged the PR outside Luthor and the delivery is verified.
+    Delivered(
+        Box<crate::state::retirement::Retirement>,
+        crate::cleanup::CleanupReport,
+    ),
+}
+
+/// A failure of one task's merge step is journaled and held with its reason so
+/// the rest of the queue keeps running. Only a failure of local state, which
+/// no task can be trusted past, stops the sweep.
+pub(crate) fn isolate(
+    store: &mut StateStore,
+    task: &str,
+    result: Result<Outcome, MergeError>,
+) -> Result<Outcome, MergeError> {
+    let error = match result {
+        Ok(outcome) => return Ok(outcome),
+        Err(error) => error,
+    };
+    pr_merge::record_error(store, task, &audit_error(&error).to_string())?;
+    if matches!(error, MergeError::State(_)) {
+        return Err(error);
+    }
+    Ok(Outcome::Waiting(format!("merge step failed: {error}")))
 }

@@ -16,6 +16,7 @@ use crate::{
 mod discovery;
 mod external_merges;
 mod merges;
+mod polling;
 mod repairs;
 mod retirements;
 
@@ -150,6 +151,7 @@ case "$2" in
   repos/org/tracker/issues/331?per_page=100) if test -f '{}'; then printf '%s\n' '{}'; else printf '%s\n' '{}'; fi ;;
   repos/org/tracker/issues/12?per_page=100) if test -f '{}'; then printf '%s\n' '{}'; else printf '%s\n' '{}'; fi ;;
   "repos/org/code/pulls?state=open&per_page=100&page=1") printf '%s\n' '[]' ;;
+  rate_limit) printf '%s\n' '{{"resources":{{"core":{{"remaining":5000,"reset":9999999999}},"graphql":{{"remaining":5000,"reset":9999999999}}}}}}' ;;
   user) printf '%s\n' 'acoliver' ;;
   -X) test "$3" = POST || exit 99
     test "$5" = -f && test "$6" = 'assignees[]=fixture-agent' || exit 99
@@ -683,7 +685,10 @@ fn low_space_daemon_cycle_reports_hold_without_candidate_reads_claims_or_launch(
     assert!(launcher.plans.is_empty());
     assert!(!f.assigned.exists());
     assert!(!config.worktree_root.exists());
-    assert_eq!(fs::read_to_string(&f.calls).unwrap(), "");
+    assert_eq!(
+        fs::read_to_string(&f.calls).unwrap(),
+        "api rate_limit --include\n"
+    );
     let store = StateStore::open(&config.state_root, config.capacity).unwrap();
     assert_eq!(task_records::task_count(&store).unwrap(), 0);
     assert_eq!(scheduling::reservation_count(&store).unwrap(), 0);

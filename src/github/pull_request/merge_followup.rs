@@ -112,15 +112,28 @@ pub(crate) fn close(
     merge_write::write(
         reader,
         &[
-            "issue",
-            "close",
-            &target.number.to_string(),
-            "--repo",
-            &target.repository,
-            "--reason",
-            "completed",
-            "--comment",
-            &comment,
+            "api",
+            "--method",
+            "POST",
+            &format!(
+                "repos/{}/issues/{}/comments",
+                target.repository, target.number
+            ),
+            "-f",
+            &format!("body={comment}"),
+        ],
+    )?;
+    merge_write::write(
+        reader,
+        &[
+            "api",
+            "--method",
+            "PATCH",
+            &format!("repos/{}/issues/{}", target.repository, target.number),
+            "-f",
+            "state=closed",
+            "-f",
+            "state_reason=completed",
         ],
     )?;
     Ok(())

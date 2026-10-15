@@ -173,8 +173,8 @@ fn finished_instead_of_held<P: ProjectReader, Q: PrHealthReader>(
     }
 }
 
-/// The PR is looked up before anything else: a task whose PR is no longer open
-/// is finished and must not be judged against today's configuration.
+/// Local selection drift is diagnosed once without a PR lookup. Terminal
+/// delivery is handled independently by the cycle settlement pass.
 fn inspect_task<P: ProjectReader, Q: PrHealthReader, L: SupervisorLauncher, I: IdCreator>(
     store: &mut StateStore,
     config: &crate::config::Config,
@@ -187,20 +187,6 @@ fn inspect_task<P: ProjectReader, Q: PrHealthReader, L: SupervisorLauncher, I: I
     if let Some(retry) = super::repair_retry::pending(store, config, task)? {
         return Ok(Inspection::RetryScheduled(retry));
     }
-    let saved = pr_repair::saved_pr(&store.connection, task)?;
-    // Exhaustive absence covers a merged/closed PR and leaves cleanup to its
-    // separate exact terminal-PR proof. It must never trigger a new PR.
-    let pr = match lookup(prs, &saved.repository, &saved.tracker_issue_url) {
-        Ok(LookupResult::Absent) => return Ok(Inspection::Idle),
-        Ok(LookupResult::OpenPreexisting(pr)) => *pr,
-        Ok(LookupResult::Ambiguous(_)) => return Err(StateError::LaunchBlocked.into()),
-        // Unknown is not a conflict; nothing changes and the next cycle asks again.
-        Err(error) => {
-            return Ok(Inspection::Skipped(format!(
-                "PR lookup unavailable ({error}); will retry next cycle"
-            )));
-        }
-    };
     let (previous, _) = pr_repair::context(store, task)?;
     let selection = crate::state::selection_for_attempt(store, &previous)?;
     let mut comparable = crate::model::EffectiveConfigSnapshot::from(config);
@@ -215,11 +201,33 @@ fn inspect_task<P: ProjectReader, Q: PrHealthReader, L: SupervisorLauncher, I: I
     }
     let drift = selection.effective_config.differing_fields(&comparable);
     if !drift.is_empty() {
-        return Ok(Inspection::Skipped(format!(
-            "selection config differs: {}",
-            drift.join(", ")
-        )));
+        let reason = format!("selection config differs: {}", drift.join(", "));
+        let facts = serde_json::json!({"reason":reason,"saved":selection.effective_config,"current":comparable}).to_string();
+        return Ok(
+            if crate::state::pr_poll::changed_repair_mapping(store, task, &facts)? {
+                Inspection::Skipped(reason)
+            } else {
+                Inspection::Idle
+            },
+        );
     }
+    let saved = pr_repair::saved_pr(&store.connection, task)?;
+    if !crate::state::pr_poll::begin(store, task, "repair", &saved.head_commit_sha)? {
+        return Ok(Inspection::Idle);
+    }
+    // Exhaustive absence covers a merged/closed PR and leaves cleanup to its
+    // separate exact terminal-PR proof. It must never trigger a new PR.
+    let pr = match lookup(prs, &saved.repository, &saved.tracker_issue_url) {
+        Ok(LookupResult::Absent) => return Ok(Inspection::Idle),
+        Ok(LookupResult::OpenPreexisting(pr)) => *pr,
+        Ok(LookupResult::Ambiguous(_)) => return Err(StateError::LaunchBlocked.into()),
+        // Unknown is not a conflict; nothing changes and the next cycle asks again.
+        Err(error) => {
+            return Ok(Inspection::Skipped(format!(
+                "PR lookup unavailable ({error}); will retry next cycle"
+            )));
+        }
+    };
     inspect_open_pr(store, task, (saved, pr), (projects, prs), (launcher, ids))
 }
 

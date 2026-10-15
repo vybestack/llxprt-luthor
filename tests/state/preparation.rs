@@ -19,7 +19,7 @@ fn v4_migration_adds_no_historical_preparation_and_preserves_exact_rows() {
     .unwrap();
     drop(store);
     let db = Connection::open(dir.path().join("state.sqlite3")).unwrap();
-    db.execute_batch("DROP TABLE launch_preparations; PRAGMA user_version=4;")
+    db.execute_batch("DROP TABLE pr_polls; DROP TABLE launch_preparations; PRAGMA user_version=4;")
         .unwrap();
     let before = history(&db);
     drop(StateStore::open(dir.path(), 2).unwrap());
@@ -27,7 +27,7 @@ fn v4_migration_adds_no_historical_preparation_and_preserves_exact_rows() {
     assert_eq!(
         db.pragma_query_value::<i32, _>(None, "user_version", |row| row.get(0))
             .unwrap(),
-        5
+        6
     );
     assert_eq!(
         db.query_row::<i64, _, _>("SELECT COUNT(*) FROM launch_preparations", [], |row| row
@@ -58,7 +58,7 @@ fn conflicting_v4_preparation_schema_fails_without_accepting_or_backfilling_it()
     drop(store);
     let db = Connection::open(dir.path().join("state.sqlite3")).unwrap();
     db.execute_batch(
-        "DROP TABLE launch_preparations;
+        "DROP TABLE pr_polls; DROP TABLE launch_preparations;
         CREATE TABLE launch_preparations(conflict TEXT); PRAGMA user_version=4;",
     )
     .unwrap();
@@ -90,4 +90,32 @@ fn history(db: &Connection) -> Vec<String> {
         "SELECT json_group_array(json_array(sequence,task_id,attempt_id,kind,payload,created_at)) FROM evidence ORDER BY sequence",
         "SELECT json_group_array(json_array(name,seq)) FROM sqlite_sequence ORDER BY name",
     ].iter().map(|sql| db.query_row(sql, [], |row| row.get(0)).unwrap()).collect()
+}
+
+#[test]
+fn conflicting_v5_poll_schema_fails_atomically_instead_of_adopting_it() {
+    let dir = tempfile::tempdir().unwrap();
+    drop(StateStore::open(dir.path(), 2).unwrap());
+    let db = Connection::open(dir.path().join("state.sqlite3")).unwrap();
+    db.execute_batch(
+        "DROP TABLE pr_polls; CREATE TABLE pr_polls(conflict TEXT); PRAGMA user_version=5;",
+    )
+    .unwrap();
+    let before = history(&db);
+    assert!(StateStore::open(dir.path(), 2).is_err());
+    assert_eq!(
+        db.pragma_query_value::<i32, _>(None, "user_version", |row| row.get(0))
+            .unwrap(),
+        5
+    );
+    assert_eq!(history(&db), before);
+    assert_eq!(
+        db.query_row::<String, _, _>(
+            "SELECT sql FROM sqlite_schema WHERE name='pr_polls'",
+            [],
+            |row| row.get(0)
+        )
+        .unwrap(),
+        "CREATE TABLE pr_polls(conflict TEXT)"
+    );
 }

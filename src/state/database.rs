@@ -58,7 +58,7 @@ fn open_store(root: impl AsRef<Path>, capacity: usize) -> Result<StateStore, Sta
     connection.pragma_update(None, "journal_mode", "WAL")?;
     connection.pragma_update(None, "foreign_keys", "ON")?;
     let version: i32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if version > 5 {
+    if version > 6 {
         return Err(StateError::UnsupportedDatabaseVersion(version));
     }
     let tx = connection.transaction()?;
@@ -157,6 +157,17 @@ fn initialize_schema(
             owner_payload TEXT NOT NULL);",
         )?;
         tx.pragma_update(None, "user_version", 5)?;
+    }
+    if version < 6 {
+        tx.execute_batch(
+            "CREATE TABLE pr_polls (
+            task_id TEXT NOT NULL REFERENCES tasks(id),
+            purpose TEXT NOT NULL,
+            identity TEXT NOT NULL,
+            observed_at INTEGER NOT NULL,
+            PRIMARY KEY(task_id,purpose));",
+        )?;
+        tx.pragma_update(None, "user_version", 6)?;
     }
     Ok(())
 }

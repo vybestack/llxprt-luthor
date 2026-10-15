@@ -65,10 +65,11 @@ pub struct Retirement {
 const RETIRABLE: &str = "t.state IN ('preparing','selected','claimed','attention','held','paused','pr_complete')
     AND NOT EXISTS(SELECT 1 FROM attempts a WHERE a.task_id=t.id AND NOT EXISTS(
         SELECT 1 FROM evidence e WHERE e.task_id=t.id AND e.attempt_id=a.id AND e.kind='attempt_exit') AND a.id IS NOT ?2)
-    AND NOT EXISTS(SELECT 1 FROM intents WHERE task_id=t.id AND kind='cleanup')";
+    AND (NOT EXISTS(SELECT 1 FROM intents WHERE task_id=t.id AND kind='cleanup')
+        OR EXISTS(SELECT 1 FROM evidence WHERE task_id=t.id AND kind='cleanup_complete'))";
 
-/// Tasks the reconciliation sweep inspects. `pr_complete` tasks are left to
-/// cleanup, which removes their worktree and branch once the PR is finished.
+/// Tasks the generic reconciliation sweep inspects. `pr_complete` tasks have
+/// a dedicated exact-identity terminal settlement and tracker-followup pass.
 pub(crate) fn candidates(store: &StateStore) -> Result<Vec<String>, StateError> {
     Ok(store
         .connection
@@ -80,6 +81,20 @@ pub(crate) fn candidates(store: &StateStore) -> Result<Vec<String>, StateError> 
             |row| row.get(0),
         )?
         .collect::<Result<_, _>>()?)
+}
+
+/// Read-only qualification before any terminal followup write. The transaction
+/// in `retire` still repeats this check when publishing the terminal phase.
+pub(crate) fn require_retirable(store: &StateStore, task: &str) -> Result<(), StateError> {
+    let qualified: bool = store.connection.query_row(
+        &format!("SELECT EXISTS(SELECT 1 FROM tasks t WHERE {RETIRABLE} AND t.id=?1)"),
+        params![task, Option::<String>::None],
+        |row| row.get(0),
+    )?;
+    if !qualified {
+        return Err(StateError::NotRetirable(refusal(&store.connection, task)?));
+    }
+    Ok(())
 }
 
 /// Moves the task to its terminal phase, releases its reservation and appends

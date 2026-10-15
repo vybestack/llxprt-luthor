@@ -11,9 +11,11 @@ pub mod eligibility;
 pub mod platform;
 pub mod pr_evidence;
 pub mod github {
+    pub mod budget;
     pub mod identity;
     pub mod project;
     pub mod pull_request;
+    pub(crate) mod quota;
     pub(crate) mod read;
 }
 pub mod state;

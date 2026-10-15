@@ -153,6 +153,10 @@ impl PullRequestReader for GhPullRequestReader {
         Ok(detail)
     }
 
+    fn terminal_detail(&mut self, repository: &str, number: u64) -> Result<Value, LookupError> {
+        self.api(&["api", &format!("repos/{repository}/pulls/{number}")])
+    }
+
     fn repository_identity(&mut self, name: &str) -> Result<u64, LookupError> {
         GhPullRequestReader::repository_identity(self, name)
     }

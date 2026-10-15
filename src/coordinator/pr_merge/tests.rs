@@ -153,6 +153,9 @@ fn mapping_drift_and_unaccounted_attempts_do_not_authorize_merges() {
     let mut f = Fixture::new();
     f.config.mappings[0].base_branch = "other".into();
     assert_eq!(f.run().unwrap().waiting.len(), 1);
+    assert_eq!(f.prs.reads, 0);
+    assert!(f.run().unwrap().waiting.is_empty());
+    assert_eq!(f.prs.reads, 0);
     assert!(f.prs.writes.is_empty());
     f.config.mappings[0].base_branch = "main".into();
     f.store
@@ -279,13 +282,24 @@ fn external_merge_without_verifiable_lineage_holds_the_task_with_its_reason() {
 }
 
 #[test]
-fn external_merge_at_the_saved_head_keeps_the_existing_waiting_behavior() {
+fn external_merge_at_the_saved_head_settles_once_without_fabricated_merge_authorization() {
     let mut f = Fixture::new();
     f.prs.merged();
     let report = f.run().unwrap();
-    assert!(report.delivered.is_empty() && report.merged.is_empty());
-    assert_eq!(report.waiting[0].reason, "PR is not open and unmerged");
-    assert_not_delivered(&f);
+    assert_eq!(report.delivered.len(), 1);
+    assert!(report.merged.is_empty() && report.waiting.is_empty());
+    assert_eq!(
+        task_records::task_phase(&f.store, "task")
+            .unwrap()
+            .as_deref(),
+        Some("pr_merged")
+    );
+    assert!(!pr_merge::completed(&f.store, "task").unwrap());
+    assert!(f.prs.writes.is_empty());
+    let reads = f.prs.reads;
+    assert!(f.run().unwrap().delivered.is_empty());
+    assert_eq!(f.prs.reads, reads);
+    assert_eq!(f.prs.tracker_writes, 1);
 }
 
 fn assert_not_delivered(f: &Fixture) {

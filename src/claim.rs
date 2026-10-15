@@ -35,6 +35,7 @@ impl AssignmentWriter for GhAssignmentWriter {
     ) -> Result<(), AssignmentError> {
         let path = format!("repos/{repository}/issues/{number}/assignees");
         let field = format!("assignees[]={principal}");
+        crate::github::budget::command(&["api"]);
         let result = Command::new(&self.executable)
             .args(["api", "-X", "POST", &path, "-f", &field])
             .output();

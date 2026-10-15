@@ -26,6 +26,9 @@ pub fn restore_wrongly_held_prs<Q: PullRequestReader>(
 ) -> Result<RestoreReport, DispatchError> {
     let mut report = RestoreReport::default();
     for task in pr_restore::candidates(store)? {
+        if !crate::state::pr_poll::begin(store, &task, "restore_terminal", "held")? {
+            continue;
+        }
         match terminal_proof(store, prs, &task)? {
             Proof::Terminal(pr) => {
                 let proof = serde_json::json!({
@@ -85,6 +88,9 @@ pub fn restore_open_held_prs<P: crate::github::project::ProjectReader, Q: PullRe
 ) -> Result<RestoreReport, DispatchError> {
     let mut report = RestoreReport::default();
     for task in pr_restore::open_candidates(store)? {
+        if !crate::state::pr_poll::begin(store, &task, "restore_open", "held")? {
+            continue;
+        }
         match restore_open_task(store, &task, projects, prs) {
             Ok(()) => report.restored.push(task),
             Err(DispatchError::State(error)) if !matches!(error, StateError::LaunchBlocked) => {

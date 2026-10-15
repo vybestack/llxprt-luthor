@@ -145,6 +145,7 @@ fn settle_finished_tasks(
     projects: &mut GhProjectReader,
     prs: &mut GhPullRequestReader,
     startup: &mut StartupReport,
+    config: &Config,
 ) -> Result<PrRepairReport, Error> {
     let mut restored = crate::coordinator::restore_open_held_prs(store, projects, prs)
         .map_err(|_| "open PR hold restoration failed; inspect local task state")?;
@@ -152,8 +153,9 @@ fn settle_finished_tasks(
         .map_err(|_| "PR hold restoration failed; inspect local task state")?;
     restored.restored.extend(terminal.restored);
     restored.retained.extend(terminal.retained);
-    let retirement = crate::coordinator::retire_finished_tasks(store, projects, prs)
-        .map_err(|_| "task retirement failed; inspect local task state")?;
+    let retirement =
+        crate::coordinator::pr_merge::retire_with_tracker(store, config, projects, prs)
+            .map_err(|_| "task retirement failed; inspect local task state")?;
     startup
         .settle_retired(store, &retirement.retired)
         .map_err(|_| "task retirement failed; inspect local task state")?;
@@ -173,21 +175,22 @@ fn cycle_with_dependencies<L: SupervisorLauncher, I: IdCreator>(
     launcher: &mut L,
     ids: &mut I,
 ) -> Result<Option<ScheduleReport>, Error> {
+    let _github_cycle = crate::github::budget::CycleGuard::start(&config.github_polling);
     let mut projects = GhProjectReader::new(gh.clone());
     if !options.execute {
         preview(&mut projects, config, options)?;
         return Ok(None);
     }
+    crate::github::quota::refresh(&gh)?;
     let mut store = StateStore::open(&config.state_root, config.capacity)?;
     let mut prs = GhPullRequestReader::new(gh.clone());
     let (startup, mut pr_repair, operator_launches) =
         reconcile_cycle(&mut store, config, &gh, &mut projects, &mut prs, launcher)?;
-    let pr_merge = crate::coordinator::merge_verified_prs(&mut store, config, &mut prs)?;
-    let cleanup = crate::cleanup::clean_terminal_tasks(&mut store, config, &mut prs)
-        .map_err(|_| "cleanup failed; inspect local task state")?;
+    let (pr_merge, cleanup) = sweep_and_clean_prs(&mut store, config, &mut prs)?;
     let disk_space = crate::disk::inspect(&config.worktree_root, config.min_free_space_bytes)?;
     if disk_space.dispatch_held {
         let report = ScheduleReport {
+            github: crate::github::budget::usage(),
             startup,
             launched: operator_launches,
             disk_space: Some(disk_space),
@@ -240,9 +243,7 @@ fn cycle_with_dependencies<L: SupervisorLauncher, I: IdCreator>(
     report.candidate_read_failures = selection.candidate_read_failures;
     report.source_read_failures = selection.source_read_failures;
     report.pr_repair = pr_repair;
-    report.pr_merge = pr_merge;
-    report.launched.splice(0..0, repair.launched);
-    report.launched.splice(0..0, operator_launches);
+    finish_pr_report(&mut report, pr_merge, repair.launched, operator_launches);
     print_schedule_report(&report, &cleanup);
     verify_report(&report)?;
     Ok(Some(report))
@@ -264,7 +265,7 @@ fn reconcile_cycle<L: SupervisorLauncher>(
     Error,
 > {
     let mut startup = startup_reconcile_all(store, projects, prs)?;
-    let pr_repair = settle_finished_tasks(store, projects, prs, &mut startup)?;
+    let pr_repair = settle_finished_tasks(store, projects, prs, &mut startup, config)?;
     if startup.scheduling_blocked() {
         println!("{}", json!({"mode":"execute", "blocked":true}));
         return Err(
@@ -306,7 +307,7 @@ fn print_schedule_report(report: &ScheduleReport, cleanup: &crate::cleanup::Clea
         .collect::<Vec<_>>();
     println!(
         "{}",
-        json!({"mode":"execute", "cleanup":cleanup, "reconciliation":attempts,
+        json!({"mode":"execute", "github":report.github, "cleanup":cleanup, "reconciliation":attempts,
         "source_holds":report.startup.source_holds.iter().map(|hold| json!({"task_id":hold.task_id,"kind":hold.kind})).collect::<Vec<_>>(),
         "pr_repair":report.pr_repair, "pr_merge":report.pr_merge, "automatic_retries":report.automatic_retries,
         "waiting":report.waiting,
@@ -340,4 +341,48 @@ fn verify_candidate_accounts(
         verify_authenticated_account(gh, candidate)?;
     }
     Ok(())
+}
+
+fn sweep_prs(
+    store: &mut StateStore,
+    config: &Config,
+    prs: &mut GhPullRequestReader,
+) -> Result<crate::coordinator::MergeReport, Error> {
+    let mut report = crate::coordinator::pr_merge::settle_completed_prs(store, config, prs)?;
+    let mut merging = crate::coordinator::merge_verified_prs(store, config, prs)?;
+    report.cleanup.append(&mut merging.cleanup);
+    report.merged.extend(merging.merged);
+    report.waiting.extend(merging.waiting);
+    report.delivered.extend(merging.delivered);
+    Ok(report)
+}
+
+fn finish_pr_report(
+    report: &mut ScheduleReport,
+    merging: crate::coordinator::MergeReport,
+    repairs: Vec<crate::supervisor::LaunchPlan>,
+    operators: Vec<crate::supervisor::LaunchPlan>,
+) {
+    report.launched.splice(0..0, repairs);
+    report.launched.splice(0..0, operators);
+    report.pr_merge = merging;
+    report.github = crate::github::budget::usage();
+}
+
+fn sweep_and_clean_prs(
+    store: &mut StateStore,
+    config: &Config,
+    prs: &mut GhPullRequestReader,
+) -> Result<
+    (
+        crate::coordinator::MergeReport,
+        crate::cleanup::CleanupReport,
+    ),
+    Error,
+> {
+    let mut merging = sweep_prs(store, config, prs)?;
+    let mut cleanup = crate::cleanup::clean_terminal_tasks(store, config, prs)
+        .map_err(|_| "cleanup failed; inspect local task state")?;
+    cleanup.append(&mut merging.cleanup);
+    Ok((merging, cleanup))
 }

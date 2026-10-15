@@ -81,21 +81,27 @@ fn phase(f: &Fixture) -> Option<String> {
 }
 
 #[test]
-fn merged_pr_with_different_selection_config_is_neither_held_nor_inspected() {
+fn selection_drift_is_diagnosed_once_without_reading_even_a_finished_pr() {
     let mut f = drifted();
     FinishedPr::merged(&mut f);
     let before = evidence_rows(&f);
     let reason_before = task_records::held_reason(&f.store, "task").unwrap();
+    f.prs.inner.fail = true;
     let outcome = f.repair_outcome();
     assert!(outcome.launched.is_empty());
-    assert!(outcome.skipped.is_empty(), "{:?}", outcome.skipped);
+    assert_eq!(outcome.skipped.len(), 1);
+    assert_eq!(outcome.skipped[0].reason, DRIFT);
     assert!(outcome.held.is_empty());
     assert_eq!(phase(&f).as_deref(), Some("pr_complete"));
     assert_eq!(
         task_records::held_reason(&f.store, "task").unwrap(),
         reason_before
     );
-    assert_eq!(evidence_rows(&f), before);
+    let after = evidence_rows(&f);
+    assert_eq!(&after[..before.len()], before);
+    assert_eq!(after[before.len()..], ["repair_mapping_mismatch"]);
+    assert!(f.repair_outcome().skipped.is_empty());
+    assert_eq!(evidence_rows(&f), after);
 }
 
 #[test]
@@ -113,7 +119,11 @@ fn open_pr_with_different_selection_config_is_skipped_with_its_reason() {
     );
     assert_eq!(phase(&f).as_deref(), Some("pr_complete"));
     assert_eq!(scheduling::reservation_count(&f.store).unwrap(), 0);
-    assert_eq!(evidence_rows(&f), before);
+    let after = evidence_rows(&f);
+    assert_eq!(&after[..before.len()], before);
+    assert_eq!(after[before.len()..], ["repair_mapping_mismatch"]);
+    assert!(f.repair_outcome().skipped.is_empty());
+    assert_eq!(evidence_rows(&f), after);
     assert!(scheduling::ensure_dispatch_capacity(&f.store).is_ok());
 }
 
@@ -187,7 +197,10 @@ fn restoring_a_wrongly_held_task_with_a_merged_pr_frees_capacity() {
         "hold evidence is kept, never deleted"
     );
     let outcome = f.repair_outcome();
-    assert!(outcome.skipped.is_empty() && outcome.held.is_empty());
+    assert_eq!(outcome.skipped.len(), 1);
+    assert_eq!(outcome.skipped[0].reason, DRIFT);
+    assert!(outcome.held.is_empty() && outcome.launched.is_empty());
+    assert!(f.repair_outcome().skipped.is_empty());
     assert_eq!(phase(&f).as_deref(), Some("pr_complete"));
     assert!(restore(&mut f, &mut finished).restored.is_empty());
 }

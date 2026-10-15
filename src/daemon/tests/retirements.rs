@@ -30,18 +30,10 @@ fn close_issue_12(f: &Fixture) {
 fn held_after_exit(f: &Fixture, reason: &str) {
     seed_finished_issue12(f);
     let mut store = StateStore::open(&f.config.state_root, 2).unwrap();
-    for (kind, payload) in [
-        ("attempt_exit", r#"{"stop_signals":[]}"#),
-        ("exit_pr_lookup", r#"{"status":{"status":"open"}}"#),
-    ] {
-        store
-            .connection
-            .execute(
-                "INSERT INTO evidence(task_id,attempt_id,kind,payload) VALUES('task-12','attempt-12',?1,?2)",
-                [kind, payload],
-            )
-            .unwrap();
-    }
+    store.connection.execute(
+        "INSERT INTO evidence(task_id,attempt_id,kind,payload) VALUES('task-12','attempt-12','exit_pr_lookup',?1)",
+        [r#"{"status":{"status":"open"}}"#],
+    ).unwrap();
     task_records::hold_task(&mut store, "task-12", reason).unwrap();
 }
 

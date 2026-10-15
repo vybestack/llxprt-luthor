@@ -204,7 +204,7 @@ fn fixture_github(root: &Path) -> std::path::PathBuf {
     let gh = root.join("gh");
     let calls = root.join("calls");
     let assigned = root.join("assigned");
-    fs::write(&gh, format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$2\" in\n graphql) printf '%s\\n' '{}' ;;\n repos/org/tracker) printf '%s\\n' '{{\"node_id\":\"repo\"}}' ;;\n repos/org/tracker/issues/7?per_page=100) if test -f '{}'; then printf '%s\\n' '{}'; else printf '%s\\n' '{}'; fi ;;\n -X) touch '{}'; printf '%s\\n' '{{}}' ;;\n repos/org/code/pulls?*) printf '%s\\n' '[]' ;;\n user) printf '%s\\n' 'acoliver' ;;\n *) exit 99 ;;\nesac\n", calls.display(), project, assigned.display(), issue(true), issue(false), assigned.display())).unwrap();
+    fs::write(&gh, format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$2\" in\n rate_limit) printf '%s\\n' '{{\"resources\":{{\"core\":{{\"remaining\":5000,\"reset\":9999999999}},\"graphql\":{{\"remaining\":5000,\"reset\":9999999999}}}}}}' ;;\n graphql) printf '%s\\n' '{}' ;;\n repos/org/tracker) printf '%s\\n' '{{\"node_id\":\"repo\"}}' ;;\n repos/org/tracker/issues/7?per_page=100) if test -f '{}'; then printf '%s\\n' '{}'; else printf '%s\\n' '{}'; fi ;;\n -X) touch '{}'; printf '%s\\n' '{{}}' ;;\n repos/org/code/pulls?*) printf '%s\\n' '[]' ;;\n user) printf '%s\\n' 'acoliver' ;;\n *) exit 99 ;;\nesac\n", calls.display(), project, assigned.display(), issue(true), issue(false), assigned.display())).unwrap();
     fs::set_permissions(&gh, fs::Permissions::from_mode(0o700)).unwrap();
     calls
 }

@@ -45,21 +45,59 @@ pub fn clean_terminal_tasks<Q: PullRequestReader>(
         return Ok(report);
     }
     for task in cleanup_records::candidates(store)? {
-        match clean_one(store, config, prs, &task) {
-            Ok(true) => report.cleaned.push(task),
-            Ok(false) => report.retained.push(task),
-            Err(error) => {
-                let reason = error.operator_reason();
-                // Fixed reason only: upstream stderr/API data never enters operator evidence.
-                journal::record_evidence(store, &task, None, "cleanup_failed", &reason)?;
-                report.skipped.push(CleanupSkip {
-                    task_id: task,
-                    reason,
-                });
-            }
+        let result = verify_configuration(store, config, &task).map(|_| ());
+        if result.is_ok() && !crate::state::pr_poll::begin(store, &task, "cleanup", "complete")? {
+            continue;
         }
+        let result = result.and_then(|_| clean_one(store, config, prs, &task));
+        record_result(store, &task, result, &mut report)?;
     }
     Ok(report)
+}
+
+/// Last optional cleanup opportunity, after delivery/closure proof and before
+/// durable retirement. Cleanup remains opt-in, never a prerequisite for delivery.
+pub(crate) fn clean_delivered_task<Q: PullRequestReader>(
+    store: &mut StateStore,
+    config: &Config,
+    prs: &mut Q,
+    task: &str,
+) -> Result<CleanupReport, StateError> {
+    let mut report = CleanupReport::default();
+    if config.cleanup != CleanupPolicy::Disabled && crate::github::budget::optional_allowed() {
+        let result = clean_one(store, config, prs, task);
+        record_result(store, task, result, &mut report)?;
+    }
+    Ok(report)
+}
+
+fn record_result(
+    store: &mut StateStore,
+    task: &str,
+    result: Result<bool, CleanupError>,
+    report: &mut CleanupReport,
+) -> Result<(), StateError> {
+    match result {
+        Ok(true) => report.cleaned.push(task.into()),
+        Ok(false) => report.retained.push(task.into()),
+        Err(error) => {
+            let reason = error.operator_reason();
+            journal::record_evidence(store, task, None, "cleanup_failed", &reason)?;
+            report.skipped.push(CleanupSkip {
+                task_id: task.into(),
+                reason,
+            });
+        }
+    }
+    Ok(())
+}
+
+impl CleanupReport {
+    pub(crate) fn append(&mut self, other: &mut Self) {
+        self.cleaned.append(&mut other.cleaned);
+        self.retained.append(&mut other.retained);
+        self.skipped.append(&mut other.skipped);
+    }
 }
 
 fn clean_one<Q: PullRequestReader>(

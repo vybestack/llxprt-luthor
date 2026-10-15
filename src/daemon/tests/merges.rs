@@ -24,13 +24,6 @@ pub(super) fn seed_aligned_issue12(
             [serde_json::to_string(&saved).unwrap()],
         )
         .unwrap();
-    store
-        .connection
-        .execute(
-            "INSERT INTO evidence(task_id,attempt_id,kind,payload) VALUES('task-12','attempt-12','attempt_exit',?1)",
-            [r#"{"stop_signals":[]}"#],
-        )
-        .unwrap();
     (saved, worktree)
 }
 
@@ -44,9 +37,9 @@ pub(super) fn merge_enabled(f: &Fixture) -> Config {
     config
 }
 
-fn serve_merge(f: &Fixture) -> String {
+pub(super) fn serve_merge(f: &Fixture) -> String {
     let (saved, worktree) = seed_aligned_issue12(f);
-    let mut detail = repairs::pr_detail(true);
+    let mut detail = repairs::pr_detail(f, true);
     detail["head"]["sha"] = json!(worktree.head);
     detail["head"]["ref"] = json!(worktree.branch);
     detail["mergeable"] = json!(true);
@@ -77,7 +70,9 @@ fn serve_merge(f: &Fixture) -> String {
         r#"
   repos/{tracker}/issues/12) if test -f '{closed}'; then printf '%s\n' '{closed_issue}'; else printf '%s\n' '{open_issue}'; fi ;;
   repos/org/code/pulls/42) if test -f '{merged}'; then printf '%s\n' '{terminal}'; else printf '%s\n' '{detail}'; fi ;;
-  --method) test "$3" = PUT && test "$4" = repos/org/code/pulls/42/merge || exit 96
+  --method) if test "$3:$4" = POST:repos/org/tracker/issues/12/comments; then printf '%s\n' '{{}}'; exit 0; fi
+    if test "$3:$4" = PATCH:repos/org/tracker/issues/12; then touch '{closed}'; printf '%s\n' '{{}}'; exit 0; fi
+    test "$3" = PUT && test "$4" = repos/org/code/pulls/42/merge || exit 96
     test "$6" = sha={head} && test "$8" = merge_method=squash || exit 97
     touch '{merged}'; printf '%s\n' '{{"merged":true,"sha":"{commit}"}}' ;;
 "#,
@@ -90,13 +85,6 @@ fn serve_merge(f: &Fixture) -> String {
     let script = fs::read_to_string(&f.gh).unwrap();
     let script = script.replace("  graphql) printf", &format!("  graphql) case \"$*\" in *headRefOid*) printf '%s\\n' '{health}'; exit 0 ;; esac; printf"));
     let script = script.replace("  user)", &format!("{routes}\n  user)"));
-    let script = script.replace(
-        "case \"$2\" in",
-        &format!(
-            "if test \"$1:$2\" = issue:close; then touch '{}'; exit 0; fi\ncase \"$2\" in",
-            closed.display()
-        ),
-    );
     fs::write(&f.gh, script).unwrap();
     saved.head_commit_sha
 }
@@ -143,8 +131,8 @@ fn failed_tracker_close_holds_the_task_and_keeps_it_from_cleanup_without_failing
     let script = script
         .lines()
         .map(|line| {
-            if line.contains("issue:close") {
-                "if test \"$1:$2\" = issue:close; then exit 1; fi"
+            if line.contains("= PATCH:repos/org/tracker/issues/12;") {
+                "if test \"$3:$4\" = PATCH:repos/org/tracker/issues/12; then exit 1; fi"
             } else {
                 line
             }
@@ -171,4 +159,36 @@ fn failed_tracker_close_holds_the_task_and_keeps_it_from_cleanup_without_failing
     let cleanup = crate::cleanup::clean_terminal_tasks(&mut store, &config, &mut prs).unwrap();
     assert_eq!(cleanup.retained, ["task-12"]);
     assert!(cleanup.cleaned.is_empty() && cleanup.skipped.is_empty());
+}
+
+#[test]
+fn merge_sweep_preserves_cleanup_report_before_retiring_its_own_delivery() {
+    let f = Fixture::new();
+    serve_merge(&f);
+    let mut config = merge_enabled(&f);
+    config.cleanup = crate::config::CleanupPolicy::Worktree;
+    let mut store = StateStore::open(&config.state_root, 2).unwrap();
+    let mut prs = GhPullRequestReader::new(f.gh.clone());
+    let report = super::super::sweep_prs(&mut store, &config, &mut prs).unwrap();
+    assert_eq!(report.merged, ["task-12"]);
+    // The synthetic worker has no real exit receipt: cleanup must refuse,
+    // preserve the worktree, and expose that refusal rather than lose it when
+    // combining the settlement and merge reports.
+    assert_eq!(report.cleanup.skipped.len(), 1);
+    assert_eq!(report.cleanup.skipped[0].task_id, "task-12");
+    assert_eq!(
+        report.cleanup.skipped[0].reason,
+        "cleanup process quiescence unproven"
+    );
+    assert!(config.worktree_root.join("task-12").exists());
+    assert_eq!(
+        task_records::task_phase(&store, "task-12")
+            .unwrap()
+            .as_deref(),
+        Some("pr_merged")
+    );
+    let reads = fs::read_to_string(&f.calls).unwrap();
+    let again = super::super::sweep_prs(&mut store, &config, &mut prs).unwrap();
+    assert!(again.merged.is_empty() && again.cleanup.skipped.is_empty());
+    assert_eq!(fs::read_to_string(&f.calls).unwrap(), reads);
 }
