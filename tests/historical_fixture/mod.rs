@@ -1,7 +1,8 @@
 #[cfg(target_os = "linux")]
 use std::fs;
+#[cfg(target_os = "macos")]
+use std::process::Command;
 use std::{
-    process::Command,
     thread,
     time::{Duration, Instant},
 };

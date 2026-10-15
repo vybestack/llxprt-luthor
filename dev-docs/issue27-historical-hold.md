@@ -171,3 +171,27 @@ The prior worker's earlier failed fixture runs and successful final full gate
 remain in ignored `tmp/issue27/`; none was erased or relabeled. This fresh full
 run needed no timing-test exception or gate rerun. Hosted CI remains required
 before any merge.
+
+
+### PR #82 Linux-check repair
+
+Hosted Ubuntu Clippy exposed an unconditional `process::Command` import used
+only by the macOS process-identity helper. The import now has the same macOS
+configuration guard as its use; no warning is suppressed and no behavior or
+required check is removed. A new shared Linux/macOS behavioral regression proves
+that the fixture observes a stable, nonempty identity while its child is alive
+and no identity after the child is reaped and its process group is absent.
+
+The mapped base was fetched over SSH and merged: it remained `30ebb6d`, already
+an ancestor, so there were no base conflicts. During validation the operator
+pushed the identical import fix as `f88ea1d`; that commit is preserved through a
+normal merge, not overwritten or rebased. No vendor patch or executable
+checksum/provenance pin applies to this test-only repair.
+
+Fresh Rust **1.98.0** macOS validation: **14 historical-hold tests passed**,
+**27 state tests passed**, structural policy and strict all-target Clippy passed,
+and the full unchanged **`cargo +1.98.0 xtask ci` passed (exit 0)**, including
+workspace serial tests, doctests and every required contract. Logs are retained
+in `tmp/issue27/repair-392cf0cc/`. The documented locked dependency fetch populated
+the initially empty worktree-local cache; all gates remained offline/locked.
+Hosted checks on both supported platforms remain required before merge.

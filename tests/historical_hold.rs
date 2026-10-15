@@ -627,3 +627,29 @@ fn historical_continuation_and_amendment_refuse_before_remote_reads_or_launch() 
         }
     }
 }
+
+#[test]
+fn historical_process_fixture_distinguishes_live_identity_from_reaped_child() {
+    let _isolation = FIXTURES.lock().unwrap();
+    let mut child = Command::new("/bin/cat")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    let identity = test_process_identity(child.id());
+    assert!(!identity.0.is_empty());
+    assert!(!identity.1.is_empty());
+    assert_eq!(
+        historical_fixture::observed_process_identity(child.id()),
+        Some(identity)
+    );
+    drop(child.stdin.take());
+    assert!(child.wait().unwrap().success());
+    wait_for_process_and_group_absence(child.id() as i32);
+    assert_eq!(
+        historical_fixture::observed_process_identity(child.id()),
+        None,
+        "reaped fixture must not retain a process identity"
+    );
+}
