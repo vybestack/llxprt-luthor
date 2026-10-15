@@ -122,6 +122,7 @@ pub(super) fn fixture_config(
         worktree_root: dir.join("worktrees"),
         capacity: 1,
         retry_policy: Default::default(),
+        github_polling: Default::default(),
         cleanup: luthor::config::CleanupPolicy::disabled(),
         min_free_space_bytes: 0,
         assignment_login: "operator".into(),

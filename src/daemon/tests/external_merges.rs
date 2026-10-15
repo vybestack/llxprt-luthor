@@ -89,8 +89,8 @@ fn advance_head(f: &Fixture, old: &str, kind: Advance) -> String {
     head
 }
 
-fn merged_detail(head: &str, branch: &str) -> serde_json::Value {
-    let mut detail = pr_detail(false);
+fn merged_detail(f: &Fixture, head: &str, branch: &str) -> serde_json::Value {
+    let mut detail = pr_detail(f, false);
     detail["head"]["sha"] = json!(head);
     detail["head"]["ref"] = json!(branch);
     detail["merge_commit_sha"] = json!("c".repeat(40));
@@ -109,9 +109,10 @@ fn external_merge(kind: Advance, tweak: impl FnOnce(&mut serde_json::Value)) -> 
     let f = Fixture::new();
     let (saved, worktree) = seed_aligned_issue12(&f);
     let head = advance_head(&f, &saved.head_commit_sha, kind);
-    let mut detail = merged_detail(&head, &worktree.branch);
+    let mut detail = merged_detail(&f, &head, &worktree.branch);
     tweak(&mut detail);
     serve_pr_42_detail(&f, false, &detail);
+    serve_tracker(&f);
     let config = merge_enabled(&f);
     Case {
         f,
@@ -131,9 +132,9 @@ fn kinds(case: &Case) -> Vec<String> {
     journal::evidence_kinds(&store, "task-12").unwrap()
 }
 
-fn assert_no_github_writes(case: &Case) {
+fn assert_no_merge_writes(case: &Case) {
     let calls = fs::read_to_string(&case.f.calls).unwrap();
-    assert!(!calls.contains("--method PUT") && !calls.contains("issue close"));
+    assert!(!calls.contains("--method PUT") && !calls.contains("pr merge"));
 }
 
 fn assert_held_with(case: &Case, reason: &str) {
@@ -151,7 +152,12 @@ fn assert_held_with(case: &Case, reason: &str) {
     assert!(kinds.contains(&"pr_merge_error".into()));
     assert!(!kinds.contains(&"task_retired".into()) && !kinds.contains(&"pr_merged".into()));
     assert_only_331_dispatched(&launcher, &report);
-    assert_no_github_writes(case);
+    assert_no_merge_writes(case);
+    assert!(
+        !fs::read_to_string(&case.f.calls)
+            .unwrap()
+            .contains("--method PATCH")
+    );
 }
 
 #[test]
@@ -186,7 +192,7 @@ fn merge_after_base_merge_head_advance_is_recorded_as_delivered_and_work_continu
         retired["evidence"]["base_merge_lineage"]["merges"],
         json!([head])
     );
-    assert_no_github_writes(&case);
+    assert_no_merge_writes(&case);
 }
 
 fn merged_head(case: &Case) -> String {
@@ -253,4 +259,27 @@ fn held_task_journals_its_reason_once_across_repeated_cycles() {
         .filter(|kind| *kind == "pr_merge_error")
         .count();
     assert_eq!(errors, 1);
+}
+
+pub(super) fn serve_tracker(f: &Fixture) {
+    let closed = f.root.path().join("externally-delivered-tracker-closed");
+    let issue = json!({"node_id":"ISSUE12","number":12,"html_url":"https://github.com/org/tracker/issues/12","repository_url":"https://api.github.com/repos/org/tracker","state":"open","closed_at":null});
+    let mut terminal = issue.clone();
+    terminal["state"] = json!("closed");
+    terminal["closed_at"] = json!("2026-10-15T12:00:00Z");
+    let routes = format!(
+        r#"
+  repos/org/tracker/issues/12) if test -f '{closed}'; then printf '%s\n' '{terminal}'; else printf '%s\n' '{issue}'; fi ;;
+  --method) test "$3" = PATCH && test "$4" = repos/org/tracker/issues/12 || exit 96
+    test "$6" = state=closed && test "$8" = state_reason=completed || exit 97
+    touch '{closed}'; printf '%s\n' '{{}}' ;;
+"#,
+        closed = closed.display()
+    );
+    let script = fs::read_to_string(&f.gh).unwrap();
+    fs::write(
+        &f.gh,
+        script.replace("  user)", &format!("{routes}\n  user)")),
+    )
+    .unwrap();
 }

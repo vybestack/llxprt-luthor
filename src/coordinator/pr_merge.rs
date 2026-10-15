@@ -5,42 +5,15 @@ use crate::{
     pr_merge::{MergeAuthorization, MergeEvidence},
     state::{StateError, StateStore, cleanup_records, journal, pr_merge, task_records},
 };
-mod external;
+pub(crate) mod external;
 mod followup;
+mod settlement;
 use serde_json::Value;
+pub(crate) use settlement::{retire_with_tracker, settle_completed_prs};
 mod types;
 use super::notes::TaskNote;
 pub use types::{MergeError, MergeReport};
-use types::{audit_error, now, verify_account};
-
-/// What the sweep concluded about one task.
-enum Outcome {
-    /// Luthor's own merge is confirmed and the tracker handled.
-    Merged,
-    /// Nothing is written; the reason is reported and the task stays as it is.
-    Waiting(String),
-    /// GitHub merged the PR outside Luthor and the delivery is verified.
-    Delivered(String),
-}
-
-/// A failure of one task's merge step is journaled and held with its reason so
-/// the rest of the queue keeps running. Only a failure of local state, which
-/// no task can be trusted past, stops the sweep.
-fn isolate(
-    store: &mut StateStore,
-    task: &str,
-    result: Result<Outcome, MergeError>,
-) -> Result<Outcome, MergeError> {
-    let error = match result {
-        Ok(outcome) => return Ok(outcome),
-        Err(error) => error,
-    };
-    pr_merge::record_error(store, task, &audit_error(&error).to_string())?;
-    if matches!(error, MergeError::State(_)) {
-        return Err(error);
-    }
-    Ok(Outcome::Waiting(format!("merge step failed: {error}")))
-}
+use types::{Outcome, isolate, now, verify_account};
 
 /// Runs before terminal cleanup so interrupted writes retain their evidence.
 /// Disabled mappings are not read or mutated, even with an old merge intent.
@@ -72,22 +45,42 @@ pub fn merge_verified_prs<Q: PrMerger>(
         {
             continue;
         }
-        let outcome = if mapping.same_worker_mapping(&selection.candidate.mapping) {
-            let result = inspect_and_finish(store, &task, &mapping.merge, prs);
+        let authorized = pr_merge::authorization(store, &task)?.is_some();
+        // Saved authorization pins the merged head. Selection drift must not
+        // strand confirmation/closure; it never permits a new merge.
+        let outcome = if authorized || mapping.same_worker_mapping(&selection.candidate.mapping) {
+            let saved = cleanup_records::verified_pr(store, &task)?;
+            if !authorized
+                && !crate::state::pr_poll::begin(store, &task, "merge", &saved.head_commit_sha)?
+            {
+                continue;
+            }
+            let result = inspect_and_finish(store, config, &task, &mapping.merge, prs);
             isolate(store, &task, result)?
         } else {
-            Outcome::Waiting("merge mapping differs from saved selection".into())
+            let reason = "merge mapping differs from saved selection";
+            let facts = serde_json::json!({"reason":reason,"saved":selection.candidate.mapping,"current":config.mappings}).to_string();
+            if !crate::state::pr_poll::changed_mapping(store, &task, &facts)? {
+                continue;
+            }
+            Outcome::Waiting(reason.into())
         };
         match outcome {
-            Outcome::Merged => report.merged.push(task),
+            Outcome::Merged(mut cleanup) => {
+                report.cleanup.append(&mut cleanup);
+                report.merged.push(task);
+            }
             Outcome::Waiting(reason) => report.waiting.push(TaskNote {
                 task_id: task,
                 reason,
             }),
-            Outcome::Delivered(reason) => report.delivered.push(TaskNote {
-                task_id: task,
-                reason,
-            }),
+            Outcome::Delivered(proof, mut cleanup) => {
+                report.cleanup.append(&mut cleanup);
+                report.delivered.push(TaskNote {
+                    task_id: task,
+                    reason: proof.reason,
+                });
+            }
         }
     }
     Ok(report)
@@ -95,15 +88,24 @@ pub fn merge_verified_prs<Q: PrMerger>(
 
 fn inspect_and_finish<Q: PrMerger>(
     store: &mut StateStore,
+    config: &Config,
     task: &str,
     policy: &MergePolicy,
     prs: &mut Q,
 ) -> Result<Outcome, MergeError> {
-    let outcome = inspect(store, task, policy, prs)?;
-    if matches!(outcome, Outcome::Merged) {
-        followup::close_tracker(store, task, prs)?;
+    match inspect(store, task, policy, prs)? {
+        Outcome::Merged(_) => {
+            followup::close_tracker(store, task, prs)?;
+            Ok(Outcome::Merged(settlement::retire_own(
+                store, config, task, prs,
+            )?))
+        }
+        Outcome::Delivered(proof, _) => {
+            let cleanup = settlement::publish(store, config, task, &proof, prs)?;
+            Ok(Outcome::Delivered(proof, cleanup))
+        }
+        outcome @ Outcome::Waiting(_) => Ok(outcome),
     }
-    Ok(outcome)
 }
 
 fn inspect<Q: PrMerger>(
@@ -112,6 +114,7 @@ fn inspect<Q: PrMerger>(
     policy: &MergePolicy,
     prs: &mut Q,
 ) -> Result<Outcome, MergeError> {
+    settlement::require_retirable(store, task)?;
     let saved = cleanup_records::verified_pr(store, task)?;
     if pr_merge::completed(store, task)? && pr_merge::authorization(store, task)?.is_none() {
         return Err(MergeError::Refused("merge evidence without authorization"));
@@ -122,8 +125,8 @@ fn inspect<Q: PrMerger>(
                 "saved proof changed after merge intent",
             ));
         }
-        let detail = prs.detail(&auth.pr.repository, auth.pr.number)?;
-        return confirm(store, task, auth, &detail).map(|()| Outcome::Merged);
+        let detail = prs.terminal_detail(&auth.pr.repository, auth.pr.number)?;
+        return confirm(store, task, auth, &detail).map(|()| Outcome::Merged(Default::default()));
     }
     inspect_open(store, task, policy, &saved, prs)
 }
@@ -143,9 +146,9 @@ fn inspect_open<Q: PrMerger>(
     else {
         return Err(MergeError::Refused("policy disabled"));
     };
-    let detail = prs.detail(&saved.repository, saved.number)?;
-    if external::applies(saved, &detail) {
-        return external::deliver(store, task, saved, &detail).map(Outcome::Delivered);
+    let detail = prs.terminal_detail(&saved.repository, saved.number)?;
+    if detail["state"] == "closed" || detail["merged"] == true {
+        return settlement::finish(store, task, saved, &detail, true, prs);
     }
     if followup::updated_head(store, task, saved, &detail)? {
         return Ok(Outcome::Waiting(
@@ -155,7 +158,7 @@ fn inspect_open<Q: PrMerger>(
     validate_identity(&detail, saved)?;
     let eligibility_reason = eligibility(&detail, *allow_draft)?;
     if detail["state"] != "open" || (detail["draft"] == true && !allow_draft) {
-        return Ok(eligibility_reason.map_or(Outcome::Merged, Outcome::Waiting));
+        return Ok(eligibility_reason.map_or(Outcome::Merged(Default::default()), Outcome::Waiting));
     }
     verify_account(prs, saved)?;
     let checks = prs.merge_checks(&saved.repository, saved.number, required_checks)?;
@@ -183,7 +186,7 @@ fn inspect_open<Q: PrMerger>(
         prs.ready_for_review(saved)?;
     }
     merge_authorized(store, task, auth, *method, prs)?;
-    Ok(Outcome::Merged)
+    Ok(Outcome::Merged(Default::default()))
 }
 
 fn merge_authorized<Q: PrMerger>(
@@ -195,13 +198,13 @@ fn merge_authorized<Q: PrMerger>(
 ) -> Result<(), MergeError> {
     // Draft promotion or concurrent edits may change eligibility. Recheck, never
     // replace the authorized head with a newer one.
-    let detail = prs.detail(&auth.pr.repository, auth.pr.number)?;
+    let detail = prs.terminal_detail(&auth.pr.repository, auth.pr.number)?;
     validate_identity(&detail, &auth.pr)?;
     if eligibility(&detail, false)?.is_some() {
         return Err(MergeError::Refused("PR no longer eligible"));
     }
     let commit = prs.merge_head(&auth.pr, method)?;
-    let detail = prs.detail(&auth.pr.repository, auth.pr.number)?;
+    let detail = prs.terminal_detail(&auth.pr.repository, auth.pr.number)?;
     if detail["merge_commit_sha"].as_str() != Some(&commit) {
         return Err(MergeError::Refused(
             "merge response and terminal commit disagree",
@@ -313,6 +316,9 @@ fn check_gate(
         )));
     }
     if checks.health.required_checks_pending || checks.health.conflicting {
+        if checks.health.required_checks_pending {
+            crate::github::budget::defer_task(task);
+        }
         return Ok(Some("required checks pending or PR conflicting".into()));
     }
     Ok(None)

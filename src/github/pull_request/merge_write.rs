@@ -29,6 +29,7 @@ pub(crate) fn authorize(
 }
 
 pub(crate) fn write(reader: &GhPullRequestReader, args: &[&str]) -> Result<Vec<u8>, LookupError> {
+    crate::github::budget::command(args);
     let output = Command::new(&reader.executable)
         .args(args)
         .output()

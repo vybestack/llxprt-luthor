@@ -20,6 +20,12 @@ pub trait PrMerger: PrHealthReader {
         merge: &crate::pr_merge::MergeEvidence,
         target: &crate::pr_merge::TrackerTarget,
     ) -> Result<(), LookupError>;
+    fn close_finished_tracker(
+        &mut self,
+        pr: &VerifiedOpenPr,
+        terminal: &serde_json::Value,
+        target: &crate::pr_merge::TrackerTarget,
+    ) -> Result<(), LookupError>;
     fn ready_for_review(&mut self, pr: &VerifiedOpenPr) -> Result<(), LookupError>;
     fn merge_head(
         &mut self,

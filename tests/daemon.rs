@@ -52,6 +52,9 @@ fn fixture_with_principals(
         assigned.display(),
         login
     );
+    let script = script.replace("case \"$2\" in", r#"case "$2" in
+  rate_limit) printf '%s\n' '{"resources":{"core":{"remaining":5000,"reset":9999999999},"graphql":{"remaining":5000,"reset":9999999999}}}' ;;
+"#);
     fs::write(&gh, script).unwrap();
     fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).unwrap();
     let config = dir.join("config.json");

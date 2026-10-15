@@ -39,6 +39,15 @@ impl PrMerger for GhPullRequestReader {
         super::merge_followup::close(self, merge, target)
     }
 
+    fn close_finished_tracker(
+        &mut self,
+        pr: &VerifiedOpenPr,
+        terminal: &Value,
+        target: &crate::pr_merge::TrackerTarget,
+    ) -> Result<(), LookupError> {
+        super::terminal_write::close(self, pr, terminal, target)
+    }
+
     fn ready_for_review(&mut self, pr: &VerifiedOpenPr) -> Result<(), LookupError> {
         authorize(self, pr)?;
         write(

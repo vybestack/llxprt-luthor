@@ -216,6 +216,9 @@ unsigned byte count (the example holds below 50 GiB); it defaults to zero.
 
 Execute daemon cycles and explicit dispatch run cleanup after startup
 reconciliation and **before** measuring disk space or selecting new work.
+Daemon terminal settlement runs first, offering configured safe cleanup before
+durable retirement. Already-terminal tasks never enter cleanup again (see GitHub
+polling and terminal delivery below).
 Preview, discovery, status, show, and reconcile do not delete files. Cleanup
 only considers `pr_complete` tasks with completed, released attempts. It holds
 the existing worktree-owner lock, rechecks receipt/process/group absence and
@@ -257,14 +260,14 @@ inferred complete**; that task is skipped and requires operator inspection.
 Never delete journal or lock records to make it run again.
 
 Execute daemon cycles also watch finished (`pr_complete`) tasks for a
-repairable PR. The pass looks up the saved PR first: a merged or closed PR
-(no open PR) is skipped silently and is never compared with the current
-configuration, held or failed. A task whose PR is still open but whose
-selection-time configuration differs from the current one is skipped without
-any state change, and the cycle's single JSON document reports it under
-`pr_repair.skipped` with its reason, for example
-`selection config differs: cleanup, min_free_space_bytes, initial.args`. An
-unreadable PR lookup is skipped the same way and asked again next cycle. Only a
+repairable PR. The independent terminal pass settles merged or closed PRs even
+if the current worker configuration differs. For remaining nonterminal tasks,
+repair filters configuration drift locally before any PR lookup. Worker-mapping
+mismatches are diagnosed once under `pr_merge.waiting`; other selection-time
+configuration differences are reported under `pr_repair.skipped`, for example
+`selection config differs: cleanup, min_free_space_bytes, initial.args`, without
+changing task phase. Unreadable PR lookups are skipped and retried when the
+persisted polling deadline permits. Only a
 genuine safety conflict on an open PR (unproved head change, changed author,
 claim or process evidence) holds the task, with a specific `PR repair held: ...`
 reason listed under `pr_repair.held`. Supervisor failures now name a bounded
@@ -329,7 +332,8 @@ Tasks that an earlier release held with exactly the reason
 `pr_complete` automatically, before cleanup and scheduling, once a fresh
 exact-identity read shows the saved PR merged or closed. The move appends a
 `pr_hold_restored` evidence row with the terminal PR proof, keeps every earlier
-row, and is reported under `pr_repair.restored`. Tasks with a live reservation,
+row, and is reported under `pr_repair.restored`. The terminal settlement pass
+then handles any tracker obligation and durable retirement. Tasks with a live reservation,
 an unfinished attempt, a cleanup intent, a different latest hold reason or a
 PR that is still open stay held (`pr_repair.restore_retained`).
 
@@ -734,3 +738,49 @@ task. Luthor writes no merge evidence for a merge it did not make. See
 for named/GitHub-required check rules, draft promotion, evidence and recovery.
 This does not enable merging in any operator config or bypass hosted CI or
 branch protection.
+
+## GitHub polling and terminal delivery
+
+Execute cycles settle historical as well as newly completed PR tasks. An exact
+saved PR observed as merged is retired as `pr_merged`; one closed without merging
+is retired as `pr_closed`. Settlement does not depend on cleanup being enabled or
+the current worker mapping matching the task's historical prompt/configuration.
+The saved numeric identity, repository, author, branch, tracker reference and head
+are still checked. An advanced merged head additionally requires the existing
+base-only merge-lineage proof. External delivery never fabricates Luthor merge
+authorization. Terminal tasks leave the merge, repair and cleanup candidate sets.
+
+For mappings with merging enabled, a merged delivery also confirms tracker
+closure before retirement, including held repairs. Closed-but-unmerged PRs do
+not close the tracker. An interrupted tracker close is confirmed by reads, never
+blindly written again. Disabling merging does not authorize tracker writes.
+Configured cleanup gets its normal verified opportunity before retirement when
+optional quota permits; disabled, deferred or safely refused cleanup leaves
+artifacts intact without making cleanup a delivery prerequisite. Terminal tasks
+never enter cleanup again.
+
+Optional PR probes use persisted, per-task/per-purpose deadlines (also across
+daemon restarts). A worker-mapping mismatch is diagnosed locally once per distinct
+mapping, without merge/repair health or job reads; independent lightweight
+terminal probes still reconcile eventual delivery. Pending checks are not
+re-read by repair in the same cycle. Configure the policy at the top level:
+
+```json
+"github_polling": {
+  "interval_seconds": 300,
+  "reserve": 500
+}
+```
+
+Each execute cycle bootstraps quota with `gh api rate_limit` (which does not
+consume GitHub core quota), then updates remaining/reset observations from API
+response headers. At or below the reserve in either core or GraphQL quota,
+optional merge, repair, restore, retirement and cleanup probes wait. Mandatory
+claim/dispatch checks, authorized merge followup and interrupted terminal-tracker
+confirmation are not suppressed. No cached observation authorizes a write.
+
+The JSON cycle report's `github` object exposes `rest` and `graphql` adapter
+request-attempt counts (including retries and explicit API writes), plus
+`core_remaining`, `core_reset`, `graphql_remaining`, and `graphql_reset` from the
+latest quota observations. Reset times are Unix seconds; counts reset each cycle.
+Quota/read failures are surfaced rather than treated as unlimited capacity.

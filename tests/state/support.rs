@@ -51,6 +51,7 @@ pub(super) fn config() -> Config {
         worktree_root: "/worktrees".into(),
         capacity: 1,
         retry_policy: Default::default(),
+        github_polling: Default::default(),
         cleanup: luthor::config::CleanupPolicy::disabled(),
         min_free_space_bytes: 0,
         assignment_login: "bot".into(),

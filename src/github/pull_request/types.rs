@@ -53,6 +53,10 @@ pub trait PullRequestReader {
     fn authenticated_identity(&mut self) -> Result<String, LookupError>;
     fn page(&mut self, repository: &str, page: u32) -> Result<Vec<Value>, LookupError>;
     fn detail(&mut self, repository: &str, number: u64) -> Result<Value, LookupError>;
+    /// Exact PR identity/state only; no checks, runs or jobs are fetched.
+    fn terminal_detail(&mut self, repository: &str, number: u64) -> Result<Value, LookupError> {
+        self.detail(repository, number)
+    }
     fn repository_identity(&mut self, name: &str) -> Result<u64, LookupError>;
 }
 

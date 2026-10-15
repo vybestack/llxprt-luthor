@@ -100,6 +100,17 @@ pub(crate) fn retire_if_finished<P: ProjectReader, Q: PullRequestReader>(
     prs: &mut Q,
 ) -> Result<Settlement, StateError> {
     match observe_finished(store, task, projects, prs)? {
+        Observation::Finished(retirement)
+            if crate::github::budget::owns_terminal_settlement()
+                && matches!(
+                    retirement.phase,
+                    RetiredPhase::PrMerged | RetiredPhase::PrClosed
+                ) =>
+        {
+            Ok(Settlement::Blocked(
+                "terminal PR delivery awaits configured tracker followup",
+            ))
+        }
         Observation::Finished(retirement) => settle(store, task, &retirement),
         Observation::Unfinished => Ok(Settlement::Unfinished),
         Observation::Unavailable(reason) => Ok(Settlement::Unavailable(reason)),

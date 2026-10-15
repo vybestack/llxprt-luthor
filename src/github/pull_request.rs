@@ -6,6 +6,7 @@ mod merge_reader;
 mod merge_types;
 pub(crate) mod merge_validation;
 mod merge_write;
+mod terminal_write;
 pub use crate::pr_merge::{CheckSummary, MergeChecks};
 pub use merge_types::PrMerger;
 mod health;

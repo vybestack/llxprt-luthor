@@ -61,6 +61,9 @@ pub(crate) fn restore<P: ProjectReader, Q: PullRequestReader>(
         return Ok(retained);
     }
     for task in repair_retry::candidates(store)? {
+        if !crate::state::pr_poll::begin(store, &task, "repair_retry_restore", "held")? {
+            continue;
+        }
         match restore_task(store, config, &task, projects, prs) {
             Ok(()) => {}
             Err(DispatchError::State(error)) if !matches!(error, StateError::LaunchBlocked) => {

@@ -33,6 +33,13 @@ impl Fixture {
         drop(StateStore::open(&config.state_root, 2).unwrap());
         let f = Self { dir, config };
         f.write("config", &serde_json::to_value(&f.config).unwrap());
+        f.write(
+            "quota",
+            &json!({"resources":{
+                "core":{"remaining":5000,"reset":9999999999_u64},
+                "graphql":{"remaining":5000,"reset":9999999999_u64}
+            }}),
+        );
         f.write("repository", &json!({"node_id":"REPO"}));
         f.write(
             "page",
@@ -53,6 +60,7 @@ set -eu
 cd '{}'
 printf '%s\n' "$*" >> invocations.log
 case "$1 $2" in
+  'api rate_limit') file=quota ;;
   'api graphql') file=page ;;
   'api repos/org/tracker') file=repository ;;
   'api repos/org/tracker/issues/2?per_page=100') file=issue2 ;;

@@ -102,7 +102,7 @@ fn tracker(f: &mut Fixture) -> TrackerTarget {
     route(
         f,
         &format!(
-            "api:repos/org/tracker/issues/40) cat '{}/issue' ;;\nissue:close) exit 0 ;;",
+            "api:repos/org/tracker/issues/40) cat '{}/issue' ;;\napi:--method) printf '%s\\n' '{{}}' ;;",
             f.dir.path().display()
         ),
     );
@@ -139,14 +139,17 @@ fn tracker_close_targets_saved_tracker_not_code_repo_and_comment_names_pr_and_he
     assert!(f.reader.tracker_issue(&target).unwrap().closed_at.is_none());
     f.reader.close_tracker(&merge, &target).unwrap();
     let calls = f.calls();
-    assert!(calls.contains("issue close 40 --repo org/tracker --reason completed --comment"));
+    assert!(calls.contains(
+        "api --method PATCH repos/org/tracker/issues/40 -f state=closed -f state_reason=completed"
+    ));
+    assert!(calls.contains("api --method POST repos/org/tracker/issues/40/comments -f body="));
     assert!(calls.contains(&merge.authorization.pr.url));
     assert!(calls.contains(&merge.merged_head));
     assert!(calls.contains(&merge.merge_commit));
     assert_eq!(
         calls
             .lines()
-            .filter(|line| line.starts_with("issue close"))
+            .filter(|line| line.starts_with("api --method PATCH"))
             .count(),
         1
     );
@@ -163,14 +166,17 @@ fn tracker_close_refuses_changed_pr_or_issue_identity_and_upstream_write_failure
             "commit" => detail(&f, |v| v["merge_commit_sha"] = json!("b".repeat(40))),
             "unmerged" => detail(&f, |v| v["merged"] = json!(false)),
             "issue" => fs::write(f.dir.path().join("issue"), "{\"node_id\":\"other\"}").unwrap(),
-            "write" => route(&f, "issue:close) exit 1 ;;"),
+            "write" => route(
+                &f,
+                "api:--method) if test \"$3\" = PATCH; then exit 1; fi; printf '%s\\n' '{}' ;;",
+            ),
             _ => unreachable!(),
         }
         assert!(f.reader.close_tracker(&merge, &target).is_err(), "{change}");
         assert_eq!(
             f.calls()
                 .lines()
-                .filter(|line| line.starts_with("issue close"))
+                .filter(|line| line.starts_with("api --method PATCH"))
                 .count(),
             usize::from(change == "write")
         );
@@ -195,6 +201,6 @@ fn tracker_reads_reject_malformed_terminal_states_and_pull_requests() {
             .extend(patch.as_object().unwrap().clone());
         fs::write(file, issue.to_string()).unwrap();
         assert!(f.reader.tracker_issue(&target).is_err());
-        assert!(!f.calls().contains("issue close"));
+        assert!(!f.calls().contains("--method POST") && !f.calls().contains("--method PATCH"));
     }
 }

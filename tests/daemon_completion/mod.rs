@@ -221,6 +221,10 @@ fn daemon_completes_repair_pushed_to_existing_pr_without_manual_reconcile() {
             f.state_evidence()
         );
         fs::write(f.root.path().join("conflict"), "conflicting").unwrap();
+        // Model the next CI-relevant interval without changing any timeout.
+        let db = rusqlite::Connection::open(f.config.state_root.join("state.sqlite3")).unwrap();
+        db.execute("UPDATE pr_polls SET observed_at=0", []).unwrap();
+        drop(db);
         f.enable_worker();
         let launched = f.cycle();
         assert!(

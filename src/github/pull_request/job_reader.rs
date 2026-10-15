@@ -33,6 +33,7 @@ pub(crate) fn rerun<E: From<LookupError>>(
         _ => return Err(error(ErrorCategory::Malformed, "invalid-failed-run", None).into()),
     }
     before_post()?;
+    crate::github::budget::command(&["api"]);
     let status = Command::new(executable)
         .args([
             "api",
@@ -53,6 +54,7 @@ pub(crate) fn rerun<E: From<LookupError>>(
 /// Bound the excerpt in memory; the gh process drains normally rather than
 /// treating a broken pipe or partial read as successful log retrieval.
 pub(crate) fn logs(executable: &Path, repository: &str, job: u64) -> Result<String, LookupError> {
+    crate::github::budget::command(&["api"]);
     let mut child = Command::new(executable)
         .args([
             "api",

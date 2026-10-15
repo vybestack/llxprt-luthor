@@ -19,7 +19,8 @@ fn cleanup_mixed_historical_config_and_fixture_outputs_does_not_block_daemon_dis
         .args
         .push("old-selection-option".into());
     complete(&mut store, &old_selection, "historical-selection", 6);
-    let terminal = complete(&mut store, &config, "cleanable", 8);
+    let mut terminal = complete(&mut store, &config, "cleanable", 8);
+    terminal["merge_commit_sha"] = json!("c".repeat(40));
     let nested = config.worktree_root.join("cleanable/tmp/f/checkout");
     fs::create_dir_all(&nested).unwrap();
     git(&nested, &["init", "-b", "fixture"]);
@@ -90,8 +91,20 @@ fn assert_cycle_state(config: &Config, historical: &Config, directory: &Path, re
     );
     let calls = fs::read_to_string(directory.join("calls")).unwrap();
     assert!(calls.contains("POST repos/org/tracker/issues/9/assignees"));
-    assert!(!calls.contains("repos/org/code/pulls/7"));
-    assert!(!calls.contains("repos/org/code/pulls/6"));
+    // Historical terminal probes are independent of locally mismatched workers.
+    assert_eq!(
+        calls
+            .matches("api repos/org/code/pulls/7 --include")
+            .count(),
+        1
+    );
+    assert_eq!(
+        calls
+            .matches("api repos/org/code/pulls/6 --include")
+            .count(),
+        1
+    );
+    assert!(!calls.contains("check-runs") && !calls.contains("headRefOid"));
     assert!(!calls.contains("/merge") && !calls.contains("rerun-failed-jobs"));
     assert!(
         journal::evidence_kinds(&store, "historical")
@@ -102,7 +115,11 @@ fn assert_cycle_state(config: &Config, historical: &Config, directory: &Path, re
 }
 
 fn assert_cleanup_report(report: &Value) {
-    assert_eq!(report["cleanup"]["cleaned"], json!(["cleanable"]));
+    assert_eq!(
+        report["cleanup"]["cleaned"],
+        json!(["cleanable"]),
+        "{report}"
+    );
     assert_eq!(
         report["cleanup"]["skipped"],
         json!([{
@@ -133,6 +150,7 @@ fn gh_fixture(root: &Path, terminal: &Value) -> std::path::PathBuf {
     fs::write(&gh, format!(r#"#!/bin/sh
 printf '%s\n' "$*" >> '{root}/calls'
 case "$2" in
+  rate_limit) printf '%s\n' '{{"resources":{{"core":{{"remaining":5000,"reset":9999999999}},"graphql":{{"remaining":5000,"reset":9999999999}}}}}}' ;;
   user) printf '%s\n' 'acoliver' ;;
   graphql) printf '%s\n' '{project}' ;;
   repos/org/tracker) printf '%s\n' '{{"node_id":"repo"}}' ;;

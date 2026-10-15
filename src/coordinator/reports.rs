@@ -59,6 +59,7 @@ impl StartupReport {
 
 #[derive(Debug, Default)]
 pub struct ScheduleReport {
+    pub github: crate::github::budget::ApiUsage,
     pub startup: StartupReport,
     pub waiting: Vec<crate::eligibility::WaitingIssue>,
     pub launched: Vec<LaunchPlan>,

@@ -7,14 +7,21 @@ const TRACKER_ISSUE: &str = "https://github.com/org/tracker/issues/12";
 const LIST_ROUTE: &str =
     "\"repos/org/code/pulls?state=open&per_page=100&page=1\") printf '%s\\n' '[]' ;;";
 
-pub(super) fn pr_detail(open: bool) -> serde_json::Value {
+pub(super) fn pr_detail(f: &Fixture, open: bool) -> serde_json::Value {
+    let store = StateStore::open(&f.config.state_root, 2).unwrap();
+    let branch = crate::state::worktree_records::worktree_record(&store, "task-12")
+        .unwrap()
+        .unwrap()
+        .identity
+        .unwrap()
+        .branch;
     let mut detail = json!({
         "id":4242,"number":42,"state":"open","draft":false,"merged":false,
         "html_url":"https://github.com/org/code/pull/42",
         "body":format!("Tracker-Issue: {TRACKER_ISSUE}"),
         "created_at":"2026-01-01T00:00:00Z",
         "base":{"repo":{"id":10,"full_name":"org/code"},"ref":"main"},
-        "head":{"repo":{"id":10,"full_name":"org/code"},"ref":"issue-12","sha":"abc123"},
+        "head":{"repo":{"id":10,"full_name":"org/code"},"ref":branch,"sha":"a".repeat(40)},
         "user":{"login":"acoliver"}
     });
     if !open {
@@ -22,6 +29,7 @@ pub(super) fn pr_detail(open: bool) -> serde_json::Value {
         detail["merged"] = json!(true);
         detail["closed_at"] = json!("2026-02-01T00:00:00Z");
         detail["merged_at"] = json!("2026-02-01T00:00:00Z");
+        detail["merge_commit_sha"] = json!("c".repeat(40));
     }
     detail
 }
@@ -33,7 +41,7 @@ fn serve_pr_42(f: &Fixture, open: bool) {
 
 /// The open-PR search and the read by id can disagree while GitHub catches up.
 pub(super) fn serve_pr_42_with(f: &Fixture, listed_open: bool, detail_open: bool) {
-    serve_pr_42_detail(f, listed_open, &pr_detail(detail_open));
+    serve_pr_42_detail(f, listed_open, &pr_detail(f, detail_open));
 }
 
 /// Serves exactly this detail for PR 42, with the open-PR search listing it or not.
@@ -82,6 +90,14 @@ pub(super) fn seed_finished_issue12(f: &Fixture) {
         },
     )
     .unwrap();
+    crate::state::journal::record_evidence(
+        &mut store,
+        "task-12",
+        Some("attempt-12"),
+        "attempt_exit",
+        r#"{"stop_signals":[]}"#,
+    )
+    .unwrap();
     let saved = VerifiedOpenPr {
         id: 4242,
         number: 42,
@@ -91,14 +107,19 @@ pub(super) fn seed_finished_issue12(f: &Fixture) {
         head_repository_id: 10,
         head_repository: "org/code".into(),
         base_branch: "main".into(),
-        head_branch: "issue-12".into(),
+        head_branch: crate::state::worktree_records::worktree_record(&store, "task-12")
+            .unwrap()
+            .unwrap()
+            .identity
+            .unwrap()
+            .branch,
         author: "acoliver".into(),
         active_login: "acoliver".into(),
         tracker_issue_url: TRACKER_ISSUE.into(),
         draft: false,
         checks: None,
         created_at: "2026-01-01T00:00:00Z".into(),
-        head_commit_sha: "abc123".into(),
+        head_commit_sha: "a".repeat(40),
         observed_at: 1,
         attempt_id: "attempt-12".into(),
     };
@@ -155,9 +176,12 @@ fn merged_pr_with_older_config_neither_fails_the_cycle_nor_holds_the_task() {
     let report = f.cycle(&config, &mut launcher).unwrap().unwrap();
     assert_only_331_dispatched(&launcher, &report);
     assert!(report.pr_repair.skipped.is_empty() && report.pr_repair.held.is_empty());
-    assert_eq!(phase_of_12(&config), "pr_complete");
+    assert_eq!(phase_of_12(&config), "pr_merged");
     let store = StateStore::open(&f.config.state_root, 2).unwrap();
-    assert_eq!(history(&store, Some("task-12")), before);
+    let after = history(&store, Some("task-12"));
+    assert_eq!(&after[1..4], &before[1..4]);
+    assert!(after[4].starts_with(&before[4]));
+    assert_eq!(report.pr_merge.delivered.len(), 1);
 }
 
 #[test]
@@ -183,8 +207,28 @@ fn open_pr_with_older_config_is_reported_skipped_while_other_work_dispatches() {
     let reported = serde_json::to_value(&report.pr_repair).unwrap();
     assert_eq!(reported["skipped"][0]["task_id"], "task-12");
     assert_eq!(phase_of_12(&config), "pr_complete");
-    let store = StateStore::open(&f.config.state_root, 2).unwrap();
-    assert_eq!(history(&store, Some("task-12")), before);
+    let mut store = StateStore::open(&f.config.state_root, 2).unwrap();
+    let after = history(&store, Some("task-12"));
+    assert_eq!(&after[..4], &before[..4]);
+    assert!(after[4].starts_with(&before[4]));
+    assert_eq!(after[4].len(), before[4].len() + 1);
+    assert_eq!(
+        after[4].last().unwrap()[3],
+        rusqlite::types::Value::Text("repair_mapping_mismatch".into())
+    );
+    let calls = fs::read_to_string(&f.calls).unwrap();
+    let again = crate::coordinator::repair_verified_prs(
+        &mut store,
+        &config,
+        &mut GhProjectReader::new(f.gh.clone()),
+        &mut GhPullRequestReader::new(f.gh.clone()),
+        &mut launcher,
+        &mut FixedIds,
+    )
+    .unwrap();
+    assert!(again.skipped.is_empty() && again.held.is_empty() && again.launched.is_empty());
+    assert_eq!(history(&store, Some("task-12")), after);
+    assert_eq!(fs::read_to_string(&f.calls).unwrap(), calls);
 }
 
 #[test]
@@ -202,7 +246,7 @@ fn cycle_restores_a_wrongly_held_merged_task_before_scheduling() {
     assert_only_331_dispatched(&launcher, &report);
     assert_eq!(report.pr_repair.restored, ["task-12"]);
     assert!(report.pr_repair.restore_retained.is_empty());
-    assert_eq!(phase_of_12(&config), "pr_complete");
+    assert_eq!(phase_of_12(&config), "pr_merged");
     let store = StateStore::open(&f.config.state_root, 2).unwrap();
     let kinds = crate::state::journal::evidence_kinds(&store, "task-12").unwrap();
     assert!(kinds.contains(&"pr_hold_restored".into()));
@@ -216,7 +260,7 @@ fn cycle_restores_a_wrongly_held_merged_task_before_scheduling() {
 fn cycle_reports_and_persists_the_specific_repair_identity_hold() {
     let f = Fixture::new();
     seed_finished_issue12(&f);
-    let mut detail = pr_detail(true);
+    let mut detail = pr_detail(&f, true);
     detail["id"] = json!(9999);
     serve_pr_42_detail(&f, true, &detail);
     let mut launcher = RecordingLauncher::default();

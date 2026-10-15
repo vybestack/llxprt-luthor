@@ -31,7 +31,7 @@ pub(crate) fn observe_by_id<Q: PullRequestReader>(
     if prs.authenticated_identity()? != saved.active_login {
         return Err(CleanupError::Conflict("cleanup PR identity changed"));
     }
-    let detail = prs.detail(&saved.repository, saved.number)?;
+    let detail = prs.terminal_detail(&saved.repository, saved.number)?;
     verify_identity(&detail, saved)?;
     let state = text(&detail, "/state")?;
     let merged = detail

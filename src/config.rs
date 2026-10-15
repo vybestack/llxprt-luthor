@@ -7,6 +7,9 @@ use repository::validate_repository;
 mod dependencies;
 pub use dependencies::{DependencyRule, IssueReference};
 
+mod github_polling;
+pub use github_polling::GithubPolling;
+
 mod merge_policy;
 pub use merge_policy::{MergeMethod, MergePolicy};
 
@@ -27,6 +30,8 @@ pub struct Config {
     pub capacity: usize,
     #[serde(default)]
     pub retry_policy: RetryPolicy,
+    #[serde(default)]
+    pub github_polling: GithubPolling,
     #[serde(default = "CleanupPolicy::disabled")]
     pub cleanup: CleanupPolicy,
     #[serde(default)]

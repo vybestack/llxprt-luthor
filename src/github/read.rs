@@ -13,10 +13,13 @@ const MAX_WAIT: Duration = Duration::from_secs(5);
 pub(crate) fn api(executable: &Path, args: &[&str]) -> std::io::Result<Output> {
     read_with(
         || {
-            Command::new(executable)
+            super::budget::command(args);
+            let output = Command::new(executable)
                 .args(args)
                 .arg("--include")
-                .output()
+                .output()?;
+            super::budget::headers(&output.stdout, args.contains(&"graphql"))?;
+            Ok(output)
         },
         thread::sleep,
     )

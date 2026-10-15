@@ -8,25 +8,18 @@ use crate::{
     model::VerifiedOpenPr,
     state::{
         StateError, StateStore,
-        retirement::{self, RetiredPhase, Retirement},
+        retirement::{RetiredPhase, Retirement},
     },
     worktree::{WorktreeError, pr_head},
 };
 use serde_json::{Value, json};
 
-/// Whether the PR is a merged one whose head differs from the saved head.
-pub(crate) fn applies(saved: &VerifiedOpenPr, detail: &Value) -> bool {
-    detail["merged"] == true
-        && detail.pointer("/head/sha").and_then(Value::as_str) != Some(&saved.head_commit_sha)
-}
-
-/// Records the delivery, or refuses with the specific reason the task is held.
-pub(crate) fn deliver(
-    store: &mut StateStore,
+pub(crate) fn proof(
+    store: &StateStore,
     task: &str,
     saved: &VerifiedOpenPr,
     detail: &Value,
-) -> Result<String, MergeError> {
+) -> Result<Retirement, MergeError> {
     // Everything but the head must match the saved proof, exactly as strictly
     // as before Luthor merges.
     let mut comparable = detail.clone();
@@ -51,13 +44,26 @@ pub(crate) fn deliver(
             "merged PR terminal state is incomplete",
         ));
     }
-    let lineage =
-        pr_head::verify_merged_lineage(store, task, &saved.head_commit_sha, head, saved.number)
-            .map_err(lineage_refusal)?;
-    let reason = format!(
-        "saved verified PR {} merged outside Luthor after its head advanced only by merges of the base",
-        saved.number
-    );
+    let lineage = if head == saved.head_commit_sha {
+        Value::Null
+    } else {
+        serde_json::to_value(
+            pr_head::verify_merged_lineage(store, task, &saved.head_commit_sha, head, saved.number)
+                .map_err(lineage_refusal)?,
+        )
+        .map_err(StateError::from)?
+    };
+    let reason = if head == saved.head_commit_sha {
+        format!(
+            "saved verified PR {} merged outside Luthor at its verified head",
+            saved.number
+        )
+    } else {
+        format!(
+            "saved verified PR {} merged outside Luthor after its head advanced only by merges of the base",
+            saved.number
+        )
+    };
     let delivery = Retirement {
         phase: RetiredPhase::PrMerged,
         reason: reason.clone(),
@@ -72,14 +78,10 @@ pub(crate) fn deliver(
             "luthor_merge_evidence": "none",
         }),
     };
-    match retirement::retire(store, task, &delivery) {
-        Ok(()) => Ok(reason),
-        Err(StateError::NotRetirable(reason)) => Err(MergeError::Refused(reason)),
-        Err(error) => Err(error.into()),
-    }
+    Ok(delivery)
 }
 
-fn lineage_refusal(error: WorktreeError) -> MergeError {
+pub(crate) fn lineage_refusal(error: WorktreeError) -> MergeError {
     match error {
         WorktreeError::Conflict(reason) | WorktreeError::Git(reason) => MergeError::Refused(reason),
         WorktreeError::State(error) => MergeError::State(error),

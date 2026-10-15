@@ -50,6 +50,7 @@ impl Harness {
             worktree_root: dir.path().to_path_buf(),
             capacity: 2,
             retry_policy: Default::default(),
+            github_polling: Default::default(),
             cleanup: luthor::config::CleanupPolicy::disabled(),
             min_free_space_bytes: 0,
             assignment_login: "agent".into(),
