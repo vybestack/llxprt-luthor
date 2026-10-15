@@ -48,6 +48,7 @@ fn worktree_reason(error: &WorktreeError) -> String {
 
 fn state_reason(error: &StateError) -> &'static str {
     match error {
+        StateError::CoordinatorBusy => "coordinator busy; try again",
         StateError::Sql(_) => "cleanup state database failed",
         StateError::Io(_) => "cleanup state IO failed",
         StateError::Serialization(_) => "cleanup state serialization failed",

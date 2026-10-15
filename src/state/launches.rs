@@ -9,7 +9,7 @@ use crate::{
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
-fn read_resume_context(
+pub(crate) fn read_resume_context(
     connection: &Connection,
     task_id: &str,
 ) -> Result<(String, String, String), StateError> {
@@ -283,7 +283,7 @@ pub fn retry_plan_for_task(
     retry_plan(&store.connection, task, attempt)
 }
 
-fn retry_plan(
+pub(crate) fn retry_plan(
     db: &Connection,
     task: &str,
     attempt: &str,

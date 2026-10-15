@@ -91,7 +91,21 @@ pub(crate) fn retry(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>>
         &fs::read_to_string(&args[4]).map_err(|_| "retry configuration unavailable")?,
     )
     .map_err(|error| error.operator_message("retry"))?;
-    let mut store = StateStore::open(&config.state_root, config.capacity)?;
+    execute_retry(config, &args, revalidate_terminal_exit)
+}
+
+fn execute_retry(
+    config: Config,
+    args: &[String],
+    revalidate_terminal_exit: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut store = match StateStore::open(&config.state_root, config.capacity) {
+        Ok(store) => store,
+        Err(crate::state::StateError::CoordinatorBusy) => {
+            return super::requests::retry(config, args, "coordinator busy");
+        }
+        Err(error) => return Err(error.into()),
+    };
     crate::state::retry_plan_for_task(&store, &args[0], &args[2])
         .map_err(|_| "retry requires the latest verified natural exit or audited dispatch abort in attention")?;
     let selection =
@@ -104,7 +118,7 @@ pub(crate) fn retry(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>>
     let mut projects = GhProjectReader::new(PathBuf::from("gh"));
     let mut prs = GhPullRequestReader::new(PathBuf::from("gh"));
     let mut launcher = ProductionLauncher;
-    let plan = crate::coordinator::retry_one(
+    let result = crate::coordinator::retry_one(
         &mut store,
         crate::coordinator::RetryDependencies {
             task_id: &args[0],
@@ -119,8 +133,17 @@ pub(crate) fn retry(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>>
             prs: &mut prs,
             launcher: &mut launcher,
         },
-    )
-    .map_err(|error| format!("retry refused or held: {}", safe_error_stage(&error)))?;
+    );
+    if let Err(crate::coordinator::DispatchError::State(crate::state::StateError::Capacity {
+        ..
+    })) = &result
+    {
+        let reason = safe_error_stage(result.as_ref().unwrap_err());
+        drop(store);
+        return super::requests::retry(config, args, &reason);
+    }
+    let plan =
+        result.map_err(|error| format!("retry refused or held: {}", safe_error_stage(&error)))?;
     println!(
         "{}",
         json!({"task_id": plan.task_id, "previous_attempt_id": args[2],

@@ -29,7 +29,13 @@ pub(crate) fn resume(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>
         return Err("invalid task id".into());
     }
     let config = Config::from_json(&fs::read_to_string(path)?)?;
-    let mut store = StateStore::open(&config.state_root, config.capacity)?;
+    let mut store = match StateStore::open(&config.state_root, config.capacity) {
+        Ok(store) => store,
+        Err(crate::state::StateError::CoordinatorBusy) => {
+            return super::requests::resume(config, task_id, "coordinator busy");
+        }
+        Err(error) => return Err(error.into()),
+    };
     if task_records::task_phase(&store, task_id)?.is_none() {
         return Err("task not found".into());
     }
@@ -55,6 +61,15 @@ pub(crate) fn resume(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>
             "{}",
             json!({"task_id":task_id,"attempt_id":attempt_id,"status":"resumed"})
         ),
+        Err(
+            error @ crate::coordinator::DispatchError::State(crate::state::StateError::Capacity {
+                ..
+            }),
+        ) => {
+            let reason = safe_error_stage(&error);
+            drop(store);
+            return super::requests::resume(config, task_id, &reason);
+        }
         Err(error) => {
             let status = if task_records::task_phase(&store, task_id)?.as_deref() == Some("held") {
                 "held"

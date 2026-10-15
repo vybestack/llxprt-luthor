@@ -49,7 +49,7 @@ fn read_with(
     unreachable!("bounded read loop always returns its final result")
 }
 
-fn transient(status: Option<u16>, stderr: &[u8]) -> bool {
+pub(crate) fn transient(status: Option<u16>, stderr: &[u8]) -> bool {
     matches!(status, Some(429 | 500..=599))
         || String::from_utf8_lossy(stderr)
             .to_ascii_lowercase()

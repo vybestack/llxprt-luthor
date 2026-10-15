@@ -16,24 +16,7 @@ pub(crate) fn option(args: &[String], name: &str) -> Result<String, Box<dyn std:
         .ok_or_else(|| format!("requires value for {name}").into())
 }
 
-pub(crate) fn safe_error_stage(error: &crate::coordinator::DispatchError) -> &str {
-    use crate::coordinator::DispatchError;
-    match error {
-        DispatchError::State(_) => "state transition failed",
-        DispatchError::Claim(_) => "claim failed",
-        DispatchError::Worktree(_) => "worktree failed",
-        DispatchError::ChangedClaim => "claim changed",
-        DispatchError::ExistingPr => "pull request exists",
-        DispatchError::PullRequest(_) => "pull request lookup failed",
-        DispatchError::Supervisor(crate::supervisor::SupervisorError::WorkerBuildHeld(reason)) => {
-            reason
-        }
-        DispatchError::Supervisor(_) => "worker launch failed",
-        // Retry reasons originate from fixed reconciliation messages, never
-        // supplied identities, paths, argv, or external error text.
-        DispatchError::RetryHeld { reason } => reason,
-    }
-}
+pub(crate) use crate::coordinator::operator_error as safe_error_stage;
 
 pub(crate) fn random_id() -> Result<String, std::io::Error> {
     let mut bytes = [0u8; 16];

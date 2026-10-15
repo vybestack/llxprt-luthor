@@ -1,5 +1,8 @@
 #![cfg(unix)]
 mod git_fixture;
+mod retry_cli {
+    mod requests;
+}
 mod worker_exit;
 use luthor::state::journal::evidence_payloads;
 use luthor::state::launches::launch_intent;

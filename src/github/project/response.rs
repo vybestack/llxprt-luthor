@@ -36,6 +36,8 @@ pub(crate) fn classify_status(
         Some(403) => ReadCategory::Permission,
         Some(404) => ReadCategory::NotFound,
         Some(429) => ReadCategory::RateLimit,
+        Some(500..=599) => ReadCategory::Transport,
+        _ if stderr.to_ascii_lowercase().contains("connection reset") => ReadCategory::Transport,
         _ => ReadCategory::Unknown,
     }
 }

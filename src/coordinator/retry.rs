@@ -8,7 +8,7 @@ use crate::{
         pull_request::{LookupResult, PullRequestReader, lookup},
     },
     ownership::WorktreeOwnerInternal,
-    state::{ExitPrEvidence, PausePrStatus, StateError, StateStore},
+    state::{ExitPrEvidence, PausePrStatus, StateStore},
     supervisor::{self, LaunchPlan, SupervisorError},
     worktree,
 };
@@ -62,7 +62,7 @@ pub(crate) fn retry_with_owner<P: ProjectReader, Q: PullRequestReader, L: Superv
     let previous = crate::state::retry_plan_for_task(store, task_id, previous_attempt_id)?;
     let selection = crate::state::selection_for_attempt(store, &previous)?;
     validate_retry_config(
-        store,
+        store.root(),
         &previous,
         &selection,
         config,
@@ -71,7 +71,6 @@ pub(crate) fn retry_with_owner<P: ProjectReader, Q: PullRequestReader, L: Superv
         reason,
     )?;
     supervisor::validate_stop_socket_path(store.root(), attempt_id)?;
-    scheduling::ensure_dispatch_capacity(store)?;
     ownership
         .verify_protocol(
             &store.connection,
@@ -94,6 +93,7 @@ pub(crate) fn retry_with_owner<P: ProjectReader, Q: PullRequestReader, L: Superv
     }
     worktree::verify_existing_worktree(store, task_id)?;
     let proof = retry_pr_absence(prs, &selection, actor)?;
+    scheduling::ensure_dispatch_capacity(store)?;
     let source = crate::state::RetrySourceEvidence {
         item,
         issue,
@@ -134,8 +134,8 @@ fn verified_retry_claim(
     Ok(claim)
 }
 
-fn validate_retry_config(
-    store: &StateStore,
+pub(crate) fn validate_retry_config(
+    root: &std::path::Path,
     previous: &LaunchPlan,
     selection: &crate::model::SelectionEvidence,
     config: &Config,
@@ -144,15 +144,26 @@ fn validate_retry_config(
     reason: &str,
 ) -> Result<(), DispatchError> {
     let current = crate::state::EffectiveConfigSnapshot::from(config);
-    if config.validate().is_err()
-        || config.state_root != store.root()
+    let reason = if config_revision == previous.config_revision {
+        Some("config revision unchanged")
+    } else if config.validate().is_err()
+        || config.state_root != root
         || !crate::state::same_task_config(&selection.effective_config, &current)
-        || config_revision.trim().is_empty()
-        || config_revision == previous.config_revision
-        || reason.trim().is_empty()
-        || actor != selection.candidate.mapping.allowed_pr_author
     {
-        return Err(StateError::InvalidConfig.into());
+        Some("configuration differs from the selected task outside worker templates")
+    } else if config_revision.trim().is_empty() {
+        Some("config revision is empty")
+    } else if reason.trim().is_empty() {
+        Some("retry reason is empty")
+    } else if actor != selection.candidate.mapping.allowed_pr_author {
+        Some("actor is not the authorized PR author")
+    } else {
+        None
+    };
+    if let Some(reason) = reason {
+        return Err(DispatchError::RetryHeld {
+            reason: reason.into(),
+        });
     }
     Ok(())
 }

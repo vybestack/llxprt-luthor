@@ -10,7 +10,7 @@ fn database(root: &Path) -> Result<Connection, CliError> {
 pub fn execute(root: &Path, args: &[String]) -> Result<String, CliError> {
     let command = args.first().ok_or(CliError::Arguments)?;
     let conn = database(root)?;
-    let output = match command.as_str() {
+    let mut output = match command.as_str() {
         "status" if args.len() == 1 => status::status(&conn, root)?,
         "show" if args.len() == 2 => show::show(&conn, root, &args[1])?,
         "logs" if args.len() == 2 || args.len() == 4 && args[2] == "--attempt" => {
@@ -18,5 +18,15 @@ pub fn execute(root: &Path, args: &[String]) -> Result<String, CliError> {
         }
         _ => return Err(CliError::Arguments),
     };
+    if matches!(command.as_str(), "status" | "show") {
+        let task = if command == "show" {
+            Some(args[1].as_str())
+        } else {
+            None
+        };
+        output["operator_requests"] = serde_json::json!(
+            crate::state::requests::summaries(root, task).map_err(|_| CliError::Database)?
+        );
+    }
     serde_json::to_string(&output).map_err(|_| CliError::Serialization)
 }

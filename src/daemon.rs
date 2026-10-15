@@ -13,10 +13,9 @@ use crate::{
     state::StateStore,
 };
 use serde_json::json;
-use std::{collections::HashSet, fs, path::PathBuf, thread, time::Duration};
+use std::{collections::HashSet, fs, path::PathBuf, thread};
 
 type Error = Box<dyn std::error::Error>;
-const POLL_INTERVAL: Duration = Duration::from_secs(30);
 
 struct Options {
     config: PathBuf,
@@ -101,6 +100,7 @@ impl Options {
 }
 
 mod discovery;
+mod polling;
 use discovery::{candidates, cycle_candidates};
 
 fn cycle(config: &Config, options: &Options) -> Result<(), Error> {
@@ -177,12 +177,8 @@ fn cycle_with_dependencies<L: SupervisorLauncher, I: IdCreator>(
     }
     let mut store = StateStore::open(&config.state_root, config.capacity)?;
     let mut prs = GhPullRequestReader::new(gh.clone());
-    let mut startup = startup_reconcile_all(&mut store, &mut projects, &mut prs)?;
-    let mut pr_repair = settle_finished_tasks(&mut store, &mut projects, &mut prs, &mut startup)?;
-    if startup.scheduling_blocked() {
-        println!("{}", json!({"mode":"execute", "blocked":true}));
-        return Err("startup reconciliation blocked scheduling".into());
-    }
+    let (startup, mut pr_repair, operator_launches) =
+        reconcile_cycle(&mut store, config, &gh, &mut projects, &mut prs, launcher)?;
     let pr_merge = crate::coordinator::merge_verified_prs(&mut store, config, &mut prs)?;
     let cleanup = crate::cleanup::clean_terminal_tasks(&mut store, config, &mut prs)
         .map_err(|_| "cleanup failed; inspect local task state")?;
@@ -190,6 +186,7 @@ fn cycle_with_dependencies<L: SupervisorLauncher, I: IdCreator>(
     if disk_space.dispatch_held {
         let report = ScheduleReport {
             startup,
+            launched: operator_launches,
             disk_space: Some(disk_space),
             pr_merge,
             pr_repair,
@@ -240,9 +237,37 @@ fn cycle_with_dependencies<L: SupervisorLauncher, I: IdCreator>(
     report.pr_repair = pr_repair;
     report.pr_merge = pr_merge;
     report.launched.splice(0..0, repair.launched);
+    report.launched.splice(0..0, operator_launches);
     print_schedule_report(&report, &cleanup);
     verify_report(&report)?;
     Ok(Some(report))
+}
+
+fn reconcile_cycle<L: SupervisorLauncher>(
+    store: &mut StateStore,
+    config: &Config,
+    gh: &std::path::Path,
+    projects: &mut GhProjectReader,
+    prs: &mut GhPullRequestReader,
+    launcher: &mut L,
+) -> Result<
+    (
+        StartupReport,
+        PrRepairReport,
+        Vec<crate::supervisor::LaunchPlan>,
+    ),
+    Error,
+> {
+    let mut startup = startup_reconcile_all(store, projects, prs)?;
+    let pr_repair = settle_finished_tasks(store, projects, prs, &mut startup)?;
+    if startup.scheduling_blocked() {
+        println!("{}", json!({"mode":"execute", "blocked":true}));
+        return Err(
+            polling::ReconciliationBlocked("startup reconciliation blocked scheduling").into(),
+        );
+    }
+    let launched = crate::coordinator::requests::drain(store, config, gh, projects, prs, launcher)?;
+    Ok((startup, pr_repair, launched))
 }
 
 fn verify_report(report: &ScheduleReport) -> Result<(), Error> {
@@ -252,7 +277,9 @@ fn verify_report(report: &ScheduleReport) -> Result<(), Error> {
         .iter()
         .any(|a| matches!(a.review, AttemptReview::Error(_)))
     {
-        return Err("reconciliation failed; scheduling blocked".into());
+        return Err(
+            polling::ReconciliationBlocked("reconciliation failed; scheduling blocked").into(),
+        );
     }
     Ok(())
 }
@@ -296,13 +323,7 @@ pub fn run(args: &[String]) -> Result<(), Error> {
     }
     let options = Options::parse(args)?;
     let config = Config::from_json(&fs::read_to_string(&options.config)?)?;
-    loop {
-        cycle(&config, &options)?;
-        if options.once {
-            return Ok(());
-        }
-        thread::sleep(POLL_INTERVAL);
-    }
+    polling::run(options.once, || cycle(&config, &options), thread::sleep)
 }
 
 fn verify_candidate_accounts(

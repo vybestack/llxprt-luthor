@@ -36,7 +36,9 @@ pub use continuation::{
     OsContinuationProcessInspector, ProcessInspectionError, amend_never_dispatched_initial_branch,
     continue_never_dispatched,
 };
+mod diagnostics;
 mod ports;
+pub mod requests;
 mod retry;
 use crate::{
     claim::{self, AssignmentWriter},
@@ -50,6 +52,7 @@ use crate::{
     supervisor::{self, LaunchPlan, SupervisorError},
     worktree,
 };
+pub use diagnostics::operator_error;
 pub use ports::{DispatchError, SupervisorLauncher};
 pub use retry::{RetryDependencies, retry_one};
 use std::collections::HashSet;
@@ -376,9 +379,26 @@ fn acquire_resume_owner(
     Ok(ownership)
 }
 
-pub fn resume_one<P, Q, L>(
+pub fn resume_one<P: ProjectReader, Q: PullRequestReader, L: SupervisorLauncher>(
     store: &mut StateStore,
     dependencies: ResumeDependencies<'_, P, Q, L>,
+) -> Result<LaunchPlan, DispatchError> {
+    resume_with_policy(store, dependencies, false)
+}
+
+/// Only a durable queued decision may wait through read-only transient errors.
+/// One-shot direct resumes retain their existing hold-on-read-failure contract.
+pub(crate) fn resume_pending<P: ProjectReader, Q: PullRequestReader, L: SupervisorLauncher>(
+    store: &mut StateStore,
+    dependencies: ResumeDependencies<'_, P, Q, L>,
+) -> Result<LaunchPlan, DispatchError> {
+    resume_with_policy(store, dependencies, true)
+}
+
+fn resume_with_policy<P, Q, L>(
+    store: &mut StateStore,
+    dependencies: ResumeDependencies<'_, P, Q, L>,
+    defer_transient_reads: bool,
 ) -> Result<LaunchPlan, DispatchError>
 where
     P: ProjectReader,
@@ -418,11 +438,15 @@ where
         {
             return Err(DispatchError::ExistingPr);
         }
+        scheduling::ensure_dispatch_capacity(store)?;
         let plan = supervisor::prepare_resume(store, task_id, attempt_id)?;
         launcher.launch(store, &plan, &ownership)?;
         Ok(plan)
     })();
     if let Err(error) = &result {
+        if ports::defer_resume_error(error, defer_transient_reads) {
+            return result;
+        }
         let reason = match error {
             DispatchError::Claim(_) | DispatchError::ChangedClaim => "resume claim changed",
             DispatchError::ExistingPr => "resume PR present",

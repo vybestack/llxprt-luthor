@@ -75,6 +75,8 @@ impl GhPullRequestReader {
                 Some(403) => ErrorCategory::Permission,
                 Some(404) => ErrorCategory::NotFound,
                 Some(429) => ErrorCategory::RateLimit,
+                Some(500..=599) => ErrorCategory::Transport,
+                _ if stderr.contains("connection reset") => ErrorCategory::Transport,
                 _ => ErrorCategory::Unknown,
             };
             return Err(error(category, "command-failed", status));
@@ -99,11 +101,13 @@ impl PullRequestReader for GhPullRequestReader {
         let output = crate::github::read::api(&self.executable, &["api", "user", "--jq", ".login"])
             .map_err(|_| error(ErrorCategory::Transport, "identity-command-failed", None))?;
         if !output.status.success() {
-            return Err(error(
-                ErrorCategory::Unknown,
-                "identity-command-failed",
-                None,
-            ));
+            let status = crate::github::read::http_status(&output.stdout, &output.stderr);
+            let category = if crate::github::read::transient(status, &output.stderr) {
+                ErrorCategory::Transport
+            } else {
+                ErrorCategory::Unknown
+            };
+            return Err(error(category, "identity-command-failed", status));
         }
         let stdout = std::str::from_utf8(&output.stdout)
             .map_err(|_| error(ErrorCategory::Malformed, "identity-invalid-output", None))?;
