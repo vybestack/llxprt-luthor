@@ -233,8 +233,7 @@ fn cycle_with_dependencies<L: SupervisorLauncher, I: IdCreator>(
         },
         startup,
     );
-    // Keep task and attempt identities visible without echoing prompts, shell stderr or API responses.
-    let mut report = result.map_err(|_| "daemon scheduling failed; inspect local task state")?;
+    let mut report = result.map_err(report_scheduling_error)?;
     pr_repair.retry_scheduled = repair.retry_scheduled;
     pr_repair.skipped = repair.skipped;
     pr_repair.held = repair.held;
@@ -291,6 +290,17 @@ fn verify_report(report: &ScheduleReport) -> Result<(), Error> {
 }
 
 fn print_schedule_report(report: &ScheduleReport, cleanup: &crate::cleanup::CleanupReport) {
+    for failure in report.admission_failures.iter().chain(
+        report
+            .automatic_retries
+            .iter()
+            .filter_map(|retry| retry.failure.as_ref()),
+    ) {
+        eprintln!(
+            "{}",
+            json!({"mode":"execute","status":"task_admission_failed","failure":failure})
+        );
+    }
     let attempts = report
         .startup
         .attempts
@@ -313,6 +323,7 @@ fn print_schedule_report(report: &ScheduleReport, cleanup: &crate::cleanup::Clea
         "waiting":report.waiting,
         "candidate_read_failures":report.candidate_read_failures,
         "source_read_failures":report.source_read_failures,
+        "admission_failures":report.admission_failures,
         "launched":report.launched.iter().map(|plan| json!({"task_id":plan.task_id,"attempt_id":plan.attempt_id})).collect::<Vec<_>>(),
         "skipped_existing":report.skipped_existing.len(), "capacity_full":report.capacity_full,"disk_space":report.disk_space})
     );
@@ -385,4 +396,12 @@ fn sweep_and_clean_prs(
         .map_err(|_| "cleanup failed; inspect local task state")?;
     cleanup.append(&mut merging.cleanup);
     Ok((merging, cleanup))
+}
+
+fn report_scheduling_error(error: crate::coordinator::ScheduleError) -> Error {
+    let failure = error.diagnostic();
+    let report = json!({"mode":"execute", "status":"cycle_error", "scheduling_error":failure});
+    println!("{report}");
+    // --once also returns this diagnostic through main's stderr error path.
+    format!("daemon scheduling failed: {failure}").into()
 }

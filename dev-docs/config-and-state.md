@@ -131,6 +131,16 @@ or reservation. Later execute polls acquire exclusive ownership before journalin
 a request and retain it through the existing verification/dispatch path. Missing
 or invalid ownership is still an error; a lock is never stolen.
 
+Retry task identity comparison excludes source discovery rules and mappings for
+other tracker repositories. It still compares the selected repository's entire
+mapping and all task-affecting snapshot fields. The same comparison is applied
+to retry authorization, launch-intent validation and supervisor attempt selection;
+none of these paths rewrite the original selection or prior attempt evidence.
+Expected admission refusals are recorded as `scheduling_admission_failed` with
+`task_id`, `attempt_id`, `check`, a bounded reason and `differing_fields`. They do
+not create an attempt or bypass fresh claim/worktree/exit checks. Unexpected
+storage, malformed-source and uncertain-dispatch errors still abort the cycle.
+
 See [bounded transient retries](../README.md#opt-in-bounded-transient-retries)
 for the worker JSON/exit agreement, nonretryable and human-review outcomes,
 execute-only boundaries, and safety checks. The worker's typed transport

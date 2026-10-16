@@ -466,10 +466,13 @@ fn assert_alias_refuses_cycle(f: &Fixture, original: &str, before: &History) {
     fs::write(&f.calls, "").unwrap();
     let mut launcher = RecordingLauncher::default();
     let result = f.cycle(&config, &mut launcher);
-    assert_eq!(
-        result.unwrap_err().to_string(),
-        "daemon scheduling failed; inspect local task state"
+    let error = result.unwrap_err().to_string();
+    assert!(error.contains("candidate_dispatch"), "{error}");
+    assert!(
+        error.contains("launch plan does not match verified task or worktree"),
+        "{error}"
     );
+    assert!(error.contains("task-fixture-id"), "{error}");
     assert!(launcher.plans.is_empty());
     assert!(!f.assigned.exists());
     let calls = fs::read_to_string(&f.calls).unwrap();
@@ -607,10 +610,18 @@ fn long_real_private_state_root_refuses_daemon_before_claim_or_reservation() {
     fs::write(&f.calls, "").unwrap();
     let mut launcher = RecordingLauncher::default();
     let result = f.cycle(&config, &mut launcher);
+    let report = result.unwrap().unwrap();
+    assert_eq!(report.admission_failures.len(), 1);
+    assert_eq!(report.admission_failures[0].task_id, "task-fixture-id");
     assert_eq!(
-        result.unwrap_err().to_string(),
-        "daemon scheduling failed; inspect local task state"
+        report.admission_failures[0].attempt_id,
+        "attempt-fixture-id"
     );
+    assert_eq!(
+        report.admission_failures[0].reason,
+        "stop socket path exceeds Unix socket path capacity"
+    );
+    assert!(report.launched.is_empty());
     assert!(launcher.plans.is_empty());
     assert!(!f.assigned.exists());
     assert!(!f.assigned12.exists());

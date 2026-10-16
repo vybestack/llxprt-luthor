@@ -525,15 +525,39 @@ verification and dispatch once acquired; unavailable or invalid ownership still
 fails closed. It uses the configured resume command with a fresh attempt ID and an
 automatic revision suffix. Include `{attempt.id}` in the resume prompt so each
 continuation is distinct. No new assignment, task, or worktree is created; no
-historical terminal-exit exception is enabled. Safety or upstream errors fail
-the pass with an audited failure, not a fallback. An uncertain launch retains
-its reservation and is never replayed automatically.
+historical terminal-exit exception is enabled. Expected admission refusals are
+audited per task, never treated as authorization or a fallback. Unexpected
+storage, integrity or malformed-upstream errors still fail the pass. An uncertain
+launch retains its reservation and is never replayed automatically.
 
 The current policy intentionally applies to existing attention tasks without
 changing their immutable selection configuration. `worker_outcome` evidence
 persists classification and observation time; `automatic_retry_requested`
 records the exact policy, prior attempt count, new attempt ID and attribution.
 `retry_authorized` retains the existing transactional launch/claim/PR audit.
+
+Selected-task retries compare task-affecting configuration, not discovery
+rules: dependency rules, ready markers, milestones, source ordering, and mappings
+for other tracker repositories do not invalidate a pending retry. The original
+selection, claim/receipt provenance and prior launch plan remain immutable; the
+new attempt records both configuration snapshots in its retry authorization.
+The selected repository's entire mapping (including checkout, base, remote and
+required checks), assignment identity, state/worktree roots and execution policy
+still must match. Fresh claim, PR absence, worktree ownership/cleanliness and
+proven process exit checks remain mandatory.
+
+An expected retry or candidate admission refusal is task-local: the cycle
+reports it and can dispatch independent work without creating a blocked retry
+attempt or consuming its budget. Retry configuration mismatches use
+`config_mismatch` with exact `differing_fields`; other expected retry refusals
+use `admission_failed`. Execute-cycle JSON includes these automatic-retry
+decisions and `admission_failures` for new candidates, and stderr prints the
+task, attempt, check and reason. `status` and `show` expose the durable
+`scheduling_failure` for the current attempt. Storage/corruption errors and
+uncertain launches remain fatal and preserve reservations; their cycle-error
+JSON and stderr retain the underlying typed cause and available task/attempt
+context, without raw upstream bodies, worker arguments or SQL.
+
 Execute reports include `automatic_retries` with classification and decisions
 such as `backoff`, `capacity_full`, `worktree_busy`, `exhausted`, and
 `needs_human_input`. Cached

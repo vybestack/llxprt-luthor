@@ -207,9 +207,9 @@ fn unsafe_attempt_storage_stops_scheduler_before_second_candidate() {
     );
     assert!(matches!(
         result,
-        Err(luthor::coordinator::ScheduleError::Dispatch(
-            DispatchError::Supervisor(SupervisorError::Conflict)
-        ))
+        Err(luthor::coordinator::ScheduleError::Task {
+            source, check: "candidate_dispatch", ..
+        }) if matches!(*source, DispatchError::Supervisor(SupervisorError::Conflict))
     ));
     assert_eq!(ids.0, 2);
     assert_eq!(task_count(&f.store).unwrap(), 1);

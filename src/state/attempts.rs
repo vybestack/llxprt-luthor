@@ -40,11 +40,11 @@ pub(crate) fn retry_evidence_matches(
 pub(crate) fn same_task_config(
     original: &EffectiveConfigSnapshot,
     current: &EffectiveConfigSnapshot,
+    repository: &str,
 ) -> bool {
-    let mut comparable = current.clone();
-    comparable.initial = original.initial.clone();
-    comparable.resume = original.resume.clone();
-    comparable == *original
+    original
+        .task_differing_fields(current, repository)
+        .is_empty()
 }
 
 /// Resolve a launch's revision through its exact per-attempt authorization,
@@ -281,7 +281,11 @@ fn retry_audit_identity_matches(
         || audit.pr.status != PausePrStatus::Absent
         || audit.pr.observed_at_unix_secs == 0
         || audit.pr.repository != selection.candidate.mapping.code_repository
-        || !same_task_config(&selection.effective_config, &audit.config)
+        || !same_task_config(
+            &selection.effective_config,
+            &audit.config,
+            &selection.candidate.repository,
+        )
         || plan.config_revision.trim().is_empty())
 }
 

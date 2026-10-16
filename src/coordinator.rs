@@ -1,6 +1,9 @@
 use crate::state::{launches, scheduling, task_records};
 mod active;
+mod admission;
 mod auto_retry;
+mod candidate_dispatch;
+pub use admission::TaskAdmissionFailure;
 mod worker_outcome;
 pub use auto_retry::{
     AutoRetryDependencies, AutoRetryReport, RetryObservation, retry_attention_tasks,
@@ -52,7 +55,6 @@ use crate::{
     },
     state::{StateError, StateStore},
     supervisor::{self, LaunchPlan, SupervisorError},
-    worktree,
 };
 pub use diagnostics::operator_error;
 pub use ports::{DispatchError, SupervisorLauncher};
@@ -120,100 +122,12 @@ impl SupervisorLauncher for ProductionLauncher {
 
 pub use ports::ScheduleError;
 
-pub struct DispatchDependencies<'a, P, Q, W, L> {
-    pub config: &'a Config,
-    pub config_revision: &'a str,
-    pub task_id: &'a str,
-    pub attempt_id: &'a str,
-    pub projects: &'a mut P,
-    pub prs: &'a mut Q,
-    pub assignments: &'a mut W,
-    pub launcher: &'a mut L,
-}
-
-/// Dispatches a single preselected issue. Callers must reconcile outstanding
-/// intents before scheduling; this path never resumes or retries a prior task.
-pub fn dispatch_one<P, Q, W, L>(
-    store: &mut StateStore,
-    candidate: &Candidate,
-    dependencies: DispatchDependencies<'_, P, Q, W, L>,
-) -> Result<LaunchPlan, DispatchError>
-where
-    P: ProjectReader,
-    Q: PullRequestReader,
-    W: AssignmentWriter,
-    L: SupervisorLauncher,
-{
-    let DispatchDependencies {
-        config,
-        config_revision,
-        task_id,
-        attempt_id,
-        projects,
-        prs,
-        assignments,
-        launcher,
-    } = dependencies;
-    claim::ensure_dependencies(projects, candidate)?;
-    scheduling::ensure_dispatch_capacity(store)?;
-    crate::disk::inspect(&config.worktree_root, config.min_free_space_bytes)?.enforce()?;
-    let ownership = crate::ownership::WorktreeOwner::acquire(store.root(), task_id)
-        .map_err(|_| SupervisorError::Conflict)?;
-    task_records::create_task(store, task_id, candidate, config_revision, config)?;
-    let mut launch_preflight_complete = false;
-    let result = (|| {
-        supervisor::validate_stop_socket_path(&config.state_root, attempt_id)?;
-        supervisor::preflight_attempt_storage(&config.state_root)?;
-        launch_preflight_complete = true;
-        worktree::preflight(task_id, &config.worktree_root, &candidate.mapping)?;
-        claim::claim(
-            store,
-            task_id,
-            candidate,
-            &config.assignment_login,
-            projects,
-            prs,
-            assignments,
-        )?;
-        worktree::ensure_worktree(store, task_id, &config.worktree_root, &candidate.mapping)?;
-        let (_, issue) = claim::fresh(projects, candidate)?;
-        if issue.assignees != [config.assignment_login.as_str()] {
-            return Err(DispatchError::ChangedClaim);
-        }
-        if lookup(
-            prs,
-            &candidate.mapping.code_repository,
-            &candidate.issue_url,
-        )? != LookupResult::Absent
-        {
-            return Err(DispatchError::ExistingPr);
-        }
-        let plan = supervisor::prepare_initial_owned(store, task_id, attempt_id, &ownership)?;
-        launcher.launch(store, &plan, &ownership)?;
-        Ok(plan)
-    })();
-    if let Err(error) = &result {
-        task_records::hold_task(
-            store,
-            task_id,
-            ports::dispatch_failure_reason(error, launch_preflight_complete),
-        )?;
-    }
-    result
-}
-
-pub struct ScheduleDependencies<'a, P, Q, W, L, I> {
-    pub config: &'a Config,
-    pub config_revision: &'a str,
-    pub projects: &'a mut P,
-    pub prs: &'a mut Q,
-    pub assignments: &'a mut W,
-    pub launcher: &'a mut L,
-    pub ids: &'a mut I,
-}
+mod dispatch;
+pub use dispatch::{DispatchDependencies, ScheduleDependencies, dispatch_one};
 
 /// Selected candidates are finite; no held or previously selected issue is
-/// retried. A failed dispatch stops this pass without trying another worker.
+/// retried. Expected admission refusals are reported per task; uncertain
+/// dispatch and storage failures still stop the pass.
 pub fn schedule_candidates<P, Q, W, L, I>(
     store: &mut StateStore,
     candidates: Vec<Candidate>,
@@ -287,21 +201,14 @@ where
         }
         let task_id = format!("task-{}", d.ids.create()?);
         let attempt_id = format!("attempt-{}", d.ids.create()?);
-        let plan = dispatch_one(
+        candidate_dispatch::dispatch_candidate(
             store,
             &candidate,
-            DispatchDependencies {
-                config: d.config,
-                config_revision: d.config_revision,
-                task_id: &task_id,
-                attempt_id: &attempt_id,
-                projects: d.projects,
-                prs: d.prs,
-                assignments: d.assignments,
-                launcher: d.launcher,
-            },
+            &task_id,
+            &attempt_id,
+            &mut report,
+            &mut d,
         )?;
-        report.launched.push(plan);
     }
     Ok(report)
 }
@@ -459,19 +366,7 @@ where
         if ports::defer_resume_error(error, defer_transient_reads) {
             return result;
         }
-        let reason = match error {
-            DispatchError::Claim(_) | DispatchError::ChangedClaim => "resume claim changed",
-            DispatchError::ExistingPr => "resume PR present",
-            DispatchError::PullRequest(_) => "resume PR read failed",
-            DispatchError::Supervisor(_) => "resume preparation or dispatch failed",
-            DispatchError::RetryHeld { .. } => "retry held before launch",
-            DispatchError::State(_) => "resume state transition failed",
-            DispatchError::Worktree(_) => "resume worktree failed",
-        };
-        let reason = match error {
-            DispatchError::Supervisor(SupervisorError::WorkerBuildHeld(detail)) => detail.as_str(),
-            _ => reason,
-        };
+        let reason = diagnostics::resume_failure_reason(error);
         task_records::hold_task(store, task_id, reason)?;
     }
     result

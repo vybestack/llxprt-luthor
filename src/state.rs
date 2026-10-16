@@ -41,7 +41,6 @@ pub use crate::model::{
 };
 pub use amended_dispatch::{verify_amended_observation_plan, verify_amended_worker_plan};
 pub(crate) use amendment::policy::{initial_branch_removal_plan, validate_removal_config};
-pub(crate) use attempts::same_task_config;
 pub(crate) use attempts::{attempt_selection, verify_worker_lineage};
 pub use context::{
     AmendedDispatchProof, BranchRemovalDelta, BranchRemovalReason, BranchRemovalRequest,
