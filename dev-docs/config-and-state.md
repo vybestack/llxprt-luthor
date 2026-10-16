@@ -291,8 +291,52 @@ luthor reconcile task-7f3a --config "$CONFIG"
 
 Dispatch without `--execute` stops with an authorization message and makes no scheduling writes. Resume without it likewise does not launch. `pause` and `reconcile` are state-changing controls, so use them only when you intend to affect the task lifecycle. `reconcile TASK --config` also handles source-intent reconciliation when the task has no attempt; with an attempt, it reconciles process and pull-request evidence.
 
-The marker name/value and optional milestone are exact selectors. Omitting milestone removes only that eligibility check. State uses SQLite schema version 5 with task, attempt, intent, reservation, evidence, metadata and launch-preparation tables. New initial preparations capture attempt-bound worktree ownership in the same transaction as the attempt, reservation and original launch intent. Version 4 databases gain an empty preparation table: there is deliberately no backfill, and historical absence of dispatch records alone cannot authorize continuation or abandonment. See [issue 27's permanent-hold contract](issue27-historical-hold.md). Reservations are durable per-attempt history keyed by attempt ID, with a partial unique index allowing at most one active reservation per task. Opening a fresh database creates the current schema. Version 3 databases gain an abandoned-history-aware issue identity index transactionally; all child records, foreign keys and sequence values are preserved. Only abandoned tasks permit a replacement selection; other issue identities remain unique. Version 1 databases gain persisted capacity metadata, and version 1 or 2 databases are upgraded transactionally through versions 3 and 4 to version 5, preserving task, attempt, intent, reservation and evidence rows. If a migration cannot complete, its schema changes and version update roll back together. Versions above 5 are rejected. Configured capacity is persisted and must match on later opens. Creating a task stores a typed selection-evidence record in the same transaction as task identity, preserving the selected Project and item, issue URL and identity, marker, milestone, repository mapping, observation time, source, configuration revision, and a typed effective configuration snapshot (state/worktree roots, capacity, sources, mappings, and initial/resume executable and argv). The snapshot is validated before task creation and committed atomically with the task and selection evidence. Credentials are excluded by configuration validation; invalid-configuration errors do not echo supplied values or raw JSON. Duplicate task creation rolls back without leaving a second selection record. A process-level coordinator lock (where used) supplements database transactions; reservations remain authoritative and uncertain work must retain capacity.
+The marker name/value and optional milestone are exact selectors. Omitting milestone removes only that eligibility check. State uses SQLite schema version 7 with task, attempt, intent, reservation, evidence, metadata, launch-preparation, PR-poll and queue-capacity audit tables. New initial preparations capture attempt-bound worktree ownership in the same transaction as the attempt, reservation and original launch intent. Version 4 databases gain an empty preparation table: there is deliberately no backfill, and historical absence of dispatch records alone cannot authorize continuation or abandonment. See [issue 27's permanent-hold contract](issue27-historical-hold.md). Reservations are durable per-attempt history keyed by attempt ID, with a partial unique index allowing at most one active reservation per task. Opening a fresh database creates the current schema. Version 3 databases gain an abandoned-history-aware issue identity index transactionally; all child records, foreign keys and sequence values are preserved. Only abandoned tasks permit a replacement selection; other issue identities remain unique. Version 1 databases gain persisted capacity metadata, and version 1 or 2 databases are upgraded transactionally through the known schema versions to version 7, preserving task, attempt, intent, reservation and evidence rows. If a migration cannot complete, its schema changes and version update roll back together. Negative versions and versions above 7 are rejected. Version 6 adds PR polling metadata; version 7 adds an empty queue-level capacity audit table without rewriting task history. Configured capacity is persisted and must match on later opens. Creating a task stores a typed selection-evidence record in the same transaction as task identity, preserving the selected Project and item, issue URL and identity, marker, milestone, repository mapping, observation time, source, configuration revision, and a typed effective configuration snapshot (state/worktree roots, capacity, sources, mappings, and initial/resume executable and argv). The snapshot is validated before task creation and committed atomically with the task and selection evidence. Credentials are excluded by configuration validation; invalid-configuration errors do not echo supplied values or raw JSON. Duplicate task creation rolls back without leaving a second selection record. A process-level coordinator lock (where used) supplements database transactions; reservations remain authoritative and uncertain work must retain capacity.
 
+## Audited queue capacity changes
+
+`resize-capacity --config PATH --expected-capacity N --expected-reservations N --actor LOGIN --reason TEXT --execute`
+
+The config supplies the **new** positive capacity; both expectations describe the
+existing queue. Run `status --config PATH` first: its `capacity.limit` always comes
+from persisted metadata, not the supplied config, and `capacity.reserved` reports
+the current reservation count. Stop the coordinator/daemon before resizing. A
+running daemon is not signalled or silently bypassed: the command fails with
+`coordinator busy; try again`. Workers may survive a coordinator, so reconcile
+their launches before retrying the resize. No GitHub calls or worker launches are
+part of this operation, and actor is the operator-provided audit identity, as for
+other explicit operator controls.
+
+The operation opens only an **existing** database under the coordinator lock,
+using the expected old capacity through the ordinary mismatch check. Known
+versions 2–6 are migrated transactionally to version 7. A pre-metadata database
+(version 0/1) has no persisted capacity to verify: initialize/migrate it normally
+under its original config first. Unknown versions are refused, not guessed.
+There is no automatic adoption of a conflicting audit schema.
+
+Under an immediate SQLite transaction it verifies the current reservation count
+and reservation/attempt/task identities. The new limit must be different,
+positive, representable by SQLite, and at least the verified reservation count;
+inconsistent counts above the old limit are refused. Unlaunched reservations may
+remain, but active or unreconciled launch intents are refused even on an increase.
+Released launches must already have their reconciled receipt/outcome or existing
+explicit recovery/retirement audit; resizing never creates exit or absence proof.
+Registered processes/groups must be provably absent, and existing worktree-owner
+locks are acquired and held through commit. Missing or conflicting historical
+owner locks are not recreated to manufacture proof. Reused PIDs and unavailable
+process inspection remain fail-closed.
+
+One `capacity_changes` record stores actor, reason, old/new capacity, reservation
+count, sequence and UTC timestamp atomically with the persisted limit update.
+Errors roll back both writes; the command returns one JSON changed/refused
+result and exits nonzero on refusal. No task, attempt, intent, reservation,
+receipt, log, PR proof or selection snapshot is edited. A restart with the new
+config accepts the persisted new limit; a config still containing the old limit
+continues to fail the ordinary mismatch guard. `status` remains read-only and
+reports the effective persisted limit even with a mismatched config. Historical
+selection snapshots retain their original capacity and all existing
+continuation/config-identity checks remain in force. Do not edit SQLite or switch
+to a new state root as a substitute for this operation.
 
 ## Audited natural-exit continuation
 

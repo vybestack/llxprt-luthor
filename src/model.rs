@@ -37,6 +37,8 @@ pub enum StateError {
     LaunchBlocked,
     #[error("configured capacity {configured} does not match persisted capacity {persisted}")]
     CapacityMismatch { configured: usize, persisted: usize },
+    #[error("capacity change refused: {0}")]
+    CapacityChangeRefused(&'static str),
     #[error("unsupported database version {0}")]
     UnsupportedDatabaseVersion(i32),
     #[error("pin adoption refused: {0}")]

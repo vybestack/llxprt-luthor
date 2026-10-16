@@ -44,9 +44,10 @@ fn upgrade_settles_historical_same_head_deliveries_even_with_disabled_merge_clea
     let store = StateStore::open(&config.state_root, 2).unwrap();
     let before = history(&store, Some("task-12"));
     // Model an on-disk database from before issue 88, not a new-task-only path.
+    // Remove every later table so the declared version-5 schema is truthful.
     store
         .connection
-        .execute_batch("DROP TABLE pr_polls; PRAGMA user_version=5;")
+        .execute_batch("DROP TABLE capacity_changes; DROP TABLE pr_polls; PRAGMA user_version=5;")
         .unwrap();
     drop(store);
     let report = run(&f, &config);

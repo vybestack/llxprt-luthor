@@ -61,6 +61,7 @@ fn state_reason(error: &StateError) -> &'static str {
         StateError::InvalidConfig => "cleanup configuration invalid",
         StateError::InvalidTarget => "cleanup target invalid",
         StateError::AmbiguousTarget(_, _) => "cleanup target ambiguous",
+        StateError::CapacityChangeRefused(_) => "cleanup capacity change refused",
         StateError::CapacityMismatch { .. } => "cleanup state capacity mismatch",
         StateError::UnsupportedDatabaseVersion(_) => "cleanup state database version unsupported",
         StateError::PinAdoptionRefused(_) => "cleanup pin adoption refused",
