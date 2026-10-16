@@ -1,6 +1,6 @@
 use crate::model::StateError;
 use fs2::FileExt;
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags};
 use std::{
     fs::{self, File, OpenOptions},
     path::{Path, PathBuf},
@@ -22,7 +22,7 @@ pub struct StateStore {
 
 impl StateStore {
     pub fn open(root: impl AsRef<Path>, capacity: usize) -> Result<Self, StateError> {
-        open_store(root, capacity)
+        open_store(root.as_ref(), capacity, true)
     }
 
     pub fn root(&self) -> &Path {
@@ -30,12 +30,17 @@ impl StateStore {
     }
 }
 
-fn open_store(root: impl AsRef<Path>, capacity: usize) -> Result<StateStore, StateError> {
+pub(crate) fn open_existing(root: &Path, capacity: usize) -> Result<StateStore, StateError> {
+    open_store(root, capacity, false)
+}
+
+fn open_store(root: &Path, capacity: usize, create: bool) -> Result<StateStore, StateError> {
     if capacity == 0 {
         return Err(StateError::InvalidCapacity);
     }
-    let root = root.as_ref();
-    fs::create_dir_all(root)?;
+    if create {
+        fs::create_dir_all(root)?;
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -54,13 +59,18 @@ fn open_store(root: impl AsRef<Path>, capacity: usize) -> Result<StateStore, Sta
             StateError::Io(error)
         }
     })?;
-    let mut connection = Connection::open(root.join("state.sqlite3"))?;
-    connection.pragma_update(None, "journal_mode", "WAL")?;
-    connection.pragma_update(None, "foreign_keys", "ON")?;
+    let flags = if create {
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE
+    } else {
+        OpenFlags::SQLITE_OPEN_READ_WRITE
+    };
+    let mut connection = Connection::open_with_flags(root.join("state.sqlite3"), flags)?;
     let version: i32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if version > 6 {
+    if !(0..=7).contains(&version) || !create && version < 2 {
         return Err(StateError::UnsupportedDatabaseVersion(version));
     }
+    connection.pragma_update(None, "journal_mode", "WAL")?;
+    connection.pragma_update(None, "foreign_keys", "ON")?;
     let tx = connection.transaction()?;
     initialize_schema(&tx, version, capacity)?;
     tx.commit()?;
@@ -169,5 +179,23 @@ fn initialize_schema(
         )?;
         tx.pragma_update(None, "user_version", 6)?;
     }
+    if version < 7 {
+        initialize_capacity_audit(tx)?;
+        tx.pragma_update(None, "user_version", 7)?;
+    }
+    Ok(())
+}
+
+fn initialize_capacity_audit(tx: &rusqlite::Transaction<'_>) -> Result<(), StateError> {
+    tx.execute_batch(
+        "CREATE TABLE capacity_changes (
+            sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+            actor TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            old_capacity INTEGER NOT NULL CHECK(old_capacity > 0),
+            new_capacity INTEGER NOT NULL CHECK(new_capacity > 0),
+            reservations INTEGER NOT NULL CHECK(reservations >= 0),
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);",
+    )?;
     Ok(())
 }

@@ -19,7 +19,7 @@ fn v4_migration_adds_no_historical_preparation_and_preserves_exact_rows() {
     .unwrap();
     drop(store);
     let db = Connection::open(dir.path().join("state.sqlite3")).unwrap();
-    db.execute_batch("DROP TABLE pr_polls; DROP TABLE launch_preparations; PRAGMA user_version=4;")
+    db.execute_batch("DROP TABLE capacity_changes; DROP TABLE pr_polls; DROP TABLE launch_preparations; PRAGMA user_version=4;")
         .unwrap();
     let before = history(&db);
     drop(StateStore::open(dir.path(), 2).unwrap());
@@ -27,7 +27,7 @@ fn v4_migration_adds_no_historical_preparation_and_preserves_exact_rows() {
     assert_eq!(
         db.pragma_query_value::<i32, _>(None, "user_version", |row| row.get(0))
             .unwrap(),
-        6
+        7
     );
     assert_eq!(
         db.query_row::<i64, _, _>("SELECT COUNT(*) FROM launch_preparations", [], |row| row
@@ -58,7 +58,7 @@ fn conflicting_v4_preparation_schema_fails_without_accepting_or_backfilling_it()
     drop(store);
     let db = Connection::open(dir.path().join("state.sqlite3")).unwrap();
     db.execute_batch(
-        "DROP TABLE pr_polls; DROP TABLE launch_preparations;
+        "DROP TABLE capacity_changes; DROP TABLE pr_polls; DROP TABLE launch_preparations;
         CREATE TABLE launch_preparations(conflict TEXT); PRAGMA user_version=4;",
     )
     .unwrap();
@@ -98,7 +98,7 @@ fn conflicting_v5_poll_schema_fails_atomically_instead_of_adopting_it() {
     drop(StateStore::open(dir.path(), 2).unwrap());
     let db = Connection::open(dir.path().join("state.sqlite3")).unwrap();
     db.execute_batch(
-        "DROP TABLE pr_polls; CREATE TABLE pr_polls(conflict TEXT); PRAGMA user_version=5;",
+        "DROP TABLE capacity_changes; DROP TABLE pr_polls; CREATE TABLE pr_polls(conflict TEXT); PRAGMA user_version=5;",
     )
     .unwrap();
     let before = history(&db);
