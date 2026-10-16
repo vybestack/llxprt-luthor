@@ -498,6 +498,18 @@ when the daemon first durably classifies that attempt; repeated polls and daemon
 restarts cannot reset it. Exhaustion leaves the task in attention, without a new
 reservation. Manual `retry` remains a separate explicit operator authorization.
 
+Retry-pending attention tasks keep priority over **new selections**. No durable
+slot is reserved during backoff: execute scheduling first evaluates retries in
+original task-selection order, and defers all new candidate selections while
+any retry reports `backoff`, `capacity_full`, or `worktree_busy`. This can leave
+capacity idle during backoff (including at capacities greater than one), rather
+than letting a newly selected issue delay in-progress work for its entire run.
+Once backoff expires, retries launch before new selections in the same cycle;
+normal capacity and launch-safety checks still apply. Already selected source
+recoveries and explicit operator requests retain their existing behavior.
+Exhausted, disabled, non-retryable or ineligible tasks do not block new selection;
+neither do task-local retry admission refusals such as configuration mismatch.
+
 The worker must emit one terminal JSON object on stdout with the matching
 `session_id`, `status:"error"`, and a typed `error.code`; transport errors must
 agree with exit code 5. `model-rate-limit`, `model-transient-server`, and
@@ -560,8 +572,12 @@ context, without raw upstream bodies, worker arguments or SQL.
 
 Execute reports include `automatic_retries` with classification and decisions
 such as `backoff`, `capacity_full`, `worktree_busy`, `exhausted`, and
-`needs_human_input`. Cached
-`status` and `show` expose the latest `worker_outcome`; those views, previews,
+`needs_human_input`. Pending entries (`backoff`, `capacity_full`, or
+`worktree_busy`) include task/attempt IDs and `backoff_until_unix_secs`, computed
+from the durable outcome observation and current policy. The deadline remains
+visible even when it has passed and capacity or ownership is still unavailable;
+it is not reset by waiting or restart. Non-pending decisions omit the deadline.
+Cached `status` and `show` expose the latest `worker_outcome`; those views, previews,
 plain reconciliation, and stopped-task resume do not initiate retries.
 
 ### Typed failures during PR repair

@@ -2,6 +2,8 @@
 use super::*;
 mod config_revisions;
 mod fixture;
+mod priority;
+mod priority_waits;
 mod turn_budget;
 use fixture::Fixture;
 use luthor::state::{

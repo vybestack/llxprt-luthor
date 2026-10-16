@@ -23,6 +23,8 @@ pub struct RetryObservation {
     pub outcome: WorkerOutcome,
     pub decision: RetryDecision,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub backoff_until_unix_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub failure: Option<super::admission::TaskAdmissionFailure>,
 }
 
@@ -72,6 +74,7 @@ pub fn retry_attention_tasks<
                     attempt_id: attempt,
                     outcome: WorkerOutcome::Unclassified,
                     decision: RetryDecision::Ineligible,
+                    backoff_until_unix_secs: None,
                     failure: None,
                 });
                 continue;
@@ -102,12 +105,35 @@ pub fn retry_attention_tasks<
         report.observations.push(RetryObservation {
             task_id: task,
             attempt_id: attempt,
+            backoff_until_unix_secs: retry_deadline(
+                &d.config.retry_policy,
+                &observation,
+                &decision,
+            )?,
             outcome: observation.outcome,
             decision,
             failure,
         });
     }
     Ok(report)
+}
+
+fn retry_deadline(
+    policy: &RetryPolicy,
+    observation: &OutcomeObservation,
+    decision: &RetryDecision,
+) -> Result<Option<u64>, StateError> {
+    if !decision.pending() {
+        return Ok(None);
+    }
+    let RetryPolicy::Bounded { backoff_secs, .. } = policy else {
+        return Err(StateError::InvalidConfig);
+    };
+    observation
+        .observed_at_unix_secs
+        .checked_add(u64::from(*backoff_secs))
+        .map(Some)
+        .ok_or(StateError::LaunchBlocked)
 }
 
 fn attention_tasks(store: &StateStore) -> Result<Vec<(String, String, u32)>, StateError> {
