@@ -34,6 +34,7 @@ Usage: luthor discover --config <path>
        luthor retry TASK --attempt ID --config PATH --config-revision REV --actor LOGIN --reason TEXT [--revalidate-terminal-exit] --execute
        luthor recover TASK --attempt ID --config PATH --actor LOGIN --reason TEXT --execute
        luthor abandon TASK --config PATH --actor LOGIN --reason TEXT --execute
+       luthor resize-capacity --config PATH --expected-capacity N --expected-reservations N --actor LOGIN --reason TEXT --execute
        luthor status --config <path>
        luthor show TASK --config <path>
        luthor logs TASK [--attempt ATTEMPT] --config <path>
@@ -785,6 +786,30 @@ plain `error:` / `corrupt session state:` diagnostics are recognized too.
 Durable evidence names the pinned and attempted builds and the rejected version
 when reported. The task stays held after process/receipt accounting releases
 its slot; no PR completion or new retry is authorized for that session.
+
+## Resize an existing queue (issue #21)
+
+Stop the daemon/coordinator and reconcile any launched workers first. Keep the
+same `state_root`; changing only the config cannot override its persisted limit.
+With a config containing the **desired new capacity** (for example, `2`), inspect
+`luthor status --config PATH` for the current persisted `capacity.limit` and
+`capacity.reserved`, then explicitly authorize that exact transition:
+
+```sh
+luthor resize-capacity --config PATH --expected-capacity 1 \
+  --expected-reservations 0 --actor LOGIN --reason "increase idle queue capacity" --execute
+luthor status --config PATH
+```
+
+The command requires the coordinator lock, refuses active/unreconciled launches
+or conflicting/unavailable worktree owners, and never releases reservations.
+A decrease cannot go below the verified reservation count. Stale expectations
+refuse without a capacity/audit write. The old/new limit, actor, reason, verified
+reservation count and timestamp are committed together and returned as JSON.
+Tasks, attempts, receipts, PR proof and selection snapshots are not rewritten;
+ordinary task-continuation authorization is unchanged. This is not a migration to
+a new state root. See the [capacity-change contract](dev-docs/config-and-state.md#audited-queue-capacity-changes)
+for version and ownership details.
 
 ## Rust quality gates
 
