@@ -82,3 +82,48 @@ was relaunched with a startup wait in `tmp/issue38/ci-run2/`.
 
 OCR review is skipped per Andrew 2026-10-09. Hosted CI runs the same unchanged
 gates and is required before any merge.
+
+## PR #102 merge repair — attempt-a8b8a219039883d519628975a1569b76
+
+Inspected the existing worktree, issue, PR, tests and saved logs before changing
+anything. Started with clean task HEAD
+`60d6bf6488f59cfd98781f219f577ef941b4236a`. Authenticated GitHub identity and PR
+author are `acoliver`; repository, issue, branch and mapped base match the task.
+
+Fetched `work/luthor-issue-to-pr-daemon` over the authorized SSH remote and merged
+base `4e19066519455d3972be63de37a8731ac96ccf6b` without rebasing. The sole conflict
+was the normal execute-report JSON in `src/daemon.rs`. The resolution keeps both
+the issue #38 narrow reconciliation/source-hold projection and the base's
+`github_budget_exhausted` / `github_optional_reads_deferred` fields. The base's
+quota persistence on failed cycles, point accounting, bounded discovery and all
+upstream behavior/tests are retained unchanged. No vendored patches, checksum or
+provenance pins apply to this conflict; none were changed.
+
+Two additional real-CLI regressions exercise the merged behavior:
+
+- A blocked startup still reports its exact attempt error, retains capacity,
+  and persists the exhausted GraphQL quota for read-only `status`.
+- A normal cycle retains both narrow reconciliation diagnostics and quota /
+  optional-read-deferral fields, with no discovery or launch when exhausted.
+
+Validation uses the same Rust 1.98.0 and confined absolute Cargo/TMPDIR paths
+above. The initially empty confined dependency cache prevented the first offline
+focused invocation from starting (`proc-macro2` absent). Evidence is saved in
+`tmp/issue38/repair-a8b8/focused-startup.log` and `cache-evidence.txt`; the
+repository-documented deliberate `cargo +1.98.0 fetch --locked` stage populated
+that cache before offline locked checks resumed.
+
+- Startup regressions: **4 passed**.
+- Complete daemon integration target: **23 passed**, 147.57s.
+- Upstream daemon budget regressions: **3 passed**, 6.12s.
+- **Full unchanged `cargo +1.98.0 xtask ci`: PASS (exit 0)**, including
+  policy, formatting, gate fixtures, strict Clippy, workspace/all-target/
+  all-feature build and serial tests, doctests, and every exact required
+  behavioral contract.
+- `git diff --check`: pass. Reviewed `git status` and `git diff HEAD` before
+  the merge commit.
+
+Raw focused and detached gate logs are retained under
+`tmp/issue38/repair-a8b8/`; the full gate uses `ci/log` and `ci/exit`. No checks,
+ceilings, assertions or timeouts were relaxed. The existing PR is updated rather
+than duplicated; hosted Ubuntu and macOS gates remain required before merge.

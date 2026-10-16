@@ -121,3 +121,93 @@ fn source_stop_alone_reports_the_barrier_without_fabricating_an_attempt_error() 
         1
     );
 }
+
+fn exhaust_graphql(root: &Path) {
+    let gh = root.join("gh");
+    let script = fs::read_to_string(&gh).unwrap();
+    let quota = "\"graphql\":{\"remaining\":5000";
+    assert_eq!(script.matches(quota).count(), 1);
+    fs::write(&gh, script.replace(quota, "\"graphql\":{\"remaining\":0")).unwrap();
+}
+
+#[test]
+fn blocked_startup_keeps_attempt_diagnostics_and_persists_quota_on_failure() {
+    let root = tempdir();
+    let (config, path) = fixture(root.path(), "acoliver");
+    let store = open_store(&config);
+    seed_attempt(&store, "task-error", "invalid/attempt", false);
+    drop(store);
+    exhaust_graphql(root.path());
+    let report = blocked_report(&config, &path, root.path());
+    assert_eq!(report["reconciliation"][0]["task_id"], "task-error");
+    assert_eq!(report["reconciliation"][0]["attempt_id"], "invalid/attempt");
+    assert_eq!(report["reconciliation"][0]["status"], "error");
+    assert_eq!(
+        report["reconciliation"][0]["error"],
+        "launch plan does not match verified task or worktree"
+    );
+    assert_eq!(report["source_holds"], json!([]));
+    let store = open_store(&config);
+    let status: Value =
+        serde_json::from_str(&luthor::cli::execute(store.root(), &["status".into()]).unwrap())
+            .unwrap();
+    assert_eq!(status["github"]["graphql_remaining"], 0);
+    assert_eq!(status["github"]["rest"], 1);
+    assert_eq!(
+        status["github_budget_exhausted"],
+        json!([
+            {"resource":"graphql","reset_at_unix_secs":9999999999_u64}
+        ])
+    );
+    assert_eq!(
+        luthor::state::scheduling::reservation_count(&store).unwrap(),
+        1
+    );
+}
+
+#[test]
+fn normal_cycle_keeps_quota_fields_alongside_narrow_reconciliation_diagnostics() {
+    let root = tempdir();
+    let (config, path) = fixture(root.path(), "acoliver");
+    let store = open_store(&config);
+    seed_attempt(&store, "task-held", "attempt-held", false);
+    drop(store);
+    exhaust_graphql(root.path());
+    let output = run(&config, &path, &["--issues", "7", "--execute"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        report["reconciliation"],
+        json!([
+            {"task_id":"task-held","attempt_id":"attempt-held","status":"held"}
+        ])
+    );
+    assert_eq!(report["source_holds"], json!([]));
+    assert_eq!(report["github"]["graphql_remaining"], 0);
+    assert_eq!(
+        report["github_budget_exhausted"],
+        json!([
+            {"resource":"graphql","reset_at_unix_secs":9999999999_u64}
+        ])
+    );
+    assert!(
+        report["github_optional_reads_deferred"]
+            .as_str()
+            .unwrap()
+            .starts_with("github_budget_exhausted:")
+    );
+    assert_eq!(report["launched"], json!([]));
+    assert_eq!(
+        fs::read_to_string(root.path().join("calls")).unwrap(),
+        "api rate_limit --include\n"
+    );
+    assert_eq!(
+        luthor::state::scheduling::reservation_count(&open_store(&config)).unwrap(),
+        1
+    );
+}

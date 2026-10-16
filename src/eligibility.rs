@@ -54,6 +54,7 @@ pub fn select<R: ProjectReader>(
     sources: &[Source],
     mappings: &[Mapping],
 ) -> Result<Vec<Candidate>, EligibilityError> {
+    let reader = &mut crate::github::project::CandidateReader(reader);
     select_with(reader, sources, mappings, |reader, source| {
         enumerate_matching(reader, &source.project_id, |item| {
             project_candidate(source, mappings, None, item)
@@ -68,6 +69,7 @@ pub fn select_target<R: ProjectReader>(
     repository: &str,
     issue_number: u64,
 ) -> Result<Vec<Candidate>, EligibilityError> {
+    let reader = &mut crate::github::project::CandidateReader(reader);
     select_with(reader, sources, mappings, |reader, source| {
         enumerate_matching(reader, &source.project_id, |item| {
             project_candidate(source, mappings, Some((repository, issue_number)), item)
@@ -284,6 +286,7 @@ pub fn discover<R: ProjectReader>(
     mappings: &[Mapping],
     target: Option<(&str, u64)>,
 ) -> Result<DiscoverySelection, EligibilityError> {
+    let reader = &mut crate::github::project::CandidateReader(reader);
     let mut report = DiscoverySelection::default();
     let mut candidates = HashMap::new();
     for source in sources {

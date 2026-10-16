@@ -1,3 +1,5 @@
+mod candidates;
+pub(crate) use candidates::CandidateReader;
 mod discovery;
 pub(crate) use discovery::external_read_failure;
 mod dependency;
