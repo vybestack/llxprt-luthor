@@ -40,8 +40,8 @@ pub(crate) fn continuation_build(
     latest: &LaunchPlan,
     template: &Path,
 ) -> Result<WorkerBuild, SupervisorError> {
-    let first_build = crate::state::pin_adoption::effective_build(&store.connection, first)?;
-    let latest_build = crate::state::pin_adoption::effective_build(&store.connection, latest)?;
+    let first_build = crate::state::pin_replacement::effective_build(&store.connection, first)?;
+    let latest_build = crate::state::pin_replacement::effective_build(&store.connection, latest)?;
     if first_build != latest_build {
         return Err(SupervisorError::Conflict);
     }

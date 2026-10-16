@@ -64,6 +64,7 @@ fn state_reason(error: &StateError) -> &'static str {
         StateError::CapacityMismatch { .. } => "cleanup state capacity mismatch",
         StateError::UnsupportedDatabaseVersion(_) => "cleanup state database version unsupported",
         StateError::PinAdoptionRefused(_) => "cleanup pin adoption refused",
+        StateError::PinReplacementRefused(_) => "cleanup pin replacement refused",
         StateError::NotRetirable(_) => "cleanup task cannot be retired",
     }
 }

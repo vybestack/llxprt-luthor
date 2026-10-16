@@ -19,6 +19,8 @@ pub mod journal;
 pub mod launches;
 pub(crate) mod merge_followup;
 pub mod pin_adoption;
+mod pin_quiescence;
+pub mod pin_replacement;
 pub mod pr_completion;
 pub(crate) mod pr_merge;
 pub(crate) mod pr_poll;
