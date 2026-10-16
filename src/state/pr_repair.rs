@@ -239,3 +239,49 @@ pub(crate) fn completion_lookup(
     }
     Ok((kind.into(), lookup))
 }
+
+/// Only a successfully completed latest repair owns a retained report. A
+/// pending retry, missing completion or another attempt cannot exempt a file
+/// from the worktree's clean-tree requirement.
+pub(crate) fn completed_result(
+    store: &StateStore,
+    task: &str,
+) -> Result<Option<crate::pr_repair::PrRepairResult>, StateError> {
+    let attempt =
+        super::task_records::latest_attempt(store, task)?.ok_or(StateError::LaunchBlocked)?;
+    if authorization(&store.connection, task, &attempt)?.is_none()
+        || proofs::unique_payload(
+            &store.connection,
+            true,
+            task,
+            Some(&attempt),
+            "verified_open_pr",
+        )?
+        .is_none()
+    {
+        return Ok(None);
+    }
+    let payload = proofs::unique_payload(
+        &store.connection,
+        true,
+        task,
+        Some(&attempt),
+        "pr_repair_result",
+    )?
+    .ok_or(StateError::LaunchBlocked)?;
+    let result: crate::pr_repair::PrRepairResult = proofs::parse_saved(&payload)?;
+    if result.attempt_id != attempt
+        || result.status != crate::pr_repair::PrRepairStatus::Repaired
+        || proofs::unique_payload(
+            &store.connection,
+            true,
+            task,
+            Some(&attempt),
+            "pr_repair_blocked",
+        )?
+        .is_some()
+    {
+        return Err(StateError::LaunchBlocked);
+    }
+    Ok(Some(result))
+}

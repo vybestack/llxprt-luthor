@@ -332,3 +332,5 @@ fn manually_matching_a_foreign_pr_head_does_not_erase_recorded_lineage() {
             .contains(&"pr_head_verified".into())
     );
 }
+
+mod after_repair;

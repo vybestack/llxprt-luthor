@@ -6,11 +6,10 @@ use crate::{
     config::RenderedCommand,
     github::pull_request::PrHealth,
     model::{LaunchPlan, RetrySourceEvidence, VerifiedOpenPr},
-    pr_repair::{PrRepairAuthorization, PrRepairResult, PrRepairStatus, REPAIR_RESULT_FILE},
+    pr_repair::{PrRepairAuthorization, PrRepairStatus, REPAIR_RESULT_FILE},
     state::{StateStore, launches, pr_repair, task_records},
     worktree,
 };
-use std::{fs, io::Read};
 
 pub(crate) fn prepare_pr_repair(
     store: &mut StateStore,
@@ -115,26 +114,7 @@ pub(crate) fn repair_result(
         return Ok(None);
     };
     let path = audit.plan.worktree.join(REPAIR_RESULT_FILE);
-    let meta = fs::symlink_metadata(&path)?;
-    if !meta.is_file() || meta.len() > 4096 {
-        return Err(SupervisorError::Conflict);
-    }
-    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-    let file = fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(&path)?;
-    let opened = file.metadata()?;
-    if !opened.is_file()
-        || opened.dev() != meta.dev()
-        || opened.ino() != meta.ino()
-        || opened.len() > 4096
-    {
-        return Err(SupervisorError::Conflict);
-    }
-    let mut bytes = Vec::new();
-    file.take(4097).read_to_end(&mut bytes)?;
-    let report: PrRepairResult = serde_json::from_slice(&bytes)?;
+    let report = crate::pr_repair::result::read(&path)?;
     if report.attempt_id != attempt {
         return Err(SupervisorError::Conflict);
     }

@@ -23,7 +23,7 @@ pub(crate) fn synchronize(
         }
         return Ok(serde_json::json!({"head":head,"local_before":before.head}));
     }
-    require_clean(&before.path)?;
+    require_clean(store, task, &before.path)?;
     let selection = task_records::selection_evidence(store, task)?
         .ok_or(WorktreeError::Conflict("missing selection"))?;
     let mapping = &selection.candidate.mapping;
@@ -111,15 +111,32 @@ fn require_commit_ids(ids: &[&str]) -> Result<(), WorktreeError> {
     Err(WorktreeError::Conflict("invalid PR commit SHA"))
 }
 
-fn require_clean(path: &Path) -> Result<(), WorktreeError> {
-    if !fs::symlink_metadata(path.join(".git"))?.is_file()
-        || !read_git(path, &["status", "--porcelain=v1", "--untracked-files=all"])?.is_empty()
-    {
-        return Err(WorktreeError::Conflict(
-            "PR worktree is dirty or has no .git file",
-        ));
+fn require_clean(store: &StateStore, task: &str, path: &Path) -> Result<(), WorktreeError> {
+    if !fs::symlink_metadata(path.join(".git"))?.is_file() {
+        return Err(WorktreeError::Conflict("PR worktree has no .git file"));
     }
-    Ok(())
+    let status = read_git(path, &["status", "--porcelain=v1", "--untracked-files=all"])?;
+    let report = crate::pr_repair::REPAIR_RESULT_FILE;
+    let report_path = path.join(report);
+    let has_report = match fs::symlink_metadata(&report_path) {
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error.into()),
+    };
+    if status.is_empty() && !has_report {
+        return Ok(());
+    }
+    // The worker must leave this report out of commits. Preserve it, accepting
+    // only the artifact bound to a durable successful repair (also when the
+    // repository ignores it). Tracked edits, other untracked files and changed
+    // reports remain conflicts.
+    if (status.is_empty() || status == format!("?? {report}"))
+        && let Some(saved) = crate::state::pr_repair::completed_result(store, task)?
+        && crate::pr_repair::result::read(&report_path)? == saved
+    {
+        return Ok(());
+    }
+    Err(WorktreeError::Conflict("PR worktree is dirty"))
 }
 
 fn fetch(path: &Path, remote: &str, source: &str, target: &str) -> Result<(), WorktreeError> {
@@ -184,11 +201,14 @@ fn fast_forward(
     if verify_existing_worktree(store, task)? != *before {
         return Err(WorktreeError::Conflict("worktree changed during PR fetch"));
     }
-    require_clean(&before.path)?;
+    require_clean(store, task, &before.path)?;
     if before.head != head
-        && !git(&before.path, &["merge", "--ff-only", "--", head])?
-            .status
-            .success()
+        && !git(
+            &before.path,
+            &["merge", "--ff-only", "--no-overwrite-ignore", "--", head],
+        )?
+        .status
+        .success()
     {
         return Err(WorktreeError::Git("PR fast-forward failed"));
     }
@@ -200,6 +220,6 @@ fn fast_forward(
             "worktree changed during PR fast-forward",
         ));
     }
-    require_clean(&after.path)?;
+    require_clean(store, task, &after.path)?;
     Ok(())
 }
