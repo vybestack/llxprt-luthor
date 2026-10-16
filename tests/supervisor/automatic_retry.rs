@@ -1,5 +1,6 @@
 #![cfg(unix)]
 use super::*;
+mod config_revisions;
 mod fixture;
 mod turn_budget;
 use fixture::Fixture;
@@ -190,50 +191,8 @@ fn automatic_retry_refuses_changed_claim_pr_identity_and_unverified_exit() {
     ] {
         let mut f = Fixture::new("model-transient-server", 5);
         f.elapsed("attempt-real", TransientFailure::TransientServer);
-        match refusal {
-            "claim" => f.projects.1 = 0,
-            "pr_present" => {
-                f.prs.matching = Some((f.projects.0.issue_url.clone(), "luthor/task".into()))
-            }
-            "pr_error" => f.prs.fail = true,
-            "identity" => f.prs.login = Some("another".into()),
-            "process" => {
-                let (boot, start) = test_process_identity(std::process::id());
-                luthor::state::journal::record_evidence(&mut f.store, "task", Some("attempt-real"), "tracked_descendant", &serde_json::json!({"pid":std::process::id(),"boot_identity":boot,"start_identity":start}).to_string()).unwrap();
-            }
-            "receipt" => {
-                fs::remove_file(receipt_path(&f.config)).unwrap();
-            }
-            "stop" => {
-                luthor::state::journal::record_intent(
-                    &mut f.store,
-                    "late-stop",
-                    "task",
-                    Some("attempt-real"),
-                    "stop",
-                    "{}",
-                )
-                .unwrap();
-            }
-            "launch" => f.launcher.fail = true,
-            _ => unreachable!(),
-        }
-        if refusal == "stop" {
-            let report = f.schedule().unwrap();
-            assert_eq!(
-                report.automatic_retries[0].decision,
-                RetryDecision::Ineligible
-            );
-        } else {
-            assert!(f.schedule().is_err(), "{refusal}");
-            assert_eq!(
-                evidence_payloads(&f.store, "task", "attempt-real", "automatic_retry_failed")
-                    .unwrap()
-                    .len(),
-                1,
-                "{refusal}"
-            );
-        }
+        force_refusal(&mut f, refusal);
+        assert_refusal_decision(&mut f, refusal);
         if refusal == "launch" {
             assert_eq!(f.launcher.plans.len(), 1);
             assert_eq!(reservation_count(&f.store).unwrap(), 1);
@@ -299,4 +258,76 @@ fn automatic_limit_counts_an_explicit_operator_continuation() {
         .unwrap()
         .is_empty()
     );
+}
+
+fn force_refusal(f: &mut Fixture, refusal: &str) {
+    match refusal {
+        "claim" => f.projects.1 = 0,
+        "pr_present" => {
+            f.prs.matching = Some((f.projects.0.issue_url.clone(), "luthor/task".into()))
+        }
+        "pr_error" => f.prs.fail = true,
+        "identity" => f.prs.login = Some("another".into()),
+        "process" => {
+            let (boot, start) = test_process_identity(std::process::id());
+            luthor::state::journal::record_evidence(&mut f.store, "task", Some("attempt-real"), "tracked_descendant", &serde_json::json!({"pid":std::process::id(),"boot_identity":boot,"start_identity":start}).to_string()).unwrap();
+        }
+        "receipt" => {
+            fs::remove_file(receipt_path(&f.config)).unwrap();
+        }
+        "stop" => {
+            luthor::state::journal::record_intent(
+                &mut f.store,
+                "late-stop",
+                "task",
+                Some("attempt-real"),
+                "stop",
+                "{}",
+            )
+            .unwrap();
+        }
+        "launch" => f.launcher.fail = true,
+        _ => unreachable!(),
+    }
+}
+
+fn assert_refusal_decision(f: &mut Fixture, refusal: &str) {
+    if refusal == "stop" {
+        let report = f.schedule().unwrap();
+        assert_eq!(
+            report.automatic_retries[0].decision,
+            RetryDecision::Ineligible
+        );
+    } else {
+        if refusal == "launch" {
+            let error = f.schedule().unwrap_err();
+            let diagnostic = error.diagnostic();
+            assert_eq!(diagnostic["task_id"], "task");
+            assert!(
+                diagnostic["reason"]
+                    .as_str()
+                    .unwrap()
+                    .contains("execution is unavailable")
+            );
+        } else {
+            let report = f.schedule().unwrap();
+            assert_eq!(
+                report.automatic_retries[0].decision,
+                RetryDecision::AdmissionFailed
+            );
+            let failure = report.automatic_retries[0].failure.as_ref().unwrap();
+            assert_eq!(failure.task_id, "task");
+            assert_eq!(failure.attempt_id, "attempt-real");
+            assert_eq!(failure.check, "retry_admission");
+            assert!(!failure.reason.is_empty());
+            assert!(report.launched.is_empty());
+        }
+        assert_eq!(
+            evidence_payloads(&f.store, "task", "attempt-real", "automatic_retry_failed")
+                .unwrap()
+                .len(),
+            1,
+            "{refusal}"
+        );
+    }
 }

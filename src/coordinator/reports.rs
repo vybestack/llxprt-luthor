@@ -65,6 +65,7 @@ pub struct ScheduleReport {
     pub launched: Vec<LaunchPlan>,
     pub skipped_existing: Vec<(String, String)>,
     pub capacity_full: bool,
+    pub admission_failures: Vec<super::admission::TaskAdmissionFailure>,
     pub disk_space: Option<crate::disk::DiskSpace>,
     pub pr_repair: PrRepairReport,
     pub pr_merge: super::pr_merge::MergeReport,

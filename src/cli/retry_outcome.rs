@@ -21,5 +21,21 @@ pub(crate) fn present(conn: &Connection, task: &str, output: &mut Value) -> Resu
     output["worker_outcome"] = json!(observation.as_ref().map(|value| &value.outcome));
     output["worker_outcome_observed_at_unix_secs"] =
         json!(observation.map(|value| value.observed_at_unix_secs));
+    let failure: Option<String> = conn
+        .query_row(
+            "SELECT payload FROM evidence WHERE task_id=?1 AND kind='scheduling_admission_failed'
+         AND (attempt_id=(SELECT id FROM attempts WHERE task_id=?1 ORDER BY rowid DESC LIMIT 1)
+              OR NOT EXISTS(SELECT 1 FROM attempts WHERE task_id=?1))
+         ORDER BY sequence DESC LIMIT 1",
+            [task],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|_| CliError::Database)?;
+    let failure = failure
+        .map(|payload| serde_json::from_str::<crate::coordinator::TaskAdmissionFailure>(&payload))
+        .transpose()
+        .map_err(|_| CliError::Database)?;
+    output["scheduling_failure"] = json!(failure);
     Ok(())
 }

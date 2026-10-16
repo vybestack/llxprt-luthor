@@ -133,6 +133,24 @@ pub(crate) struct OperatorRecoveryAudit<'a> {
 }
 
 impl EffectiveConfigSnapshot {
+    /// Discovery rules do not rewrite a selected task. Only its own mapping
+    /// participates in continuation authorization; worker template changes are
+    /// explicitly audited by the retry path.
+    pub fn task_differing_fields(&self, other: &Self, repository: &str) -> Vec<&'static str> {
+        let mut original = self.clone();
+        let mut current = other.clone();
+        current.initial = original.initial.clone();
+        current.resume = original.resume.clone();
+        current.sources = original.sources.clone();
+        original
+            .mappings
+            .retain(|m| m.tracker_repository == repository);
+        current
+            .mappings
+            .retain(|m| m.tracker_repository == repository);
+        original.differing_fields(&current)
+    }
+
     /// Names every field that differs, for operator-facing explanations of why
     /// a task selected under another configuration is not acted on.
     pub fn differing_fields(&self, other: &Self) -> Vec<&'static str> {

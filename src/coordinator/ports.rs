@@ -24,8 +24,12 @@ pub enum DispatchError {
     PullRequest(#[from] LookupError),
     #[error(transparent)]
     Supervisor(#[from] SupervisorError),
+    #[error("retry worktree ownership unavailable")]
+    RetryOwnershipUnavailable,
     #[error("retry held: {reason}")]
     RetryHeld { reason: String },
+    #[error("retry configuration mismatch: {fields:?}")]
+    ConfigMismatch { fields: Vec<String> },
     #[error("claim changed before launch")]
     ChangedClaim,
     #[error("pull request is no longer absent")]
@@ -74,6 +78,8 @@ pub(crate) fn dispatch_failure_reason(
         }
         DispatchError::Supervisor(_) => "launch preparation or dispatch failed",
         DispatchError::RetryHeld { .. } => "retry held before launch",
+        DispatchError::RetryOwnershipUnavailable => "retry worktree ownership unavailable",
+        DispatchError::ConfigMismatch { .. } => "retry configuration mismatch",
         DispatchError::State(_) => "state transition failed",
     }
 }
@@ -200,6 +206,13 @@ fn verify_local_pr_tip(
 
 #[derive(Debug, Error)]
 pub enum ScheduleError {
+    #[error("task {task_id} attempt {attempt_id} check {check}: {source}")]
+    Task {
+        task_id: String,
+        attempt_id: String,
+        check: &'static str,
+        source: Box<DispatchError>,
+    },
     #[error(transparent)]
     Dispatch(#[from] DispatchError),
     #[error(transparent)]
