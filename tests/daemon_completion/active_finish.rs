@@ -257,3 +257,68 @@ fn daemon_retains_legacy_pause_hold_for_conflicting_prs() {
         );
     }
 }
+
+#[test]
+fn daemon_retries_legacy_pause_pr_verification_after_transient_read_failure() {
+    let (f, task, attempt) = published_worker();
+    legacy_pause_hold(&f, &task, &attempt);
+    let gh = f.root.path().join("gh");
+    let script = fs::read_to_string(&gh).unwrap();
+    // Fail the authenticated-identity read in exact PR verification, after
+    // the open-PR lookup succeeded (the issue's `pause PR present` case).
+    let route = "user)";
+    assert_eq!(script.matches(route).count(), 1);
+    fs::write(
+        &gh,
+        script.replace(route, &format!("{route} printf 'HTTP 500' >&2; exit 1;")),
+    )
+    .unwrap();
+    let report = f.cycle();
+    assert_eq!(report["reconciliation"][0]["status"], "held", "{report}");
+    {
+        let store = StateStore::open(&f.config.state_root, 1).unwrap();
+        assert_eq!(
+            task_records::held_reason(&store, &task).unwrap().as_deref(),
+            Some("exit PR identity unavailable")
+        );
+        assert_eq!(
+            task_records::task_phase(&store, &task).unwrap().as_deref(),
+            Some("held")
+        );
+        let observations =
+            journal::evidence_payloads(&store, &task, &attempt, "pause_pr_lookup").unwrap();
+        let proof: Value = serde_json::from_str(observations.last().unwrap()).unwrap();
+        assert_eq!(proof["status"]["status"], "open");
+        assert_eq!(
+            luthor::state::scheduling::pending_attempts(&store).unwrap(),
+            vec![(task.clone(), attempt.clone())]
+        );
+        assert!(luthor::state::scheduling::ensure_dispatch_capacity(&store).is_err());
+        assert!(
+            journal::evidence_payloads(&store, &task, &attempt, "verified_open_pr")
+                .unwrap()
+                .is_empty()
+        );
+    }
+    // Restore the upstream read, not local state. The next daemon execute cycle
+    // must finish the same stopped attempt without a manual reconcile command.
+    fs::write(&gh, script).unwrap();
+    assert_eq!(f.cycle()["reconciliation"][0]["status"], "completed");
+    let store = StateStore::open(&f.config.state_root, 1).unwrap();
+    assert_eq!(
+        task_records::task_phase(&store, &task).unwrap().as_deref(),
+        Some("pr_complete")
+    );
+    assert!(luthor::state::scheduling::ensure_dispatch_capacity(&store).is_ok());
+    assert!(
+        luthor::state::scheduling::pending_attempts(&store)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        journal::evidence_payloads(&store, &task, &attempt, "verified_open_pr")
+            .unwrap()
+            .len(),
+        1
+    );
+}
