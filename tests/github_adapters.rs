@@ -17,7 +17,7 @@ fn gh_script(script: &str) -> (tempfile::TempDir, PathBuf) {
 fn project_page() -> Value {
     json!({"data":{"node":{"items":{
         "nodes":[{"id":"ITEM", "content":{
-            "__typename":"Issue", "id":"ISSUE", "number":7,
+            "__typename":"Issue","state":"OPEN","labels":{"nodes":[{"name":"ready"}],"pageInfo":{"hasNextPage":false}},"assignees":{"nodes":[],"pageInfo":{"hasNextPage":false}},"milestone":null, "id":"ISSUE", "number":7,
             "repository":{"id":"REPO", "nameWithOwner":"org/repo"}},
             "fieldValues":{"nodes":[], "pageInfo":{"hasNextPage":false}}}],
         "pageInfo":{"hasNextPage":false,"endCursor":null}}}}})
@@ -100,6 +100,12 @@ fn issue_item() -> ProjectItem {
         repository: "org/repo".into(),
         tracker_repo_id: "REPO".into(),
         issue_number: 7,
+        summary: Some(luthor::github::project::ProjectIssueSummary {
+            state: "open".into(),
+            assignees: vec![],
+            labels: vec!["ready".into()],
+            milestone: None,
+        }),
         fields: vec![],
         unsupported_fields: vec![],
     }
@@ -304,4 +310,44 @@ fn check_and_status_page_caps_do_not_change_pr_detail() {
         checks_detail(&empty_runs, &at_cap)["luthor_checks"],
         json!(["legacy:failure"])
     );
+}
+
+#[test]
+fn project_query_requests_complete_eligibility_fields_and_preserves_summary() {
+    let response = project_page();
+    let (dir, path) = gh_script(&format!(
+        "cd -- \"$(dirname -- \"$0\")\" || exit 1\nprintf '%s\\n' \"$*\" > query\nprintf '%s' '{response}'"
+    ));
+    let page = GhProjectReader::new(path).page("P", None).unwrap();
+    let summary = page.items[0].summary.as_ref().unwrap();
+    assert_eq!(summary.state, "open");
+    assert_eq!(summary.labels, vec!["ready"]);
+    assert!(summary.assignees.is_empty());
+    assert_eq!(summary.milestone, None);
+    let query = fs::read_to_string(dir.path().join("query")).unwrap();
+    for field in [
+        "id number state",
+        "labels(first: 100) { nodes { name } pageInfo { hasNextPage } }",
+        "assignees(first: 100) { nodes { login } pageInfo { hasNextPage } }",
+        "milestone { title }",
+        "repository { id nameWithOwner }",
+    ] {
+        assert!(query.contains(field), "missing {field}");
+    }
+}
+
+#[test]
+fn legacy_saved_project_references_remain_readable_without_discovery_summary() {
+    let mut legacy = serde_json::to_value(issue_item()).unwrap();
+    legacy.as_object_mut().unwrap().remove("summary");
+    let item: ProjectItem = serde_json::from_value(legacy.clone()).unwrap();
+    assert!(item.summary.is_none());
+    assert_eq!(serde_json::to_value(&item).unwrap(), legacy);
+    let issue = issue_response();
+    let (_dir, path) = gh_script(&format!(
+        "case \"$2\" in repos/org/repo) printf '%s' '{{\"node_id\":\"REPO\"}}';; *) printf '%s' '{issue}';; esac"
+    ));
+    let confirmed = GhProjectReader::new(path).issue(&item).unwrap();
+    assert_eq!(confirmed.node_id, item.issue_node_id);
+    assert_eq!(confirmed.number, item.issue_number);
 }

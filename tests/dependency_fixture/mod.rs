@@ -136,7 +136,11 @@ if grep -q 'Forbidden' "$file.json"; then exit 1; fi
     pub fn assert_read_only(&self) {
         let log = fs::read_to_string(self.dir.path().join("invocations.log")).unwrap();
         assert!(!log.contains("-X"));
-        assert!(!log.contains("assignees"));
+        // The project query reads assignees; assignment endpoints remain forbidden.
+        assert!(
+            log.lines()
+                .all(|line| { line.starts_with("api graphql ") || !line.contains("assignees") })
+        );
         assert!(!log.contains("initial"));
         assert!(!log.contains("resume"));
         assert!(!log.contains("git "));
@@ -151,7 +155,7 @@ fn issue(repository: &str, number: u64) -> Value {
 }
 
 fn item(number: u64) -> Value {
-    json!({"id":format!("ITEM{number}"),"content":{"__typename":"Issue",
+    json!({"id":format!("ITEM{number}"),"content":{"__typename":"Issue","state":"OPEN","labels":{"nodes":[{"name":"ready"}],"pageInfo":{"hasNextPage":false}},"assignees":{"nodes":[],"pageInfo":{"hasNextPage":false}},"milestone":null,
         "id":format!("ISSUE{number}"),"number":number,
         "repository":{"id":"REPO","nameWithOwner":"org/tracker"}},
         "fieldValues":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}})

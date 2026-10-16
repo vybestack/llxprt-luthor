@@ -8,8 +8,21 @@ pub struct ProjectItem {
     pub repository: String,
     pub tracker_repo_id: String,
     pub issue_number: u64,
+    /// Required on fresh project pages; absent on legacy saved/direct references.
+    /// Missing evidence must never authorize discovery or replace REST confirmation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<ProjectIssueSummary>,
     pub fields: Vec<(String, String)>,
     pub unsupported_fields: Vec<String>,
+}
+
+/// Project-query evidence is only a discovery filter, never claim authorization.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectIssueSummary {
+    pub state: String,
+    pub assignees: Vec<String>,
+    pub labels: Vec<String>,
+    pub milestone: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -1,6 +1,6 @@
 #[test]
 fn skips_pull_requests_and_continues_pagination() {
-    let mixed = r#"{"data":{"node":{"items":{"nodes":[{"id":"PVTI_PR","content":{"__typename":"PullRequest","id":"PR1"},"fieldValues":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}},{"id":"PVTI_ISSUE","content":{"__typename":"Issue","id":"ISSUE1","number":7,"repository":{"id":"REPO1","nameWithOwner":"org/tracker"}},"fieldValues":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}],"pageInfo":{"hasNextPage":true,"endCursor":"NEXT"}}}}}"#;
+    let mixed = r#"{"data":{"node":{"items":{"nodes":[{"id":"PVTI_PR","content":{"__typename":"PullRequest","id":"PR1"},"fieldValues":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}},{"id":"PVTI_ISSUE","content":{"__typename":"Issue","state":"OPEN","labels":{"nodes":[{"name":"ready"}],"pageInfo":{"hasNextPage":false}},"assignees":{"nodes":[],"pageInfo":{"hasNextPage":false}},"milestone":null,"id":"ISSUE1","number":7,"repository":{"id":"REPO1","nameWithOwner":"org/tracker"}},"fieldValues":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}],"pageInfo":{"hasNextPage":true,"endCursor":"NEXT"}}}}}"#;
     let final_page = r#"{"data":{"node":{"items":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}"#;
     let dir = tempdir().unwrap();
     let path = dir.path().join("gh");
@@ -48,6 +48,7 @@ fn direct_issue_requires_stable_id_for_present_milestone() {
             repository: "org/tracker".into(),
             tracker_repo_id: "REPO1".into(),
             issue_number: 7,
+            summary: None,
             fields: vec![],
             unsupported_fields: Vec::new(),
         };
@@ -60,8 +61,8 @@ fn direct_issue_requires_stable_id_for_present_milestone() {
 
 #[test]
 fn fake_gh_paginates_two_pages_and_preserves_requested_fields() {
-    let first = r#"{"data":{"node":{"items":{"nodes":[{"id":"PVTI1","content":{"__typename":"Issue","id":"ISSUE1","number":7,"repository":{"id":"REPO1","nameWithOwner":"org/tracker"}},"fieldValues":{"nodes":[{"__typename":"ProjectV2ItemFieldSingleSelectValue","name":"Ready","field":{"name":"Status"}},{"__typename":"ProjectV2ItemFieldDateValue","field":{"name":"Due"}}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}],"pageInfo":{"hasNextPage":true,"endCursor":"CURSOR1"}}}}}"#;
-    let second = r#"{"data":{"node":{"items":{"nodes":[{"id":"PVTI2","content":{"__typename":"Issue","id":"ISSUE2","number":8,"repository":{"id":"REPO1","nameWithOwner":"org/tracker"}},"fieldValues":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}"#;
+    let first = r#"{"data":{"node":{"items":{"nodes":[{"id":"PVTI1","content":{"__typename":"Issue","state":"OPEN","labels":{"nodes":[{"name":"ready"}],"pageInfo":{"hasNextPage":false}},"assignees":{"nodes":[],"pageInfo":{"hasNextPage":false}},"milestone":null,"id":"ISSUE1","number":7,"repository":{"id":"REPO1","nameWithOwner":"org/tracker"}},"fieldValues":{"nodes":[{"__typename":"ProjectV2ItemFieldSingleSelectValue","name":"Ready","field":{"name":"Status"}},{"__typename":"ProjectV2ItemFieldDateValue","field":{"name":"Due"}}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}],"pageInfo":{"hasNextPage":true,"endCursor":"CURSOR1"}}}}}"#;
+    let second = r#"{"data":{"node":{"items":{"nodes":[{"id":"PVTI2","content":{"__typename":"Issue","state":"OPEN","labels":{"nodes":[{"name":"ready"}],"pageInfo":{"hasNextPage":false}},"assignees":{"nodes":[],"pageInfo":{"hasNextPage":false}},"milestone":null,"id":"ISSUE2","number":8,"repository":{"id":"REPO1","nameWithOwner":"org/tracker"}},"fieldValues":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}"#;
     let dir = tempdir().unwrap();
     let path = dir.path().join("gh");
     use std::os::unix::fs::PermissionsExt;
@@ -101,7 +102,7 @@ fn reader(response: &str) -> (tempfile::TempDir, GhProjectReader) {
 }
 fn response(field_values: &str) -> String {
     format!(
-        r#"{{"data":{{"node":{{"items":{{"nodes":[{{"id":"PVTI1","content":{{"__typename":"Issue","id":"ISSUE1","number":7,"repository":{{"id":"REPO1","nameWithOwner":"org/tracker"}}}},"fieldValues":{field_values}}}],"pageInfo":{{"hasNextPage":false,"endCursor":null}}}}}}}}}}"#
+        r#"{{"data":{{"node":{{"items":{{"nodes":[{{"id":"PVTI1","content":{{"__typename":"Issue","state":"OPEN","labels":{{"nodes":[{{"name":"ready"}}],"pageInfo":{{"hasNextPage":false}}}},"assignees":{{"nodes":[],"pageInfo":{{"hasNextPage":false}}}},"milestone":null,"id":"ISSUE1","number":7,"repository":{{"id":"REPO1","nameWithOwner":"org/tracker"}}}},"fieldValues":{field_values}}}],"pageInfo":{{"hasNextPage":false,"endCursor":null}}}}}}}}}}"#
     )
 }
 #[test]
@@ -310,6 +311,7 @@ fn direct_issue_caches_repository_and_validates_identity_and_urls() {
         repository: "org/tracker".into(),
         tracker_repo_id: "REPO1".into(),
         issue_number: 7,
+        summary: None,
         fields: vec![],
         unsupported_fields: Vec::new(),
     };
@@ -334,6 +336,7 @@ fn direct_issue_reports_when_it_was_closed_and_rejects_a_malformed_close_time() 
         repository: "org/tracker".into(),
         tracker_repo_id: "REPO1".into(),
         issue_number: 7,
+        summary: None,
         fields: vec![],
         unsupported_fields: Vec::new(),
     };
@@ -396,6 +399,7 @@ fn direct_issue_rejects_repository_id_and_renamed_repository_urls() {
             repository: "org/tracker".into(),
             tracker_repo_id: "REPO1".into(),
             issue_number: 7,
+            summary: None,
             fields: vec![],
             unsupported_fields: Vec::new(),
         };
@@ -442,6 +446,7 @@ fn direct_issue_errors_keep_context_for_repository_and_issue_responses() {
         repository: "org/tracker".into(),
         tracker_repo_id: "REPO1".into(),
         issue_number: 7,
+        summary: None,
         fields: vec![],
         unsupported_fields: vec![],
     };
@@ -553,6 +558,7 @@ fn target_item(index: u64, repository: &str, number: u64) -> ProjectItem {
         repository: repository.into(),
         tracker_repo_id: "REPO1".into(),
         issue_number: number,
+        summary: None,
         fields: vec![],
         unsupported_fields: vec![],
     }

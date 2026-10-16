@@ -126,3 +126,8 @@ fn fully_recorded_source_without_attempt_still_blocks_new_selection() {
 fn assignment_observes_durable_claim_intent_before_external_write() {
     claim::assignment::assignment_observes_durable_claim_intent_before_external_write();
 }
+
+#[test]
+fn project_snapshot_never_substitutes_for_preclaim_rest_confirmation() {
+    claim::assignment::project_snapshot_never_substitutes_for_preclaim_rest_confirmation();
+}

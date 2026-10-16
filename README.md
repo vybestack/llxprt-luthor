@@ -116,6 +116,15 @@ rewrite existing task selections or their continuation authorization. This
 implements configured ordering; GitHub blocked-by/sub-issue relationships are
 not automatically imported.
 
+Discovery reads issue state, labels, assignees and milestone from Project content
+and filters closed, assigned, unready, wrong-milestone and out-of-source items
+before per-issue REST reads. Surviving candidates still require exact-identity
+REST confirmation and the existing fresh checks before assignment and launch.
+Only current candidates trigger prerequisite reads; closed prerequisite issues
+are still read to verify satisfaction. Closed ready-labeled history therefore
+adds Project pagination, not per-issue REST calls. Missing, malformed or
+truncated Project eligibility evidence fails explicitly, without a REST fallback.
+
 ## Preview and explicit execution
 
 Start with read-only discovery:

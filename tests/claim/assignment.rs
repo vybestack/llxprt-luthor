@@ -273,3 +273,29 @@ pub(crate) fn assignment_observes_durable_claim_intent_before_external_write() {
     assert_claim_state(&dir, "claimed", true, true);
     assert_eq!(*projects.assignees.borrow(), ["bot"]);
 }
+
+pub(crate) fn project_snapshot_never_substitutes_for_preclaim_rest_confirmation() {
+    let (dir, candidate, mut projects, mut writer, mut store) = claim_fixture();
+    let summary = projects.item.summary.as_ref().unwrap();
+    assert_eq!(summary.state, "open");
+    assert!(summary.assignees.is_empty());
+    assert_eq!(summary.labels, vec!["ready"]);
+    projects.failed_issue_read = Some(1);
+    let mut prs = EmptyPullRequests;
+    assert!(matches!(
+        claim(
+            &mut store,
+            "task",
+            &candidate,
+            "bot",
+            &mut projects,
+            &mut prs,
+            &mut writer,
+        ),
+        Err(ClaimError::Source(_))
+    ));
+    assert_eq!(projects.issue_reads, 1);
+    assert_eq!(writer.calls, 0);
+    assert!(projects.assignees.borrow().is_empty());
+    assert_claim_state(&dir, "preparing", false, false);
+}
