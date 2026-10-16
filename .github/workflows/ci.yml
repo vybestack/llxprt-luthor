@@ -1,9 +1,9 @@
 name: Rust quality gates
 on:
   push:
-    branches: [work/luthor-issue-to-pr-daemon, 'luthor/**']
+    branches: [main, 'luthor/**']
   pull_request:
-    branches: [work/luthor-issue-to-pr-daemon]
+    branches: [main]
 permissions:
   contents: read
 jobs:

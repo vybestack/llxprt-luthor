@@ -839,10 +839,10 @@ When the tracker and code repositories differ, the closing line is instead
 `Fixes` alone cannot satisfy it. Author, claim, base and head checks are unchanged.
 
 GitHub closing keywords in PR bodies only automatically close issues when the
-PR targets the code repository's **default branch**. The maintained Luthor base
-is `work/luthor-issue-to-pr-daemon`, while this repository's default is
-`bootstrap/luthor-base`. These references improve linking but cannot by
-themselves guarantee closure after merge to the maintained base. With the
+PR targets the code repository's **default branch**. This repository's default
+and maintained base is `main`, but a mapped base in another repository may not
+be its default branch, so these references improve linking without by
+themselves guaranteeing closure after merge to the mapped base. With the
 mapping's merge policy enabled, Luthor confirms its exact-head merge, then
 closes a still-open tracker issue with a comment naming the PR and merged head,
 and journals the closure. With merging disabled, operators must still verify
