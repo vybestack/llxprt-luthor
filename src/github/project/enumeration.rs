@@ -10,8 +10,9 @@ pub fn enumerate<R: ProjectReader>(
     enumerate_with(
         reader,
         project_id,
-        |item| repositories.contains(&item.repository),
+        |item| Ok(repositories.contains(&item.repository)),
         |_, error| Err(ProjectError::IssueRead(error)),
+        |error| Err(ProjectError::Read(error)),
     )
 }
 
@@ -25,37 +26,60 @@ pub fn enumerate_target<R: ProjectReader>(
     enumerate_with(
         reader,
         project_id,
-        |item| item.repository == repository && item.issue_number == number,
+        |item| Ok(item.repository == repository && item.issue_number == number),
         |_, error| Err(ProjectError::IssueRead(error)),
+        |error| Err(ProjectError::Read(error)),
     )
 }
 
-pub(crate) fn enumerate_with<R: ProjectReader>(
+/// Enumerates all pages and validates identities even for filtered-out items.
+/// Matching items are always confirmed by an exact-identity direct issue read.
+pub fn enumerate_matching<R: ProjectReader, E: From<ProjectError>>(
     reader: &mut R,
     project_id: &str,
-    mut matches: impl FnMut(&ProjectItem) -> bool,
-    mut failed_issue: impl FnMut(&ProjectItem, ProjectReadError) -> Result<(), ProjectError>,
-) -> Result<Vec<(ProjectItem, Issue)>, ProjectError> {
+    matches: impl FnMut(&ProjectItem) -> Result<bool, E>,
+) -> Result<Vec<(ProjectItem, Issue)>, E> {
+    enumerate_with(
+        reader,
+        project_id,
+        matches,
+        |_, error| Err(ProjectError::IssueRead(error).into()),
+        |error| Err(ProjectError::Read(error).into()),
+    )
+}
+
+pub(crate) fn enumerate_with<R: ProjectReader, E: From<ProjectError>>(
+    reader: &mut R,
+    project_id: &str,
+    mut matches: impl FnMut(&ProjectItem) -> Result<bool, E>,
+    mut failed_issue: impl FnMut(&ProjectItem, ProjectReadError) -> Result<(), E>,
+    mut failed_source: impl FnMut(ProjectReadError) -> Result<(), E>,
+) -> Result<Vec<(ProjectItem, Issue)>, E> {
     let mut cursor = None;
     let mut cursors_seen = HashSet::new();
     let mut items_seen = HashSet::new();
     let mut issues_seen = HashSet::new();
     let mut result = Vec::new();
     loop {
-        let page = reader
-            .page(project_id, cursor.as_deref())
-            .map_err(ProjectError::Read)?;
+        let page = match reader.page(project_id, cursor.as_deref()) {
+            Ok(page) => page,
+            Err(error) => {
+                failed_source(error)?;
+                // An incomplete source cannot authorize dispatch, including earlier pages.
+                return Ok(Vec::new());
+            }
+        };
         for item in page.items {
             if !items_seen.insert(item.item_id.clone()) {
-                return Err(ProjectError::Duplicate(item.item_id));
+                return Err(ProjectError::Duplicate(item.item_id).into());
             }
             if item.issue_node_id.is_empty() {
-                return Err(ProjectError::InvalidItem(item.item_id));
+                return Err(ProjectError::InvalidItem(item.item_id).into());
             }
             if !issues_seen.insert(item.issue_node_id.clone()) {
-                return Err(ProjectError::Duplicate(item.issue_node_id));
+                return Err(ProjectError::Duplicate(item.issue_node_id).into());
             }
-            if !matches(&item) {
+            if !matches(&item)? {
                 continue;
             }
             let issue = match reader.issue(&item) {
@@ -73,7 +97,7 @@ pub(crate) fn enumerate_with<R: ProjectReader>(
         }
         let next = page.end_cursor.ok_or(ProjectError::MissingCursor)?;
         if !cursors_seen.insert(next.clone()) {
-            return Err(ProjectError::RepeatedCursor);
+            return Err(ProjectError::RepeatedCursor.into());
         }
         cursor = Some(next);
     }

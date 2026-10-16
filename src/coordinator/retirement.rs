@@ -272,6 +272,7 @@ fn observe_issue<P: ProjectReader>(projects: &mut P, candidate: &Candidate) -> I
         repository: candidate.repository.clone(),
         tracker_repo_id: candidate.tracker_repo_id.clone(),
         issue_number: candidate.issue_number,
+        summary: None,
         fields: vec![],
         unsupported_fields: vec![],
     };

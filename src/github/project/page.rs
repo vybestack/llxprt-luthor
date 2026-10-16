@@ -2,6 +2,7 @@ use serde_json::Value;
 
 use super::{
     response::{classify_graphql_errors, item_error, required_string},
+    summary::parse_summary,
     types::{Page, ProjectItem, ProjectReadError, ReadCategory, ReadOperation},
 };
 
@@ -118,6 +119,7 @@ fn parse_item(node: &Value, project_id: &str) -> Result<Option<ProjectItem>, Pro
         repository: repository.to_owned(),
         tracker_repo_id,
         issue_number,
+        summary: Some(parse_summary(content)?),
         fields: fields.supported,
         unsupported_fields: fields.unsupported,
     }))

@@ -107,6 +107,12 @@ pub(super) fn claim_fixture_with_milestone(
             repository: "org/tracker".into(),
             tracker_repo_id: "R1".into(),
             issue_number: 7,
+            summary: Some(luthor::github::project::ProjectIssueSummary {
+                state: "open".into(),
+                assignees: vec![],
+                labels: vec!["ready".into()],
+                milestone: candidate.milestone_title.clone(),
+            }),
             fields: vec![],
             unsupported_fields: vec![],
         },

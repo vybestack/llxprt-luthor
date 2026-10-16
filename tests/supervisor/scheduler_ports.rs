@@ -22,6 +22,12 @@ impl ProjectReader for OtherProject {
                 repository: c.repository.clone(),
                 tracker_repo_id: c.tracker_repo_id.clone(),
                 issue_number: c.issue_number,
+                summary: Some(luthor::github::project::ProjectIssueSummary {
+                    state: "open".into(),
+                    assignees: vec![],
+                    labels: vec!["ready".into()],
+                    milestone: None,
+                }),
                 fields: vec![],
                 unsupported_fields: vec![],
             }],

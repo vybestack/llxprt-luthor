@@ -1,4 +1,5 @@
 //! Unrestricted discovery must not depend on unrelated repositories' issue APIs.
+mod discovery_prefilter;
 use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf};
 
 use luthor::{
@@ -19,7 +20,7 @@ fn node(repository: &str, number: u64) -> Value {
     json!({
         "id": format!("ITEM_{repository}_{number}"),
         "content": {
-            "__typename": "Issue", "id": format!("ISSUE_{repository}_{number}"),
+            "__typename": "Issue","state":"OPEN","labels":{"nodes":[{"name":"ready"}],"pageInfo":{"hasNextPage":false}},"assignees":{"nodes":[],"pageInfo":{"hasNextPage":false}},"milestone":{"title":"planned"}, "id": format!("ISSUE_{repository}_{number}"),
             "number": number,
             "repository": {"id": format!("REPO_{repository}"), "nameWithOwner": repository}
         },
@@ -119,7 +120,7 @@ impl Fixture {
                 .unwrap();
             let number = issue["number"].as_u64().unwrap();
             script.push_str(&format!(
-                "'api repos/{repository}/issues/{number}?per_page=100') cat issue{index}.json;;\n"
+                "'api repos/{repository}/issues/{number}?per_page=100'|'api repos/{repository}/issues/{number}') cat issue{index}.json;;\n"
             ));
         }
         // All unrelated direct reads would fail, rather than return absent issues.
@@ -184,7 +185,7 @@ fn shared_project_reads_only_configured_endpoints_and_refreshes_every_candidate(
 }
 
 #[test]
-fn repositories_from_every_configured_source_are_read_without_eligibility_bypass() {
+fn repositories_from_every_configured_source_are_filtered_without_eligibility_bypass() {
     let mut fixture = Fixture::shared_project();
     fixture.pages[2]["data"]["node"]["items"]["nodes"]
         .as_array_mut()
@@ -213,14 +214,14 @@ fn repositories_from_every_configured_source_are_read_without_eligibility_bypass
             .iter()
             .filter(|read| read.contains("/issues/"))
             .count(),
-        8
+        3
     );
     assert_eq!(
         reads
             .iter()
             .filter(|read| *read == "api repos/org/other/issues/4?per_page=100")
             .count(),
-        2
+        0
     );
     assert!(reads.iter().all(|read| !read.contains("unrelated/")));
 }

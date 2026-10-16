@@ -29,6 +29,12 @@ fn issue_item() -> ProjectItem {
         repository: "org/repo".into(),
         tracker_repo_id: "REPO".into(),
         issue_number: 7,
+        summary: Some(luthor::github::project::ProjectIssueSummary {
+            state: "open".into(),
+            assignees: vec![],
+            labels: vec!["ready".into()],
+            milestone: None,
+        }),
         fields: vec![],
         unsupported_fields: vec![],
     }

@@ -201,7 +201,7 @@ pub(crate) fn reconcile_prelaunch_claim_uses_only_read_only_gh_and_pause_still_n
     fs::write(&gh, format!(r#"#!/bin/sh
 printf '%s\n' "$*" >> '{}'
 case "$*" in
-  *graphql*) printf '%s\n' '{{"data":{{"node":{{"items":{{"nodes":[{{"id":"ITEM","content":{{"__typename":"Issue","id":"ISSUE","number":7,"repository":{{"id":"REPO","nameWithOwner":"org/tracker"}}}},"fieldValues":{{"nodes":[],"pageInfo":{{"hasNextPage":false}}}}}}],"pageInfo":{{"hasNextPage":false,"endCursor":null}}}}}}}}}}' ;;
+  *graphql*) printf '%s\n' '{{"data":{{"node":{{"items":{{"nodes":[{{"id":"ITEM","content":{{"__typename":"Issue","state":"OPEN","labels":{{"nodes":[{{"name":"ready"}}],"pageInfo":{{"hasNextPage":false}}}},"assignees":{{"nodes":[],"pageInfo":{{"hasNextPage":false}}}},"milestone":null,"id":"ISSUE","number":7,"repository":{{"id":"REPO","nameWithOwner":"org/tracker"}}}},"fieldValues":{{"nodes":[],"pageInfo":{{"hasNextPage":false}}}}}}],"pageInfo":{{"hasNextPage":false,"endCursor":null}}}}}}}}}}' ;;
   *repos/org/tracker/issues/7*) printf '%s\n' '{{"node_id":"ISSUE","number":7,"repository_url":"https://api.github.com/repos/org/tracker","html_url":"https://github.com/org/tracker/issues/7","state":"open","assignees":[{{"login":"agent"}}],"labels":[{{"name":"ready"}}],"milestone":null}}' ;;
   *repos/org/tracker*) printf '%s\n' '{{"node_id":"REPO"}}' ;;
   *) exit 91 ;;

@@ -136,7 +136,7 @@ fn assert_cleanup_report(report: &Value) {
 
 fn gh_fixture(root: &Path, terminal: &Value) -> std::path::PathBuf {
     let project = json!({"data":{"node":{"items":{
-        "nodes":[{"id":"item-9","content":{"__typename":"Issue","id":"issue-9","number":9,
+        "nodes":[{"id":"item-9","content":{"__typename":"Issue","state":"OPEN","labels":{"nodes":[{"name":"ready"}],"pageInfo":{"hasNextPage":false}},"assignees":{"nodes":[],"pageInfo":{"hasNextPage":false}},"milestone":null,"id":"issue-9","number":9,
             "repository":{"id":"repo","nameWithOwner":"org/tracker"}},
             "fieldValues":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}],
         "pageInfo":{"hasNextPage":false,"endCursor":null}

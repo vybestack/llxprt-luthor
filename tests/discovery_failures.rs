@@ -11,6 +11,7 @@ struct Reader {
     fail_project: bool,
     fail_issue: bool,
     malformed: bool,
+    missing_summary: bool,
 }
 
 fn read_error(operation: ReadOperation, malformed: bool) -> ProjectReadError {
@@ -57,6 +58,16 @@ impl ProjectReader for Reader {
                 repository: "org/repo".into(),
                 tracker_repo_id: "REPO".into(),
                 issue_number: number,
+                summary: if self.missing_summary {
+                    None
+                } else {
+                    Some(luthor::github::project::ProjectIssueSummary {
+                        state: "open".into(),
+                        assignees: vec![],
+                        labels: vec!["ready".into()],
+                        milestone: None,
+                    })
+                },
                 fields: vec![],
                 unsupported_fields: vec![],
             }],
@@ -119,6 +130,7 @@ fn exhausted_project_read_skips_only_its_source_even_with_shared_repository() {
         fail_project: true,
         fail_issue: false,
         malformed: false,
+        missing_summary: false,
     };
     let report = eligibility::discover(&mut reader, &sources(), &mappings(), None).unwrap();
     assert_eq!(report.candidates.len(), 1);
@@ -134,6 +146,7 @@ fn exhausted_candidate_read_skips_only_unverified_issue() {
         fail_project: false,
         fail_issue: true,
         malformed: false,
+        missing_summary: false,
     };
     let report = eligibility::discover(&mut reader, &sources(), &mappings(), None).unwrap();
     assert_eq!(report.candidates.len(), 1);
@@ -150,7 +163,25 @@ fn malformed_reader_evidence_is_not_external_unavailability() {
             fail_project,
             fail_issue: !fail_project,
             malformed: true,
+            missing_summary: false,
         };
         assert!(eligibility::discover(&mut reader, &sources(), &mappings(), None).is_err());
     }
+}
+
+#[test]
+fn missing_project_summary_is_an_error_not_a_rest_fallback() {
+    let mut reader = Reader {
+        fail_project: false,
+        fail_issue: true,
+        malformed: false,
+        missing_summary: true,
+    };
+    let error = eligibility::discover(&mut reader, &sources(), &mappings(), None).unwrap_err();
+    assert!(matches!(
+        error,
+        eligibility::EligibilityError::Project(
+            luthor::github::project::ProjectError::Read(ref error)
+        ) if error.code == "missing-project-issue-summary"
+    ));
 }

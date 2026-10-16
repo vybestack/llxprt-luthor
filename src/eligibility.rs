@@ -1,8 +1,6 @@
 use crate::{
     config::{Mapping, Marker, Source},
-    github::project::{
-        Issue, ProjectError, ProjectItem, ProjectReader, enumerate, enumerate_target,
-    },
+    github::project::{Issue, ProjectError, ProjectItem, ProjectReader, enumerate_matching},
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -56,12 +54,10 @@ pub fn select<R: ProjectReader>(
     sources: &[Source],
     mappings: &[Mapping],
 ) -> Result<Vec<Candidate>, EligibilityError> {
-    let repositories: Vec<_> = sources
-        .iter()
-        .flat_map(|source| source.repositories.iter().cloned())
-        .collect();
     select_with(reader, sources, mappings, |reader, source| {
-        enumerate(reader, &source.project_id, &repositories)
+        enumerate_matching(reader, &source.project_id, |item| {
+            project_candidate(source, mappings, None, item)
+        })
     })
 }
 
@@ -73,7 +69,9 @@ pub fn select_target<R: ProjectReader>(
     issue_number: u64,
 ) -> Result<Vec<Candidate>, EligibilityError> {
     select_with(reader, sources, mappings, |reader, source| {
-        enumerate_target(reader, &source.project_id, repository, issue_number)
+        enumerate_matching(reader, &source.project_id, |item| {
+            project_candidate(source, mappings, Some((repository, issue_number)), item)
+        })
     })
 }
 
@@ -85,7 +83,7 @@ fn select_with<R, F>(
 ) -> Result<Vec<Candidate>, EligibilityError>
 where
     R: ProjectReader,
-    F: FnMut(&mut R, &Source) -> Result<Vec<(ProjectItem, Issue)>, ProjectError>,
+    F: FnMut(&mut R, &Source) -> Result<Vec<(ProjectItem, Issue)>, EligibilityError>,
 {
     let mut candidates = HashMap::new();
     for source in sources {
@@ -145,7 +143,7 @@ fn add_candidates(
         }
         if issue.state != "open"
             || !issue.assignees.is_empty()
-            || !marker_matches(&source.ready_marker, &item, &issue)
+            || !marker_matches(&source.ready_marker, &item, &issue.labels)
             || source
                 .milestone
                 .as_ref()
@@ -211,14 +209,63 @@ fn dependency_rule(candidate: &Candidate) -> Option<&crate::config::DependencyRu
     })
 }
 
-fn marker_matches(marker: &Marker, item: &ProjectItem, issue: &Issue) -> bool {
+fn marker_matches(marker: &Marker, item: &ProjectItem, labels: &[String]) -> bool {
     match marker {
-        Marker::Label { name } => issue.labels.iter().any(|label| label == name),
+        Marker::Label { name } => labels.iter().any(|label| label == name),
         Marker::ProjectField { name, value } => item
             .fields
             .iter()
             .any(|(field, actual)| field == name && actual == value),
     }
+}
+
+/// GraphQL evidence only excludes items; every surviving candidate still needs
+/// direct REST confirmation and the normal pre-claim revalidation.
+fn project_candidate(
+    source: &Source,
+    mappings: &[Mapping],
+    target: Option<(&str, u64)>,
+    item: &ProjectItem,
+) -> Result<bool, EligibilityError> {
+    if !source.repositories.contains(&item.repository)
+        || target
+            .is_some_and(|(repo, number)| item.repository != repo || item.issue_number != number)
+    {
+        return Ok(false);
+    }
+    if !mappings
+        .iter()
+        .any(|m| m.tracker_repository == item.repository)
+    {
+        return Err(EligibilityError::MissingMapping(item.repository.clone()));
+    }
+    if let Marker::ProjectField { name, .. } = &source.ready_marker
+        && item.unsupported_fields.contains(name)
+    {
+        return Err(EligibilityError::UnsupportedMarkerField {
+            project_id: source.project_id.clone(),
+            item_id: item.item_id.clone(),
+            name: name.clone(),
+        });
+    }
+    let summary = item.summary.as_ref().ok_or_else(|| {
+        ProjectError::Read(crate::github::project::ProjectReadError {
+            operation: crate::github::project::ReadOperation::ProjectPage,
+            project_id: Some(source.project_id.clone()),
+            item_id: Some(item.item_id.clone()),
+            issue_id: Some(item.issue_node_id.clone()),
+            category: crate::github::project::ReadCategory::Malformed,
+            status: None,
+            code: "missing-project-issue-summary".into(),
+        })
+    })?;
+    Ok(summary.state == "open"
+        && summary.assignees.is_empty()
+        && marker_matches(&source.ready_marker, item, &summary.labels)
+        && source
+            .milestone
+            .as_ref()
+            .is_none_or(|required| summary.milestone.as_ref() == Some(required)))
 }
 
 /// Cycle discovery retains external failures as bounded evidence and never selects
@@ -240,12 +287,9 @@ pub fn discover<R: ProjectReader>(
     let mut report = DiscoverySelection::default();
     let mut candidates = HashMap::new();
     for source in sources {
-        let reads = crate::github::project::discover(
-            reader,
-            &source.project_id,
-            &source.repositories,
-            target,
-        )?;
+        let reads = crate::github::project::discover(reader, &source.project_id, |item| {
+            project_candidate(source, mappings, target, item)
+        })?;
         add_candidates(&mut candidates, source, mappings, reads.items)?;
         report
             .candidate_read_failures

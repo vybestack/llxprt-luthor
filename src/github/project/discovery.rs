@@ -28,25 +28,19 @@ pub struct DiscoveryReads {
     pub source_read_failures: Vec<SourceReadFailure>,
 }
 
-pub fn discover<R: ProjectReader>(
+pub fn discover<R: ProjectReader, E: From<ProjectError>>(
     reader: &mut R,
     project_id: &str,
-    repositories: &[String],
-    target: Option<(&str, u64)>,
-) -> Result<DiscoveryReads, ProjectError> {
+    matches: impl FnMut(&ProjectItem) -> Result<bool, E>,
+) -> Result<DiscoveryReads, E> {
     let mut report = DiscoveryReads::default();
-    let result = enumerate_with(
+    report.items = enumerate_with(
         reader,
         project_id,
-        |item| {
-            repositories.contains(&item.repository)
-                && target.is_none_or(|(repo, number)| {
-                    item.repository == repo && item.issue_number == number
-                })
-        },
+        matches,
         |item, error| {
             if !external_read_failure(&error) {
-                return Err(ProjectError::IssueRead(error));
+                return Err(ProjectError::IssueRead(error).into());
             }
             report.candidate_read_failures.push(CandidateReadFailure {
                 project_id: project_id.to_owned(),
@@ -57,19 +51,18 @@ pub fn discover<R: ProjectReader>(
             });
             Ok(())
         },
-    );
-    match result {
-        Ok(items) => report.items = items,
-        Err(ProjectError::Read(error)) if external_read_failure(&error) => {
-            // Discard even earlier pages: an incomplete source cannot authorize dispatch.
+        |error| {
+            if !external_read_failure(&error) {
+                return Err(ProjectError::Read(error).into());
+            }
             report.source_read_failures.push(SourceReadFailure {
                 project_id: project_id.to_owned(),
                 http_status: error.status,
                 code: error.code,
             });
-        }
-        Err(error) => return Err(error),
-    }
+            Ok(())
+        },
+    )?;
     Ok(report)
 }
 
