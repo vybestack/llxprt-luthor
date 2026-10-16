@@ -32,8 +32,11 @@ pub(crate) fn write(reader: &GhPullRequestReader, args: &[&str]) -> Result<Vec<u
     crate::github::budget::command(args);
     let output = Command::new(&reader.executable)
         .args(args)
+        .arg("--include")
         .output()
         .map_err(|_| error(ErrorCategory::Transport, "merge-write-transport", None))?;
+    crate::github::budget::headers(&output.stdout, args.contains(&"graphql"))
+        .map_err(|_| error(ErrorCategory::Malformed, "quota-header-malformed", None))?;
     if !output.status.success() {
         return Err(error(
             ErrorCategory::Unknown,
@@ -41,5 +44,5 @@ pub(crate) fn write(reader: &GhPullRequestReader, args: &[&str]) -> Result<Vec<u
             crate::github::read::http_status(&output.stdout, &output.stderr),
         ));
     }
-    Ok(output.stdout)
+    Ok(crate::github::read::body(&output.stdout).to_vec())
 }

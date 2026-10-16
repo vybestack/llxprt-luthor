@@ -13,9 +13,19 @@ pub(crate) fn cycle_candidates(
     targets: Option<&(String, Vec<u64>)>,
     store: Option<&StateStore>,
 ) -> Result<DiscoverySelection, Error> {
+    if let Some((repository, _)) = targets {
+        validate_target(config, repository)?;
+    }
+    // A known exhausted quota cannot authorize fresh discovery. Keep local
+    // reconciliation and mandatory interrupted-write followup running.
+    if !crate::github::budget::usage()
+        .exhausted(crate::state::github_budget::now()?)
+        .is_empty()
+    {
+        return Ok(DiscoverySelection::default());
+    }
     let mut report = DiscoverySelection::default();
     if let Some((repository, numbers)) = targets {
-        validate_target(config, repository)?;
         for number in numbers {
             let mut selection = eligibility::discover(
                 reader,

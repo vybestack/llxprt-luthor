@@ -18,7 +18,11 @@ pub(crate) fn api(executable: &Path, args: &[&str]) -> std::io::Result<Output> {
                 .args(args)
                 .arg("--include")
                 .output()?;
-            super::budget::headers(&output.stdout, args.contains(&"graphql"))?;
+            let graphql = args.contains(&"graphql");
+            super::budget::headers(&output.stdout, graphql)?;
+            if graphql {
+                super::budget::graphql_response(headers(&output.stdout).0)?;
+            }
             Ok(output)
         },
         thread::sleep,
@@ -88,6 +92,10 @@ pub(crate) fn http_status(stdout: &[u8], stderr: &[u8]) -> Option<u16> {
                     .flatten()
             })
         })
+}
+
+pub(crate) fn body(bytes: &[u8]) -> &[u8] {
+    headers(bytes).0
 }
 
 fn headers(mut bytes: &[u8]) -> (&[u8], Option<Duration>) {

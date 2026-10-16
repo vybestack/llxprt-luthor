@@ -704,3 +704,5 @@ fn low_space_daemon_cycle_reports_hold_without_candidate_reads_claims_or_launch(
     assert_eq!(task_records::task_count(&store).unwrap(), 0);
     assert_eq!(scheduling::reservation_count(&store).unwrap(), 0);
 }
+
+mod budget;

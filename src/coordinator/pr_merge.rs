@@ -53,6 +53,12 @@ pub fn merge_verified_prs<Q: PrMerger>(
             if !authorized
                 && !crate::state::pr_poll::begin(store, &task, "merge", &saved.head_commit_sha)?
             {
+                if let Some(reason) = crate::github::budget::task_deferral_reason(&task) {
+                    report.waiting.push(TaskNote {
+                        task_id: task,
+                        reason,
+                    });
+                }
                 continue;
             }
             let result = inspect_and_finish(store, config, &task, &mapping.merge, prs);

@@ -213,7 +213,10 @@ fn inspect_task<P: ProjectReader, Q: PrHealthReader, L: SupervisorLauncher, I: I
     }
     let saved = pr_repair::saved_pr(&store.connection, task)?;
     if !crate::state::pr_poll::begin(store, task, "repair", &saved.head_commit_sha)? {
-        return Ok(Inspection::Idle);
+        return Ok(match crate::github::budget::task_deferral_reason(task) {
+            Some(reason) => Inspection::Skipped(reason),
+            None => Inspection::Idle,
+        });
     }
     // Exhaustive absence covers a merged/closed PR and leaves cleanup to its
     // separate exact terminal-PR proof. It must never trigger a new PR.

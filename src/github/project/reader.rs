@@ -94,11 +94,39 @@ impl ProjectReader for GhProjectReader {
         project_id: &str,
         cursor: Option<&str>,
     ) -> Result<Page<ProjectItem>, ProjectReadError> {
-        const QUERY: &str = "query($projectId: ID!, $cursor: String) { node(id: $projectId) { ... on ProjectV2 { items(first: 100, after: $cursor) { nodes { id content { __typename ... on Issue { id number state labels(first: 100) { nodes { name } pageInfo { hasNextPage } } assignees(first: 100) { nodes { login } pageInfo { hasNextPage } } milestone { title } repository { id nameWithOwner } } } fieldValues(first: 100) { nodes { __typename ... on ProjectV2ItemFieldSingleSelectValue { name field { ... on ProjectV2SingleSelectField { name } ... on ProjectV2Field { name } } } ... on ProjectV2ItemFieldTextValue { text field { ... on ProjectV2SingleSelectField { name } ... on ProjectV2Field { name } } } ... on ProjectV2ItemFieldIterationValue { field { ... on ProjectV2IterationField { name } } } ... on ProjectV2ItemFieldDateValue { field { ... on ProjectV2Field { name } } } } pageInfo { hasNextPage endCursor } } } pageInfo { hasNextPage endCursor } } } } }";
+        self.read_page(project_id, cursor, None)
+    }
+
+    fn candidate_page(
+        &mut self,
+        project_id: &str,
+        cursor: Option<&str>,
+    ) -> Result<Page<ProjectItem>, ProjectReadError> {
+        self.read_page(project_id, cursor, Some("is:open no:assignee"))
+    }
+
+    fn issue(&mut self, item: &ProjectItem) -> Result<Issue, ProjectReadError> {
+        self.read_issue(item)
+            .map_err(|error| with_issue_context(error, item))
+    }
+}
+
+impl GhProjectReader {
+    fn read_page(
+        &self,
+        project_id: &str,
+        cursor: Option<&str>,
+        filter: Option<&str>,
+    ) -> Result<Page<ProjectItem>, ProjectReadError> {
+        const QUERY: &str = "query($projectId: ID!, $cursor: String, $filter: String) { rateLimit { cost remaining resetAt } node(id: $projectId) { ... on ProjectV2 { items(first: 20, after: $cursor, query: $filter) { nodes { id content { __typename ... on Issue { id number state labels(first: 100) { nodes { name } pageInfo { hasNextPage } } assignees(first: 100) { nodes { login } pageInfo { hasNextPage } } milestone { title } repository { id nameWithOwner } } } fieldValues(first: 100) { nodes { __typename ... on ProjectV2ItemFieldSingleSelectValue { name field { ... on ProjectV2SingleSelectField { name } ... on ProjectV2Field { name } } } ... on ProjectV2ItemFieldTextValue { text field { ... on ProjectV2SingleSelectField { name } ... on ProjectV2Field { name } } } ... on ProjectV2ItemFieldIterationValue { field { ... on ProjectV2IterationField { name } } } ... on ProjectV2ItemFieldDateValue { field { ... on ProjectV2Field { name } } } } pageInfo { hasNextPage endCursor } } } pageInfo { hasNextPage endCursor } } } } }";
         let query_arg = format!("query={QUERY}");
         let project_id_arg = format!("projectId={project_id}");
+        let filter_arg = filter.map(|filter| format!("filter={filter}"));
         let cursor_arg = cursor.map(|cursor| format!("cursor={cursor}"));
         let mut args = vec!["api", "graphql", "-f", &query_arg, "-F", &project_id_arg];
+        if let Some(filter_arg) = &filter_arg {
+            args.extend(["-f", filter_arg]);
+        }
         if let Some(cursor_arg) = &cursor_arg {
             args.extend(["-F", cursor_arg]);
         }
@@ -110,13 +138,6 @@ impl ProjectReader for GhProjectReader {
         page::parse_page(&value, project_id)
     }
 
-    fn issue(&mut self, item: &ProjectItem) -> Result<Issue, ProjectReadError> {
-        self.read_issue(item)
-            .map_err(|error| with_issue_context(error, item))
-    }
-}
-
-impl GhProjectReader {
     fn read_issue(&mut self, item: &ProjectItem) -> Result<Issue, ProjectReadError> {
         let repository_id = self.issue_repository_id(&item.repository)?;
         if repository_id != item.tracker_repo_id {

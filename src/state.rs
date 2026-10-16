@@ -14,6 +14,7 @@ pub(crate) mod dispatch_abort;
 mod dispatch_stages;
 pub mod exit_observation;
 pub(crate) mod exits;
+pub(crate) mod github_budget;
 pub mod journal;
 pub mod launches;
 pub(crate) mod merge_followup;
