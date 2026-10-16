@@ -266,7 +266,12 @@ fn reconcile_cycle<L: SupervisorLauncher>(
     let mut startup = startup_reconcile_all(store, projects, prs)?;
     let pr_repair = settle_finished_tasks(store, projects, prs, &mut startup, config)?;
     if startup.scheduling_blocked() {
-        println!("{}", json!({"mode":"execute", "blocked":true}));
+        println!(
+            "{}",
+            json!({"mode":"execute", "blocked":true,
+                "reconciliation":reconciliation_diagnostics(&startup),
+                "source_holds":source_hold_diagnostics(&startup)})
+        );
         return Err(
             polling::ReconciliationBlocked("startup reconciliation blocked scheduling").into(),
         );
@@ -301,24 +306,10 @@ fn print_schedule_report(report: &ScheduleReport, cleanup: &crate::cleanup::Clea
             json!({"mode":"execute","status":"task_admission_failed","failure":failure})
         );
     }
-    let attempts = report
-        .startup
-        .attempts
-        .iter()
-        .map(|attempt| {
-            let status = match attempt.review {
-                AttemptReview::Running => "running",
-                AttemptReview::Completed(_) => "completed",
-                AttemptReview::Held(_) => "held",
-                AttemptReview::Error(_) => "error",
-            };
-            json!({"task_id":attempt.task_id,"attempt_id":attempt.attempt_id,"status":status})
-        })
-        .collect::<Vec<_>>();
     println!(
         "{}",
-        json!({"mode":"execute", "github":report.github, "cleanup":cleanup, "reconciliation":attempts,
-        "source_holds":report.startup.source_holds.iter().map(|hold| json!({"task_id":hold.task_id,"kind":hold.kind})).collect::<Vec<_>>(),
+        json!({"mode":"execute", "github":report.github, "cleanup":cleanup, "reconciliation":reconciliation_diagnostics(&report.startup),
+        "source_holds":source_hold_diagnostics(&report.startup),
         "pr_repair":report.pr_repair, "pr_merge":report.pr_merge, "automatic_retries":report.automatic_retries,
         "waiting":report.waiting,
         "candidate_read_failures":report.candidate_read_failures,
@@ -327,6 +318,37 @@ fn print_schedule_report(report: &ScheduleReport, cleanup: &crate::cleanup::Clea
         "launched":report.launched.iter().map(|plan| json!({"task_id":plan.task_id,"attempt_id":plan.attempt_id})).collect::<Vec<_>>(),
         "skipped_existing":report.skipped_existing.len(), "capacity_full":report.capacity_full,"disk_space":report.disk_space})
     );
+}
+
+/// Only report attempt identity, status and the reconciliation error, never
+/// serialize launch plans, configuration, receipts or source evidence.
+fn reconciliation_diagnostics(startup: &StartupReport) -> Vec<serde_json::Value> {
+    startup
+        .attempts
+        .iter()
+        .map(|attempt| {
+            let status = match &attempt.review {
+                AttemptReview::Running => "running",
+                AttemptReview::Completed(_) => "completed",
+                AttemptReview::Held(_) => "held",
+                AttemptReview::Error(_) => "error",
+            };
+            let mut diagnostic = json!({"task_id":attempt.task_id,
+            "attempt_id":attempt.attempt_id,"status":status});
+            if let AttemptReview::Error(error) = &attempt.review {
+                diagnostic["error"] = json!(error);
+            }
+            diagnostic
+        })
+        .collect()
+}
+
+fn source_hold_diagnostics(startup: &StartupReport) -> Vec<serde_json::Value> {
+    startup
+        .source_holds
+        .iter()
+        .map(|hold| json!({"task_id":hold.task_id,"kind":hold.kind}))
+        .collect()
 }
 
 #[cfg(test)]

@@ -1,6 +1,7 @@
 #![cfg(unix)]
 mod daemon_admission;
 mod daemon_completion;
+mod daemon_startup;
 mod git_fixture;
 
 use serde_json::{Value, json};
