@@ -4,7 +4,7 @@ use super::{
 };
 use serde_json::Value;
 
-const QUERY: &str = "query($owner:String!,$repo:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$repo){pullRequest(number:$number){databaseId headRefOid mergeable commits(last:1){nodes{commit{oid statusCheckRollup{contexts(first:100,after:$cursor){nodes{__typename ... on CheckRun{databaseId name status conclusion detailsUrl checkSuite{databaseId workflowRun{databaseId runAttempt}} isRequired(pullRequestNumber:$number)} ... on StatusContext{context state isRequired(pullRequestNumber:$number)}} pageInfo{hasNextPage endCursor}}}}}}}}}";
+const QUERY: &str = "query($owner:String!,$repo:String!,$number:Int!,$cursor:String){rateLimit{cost remaining resetAt} repository(owner:$owner,name:$repo){pullRequest(number:$number){databaseId headRefOid mergeable commits(last:1){nodes{commit{oid statusCheckRollup{contexts(first:100,after:$cursor){nodes{__typename ... on CheckRun{databaseId name status conclusion detailsUrl checkSuite{databaseId workflowRun{databaseId runAttempt}} isRequired(pullRequestNumber:$number)} ... on StatusContext{context state isRequired(pullRequestNumber:$number)}} pageInfo{hasNextPage endCursor}}}}}}}}}";
 
 pub(crate) fn observe(
     repository: &str,

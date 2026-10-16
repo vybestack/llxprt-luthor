@@ -1,27 +1,90 @@
 //! Cycle-local accounting shared by all gh adapters, including retry attempts.
 //! A reserve suppresses only optional sweeps, never command transport or writes.
 use crate::config::GithubPolling;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+mod response;
 use std::{
     collections::HashSet,
     sync::Mutex,
     thread::{self, ThreadId},
 };
 
-#[derive(Debug, Default, Clone, Serialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ApiUsage {
     pub rest: u64,
     pub graphql: u64,
+    pub graphql_points: u64,
     pub core_remaining: Option<u64>,
     pub core_reset: Option<u64>,
     pub graphql_remaining: Option<u64>,
     pub graphql_reset: Option<u64>,
 }
 
+#[derive(Debug, Serialize)]
+pub struct BudgetExhaustion {
+    pub resource: &'static str,
+    pub reset_at_unix_secs: Option<u64>,
+}
+
+impl ApiUsage {
+    /// The observation stops indicating exhaustion once its reset time passes.
+    pub fn exhausted(&self, now: u64) -> Vec<BudgetExhaustion> {
+        [
+            ("core", self.core_remaining, self.core_reset),
+            ("graphql", self.graphql_remaining, self.graphql_reset),
+        ]
+        .into_iter()
+        .filter(|(_, remaining, reset)| *remaining == Some(0) && reset.is_none_or(|at| at > now))
+        .map(|(resource, _, reset_at_unix_secs)| BudgetExhaustion {
+            resource,
+            reset_at_unix_secs,
+        })
+        .collect()
+    }
+}
+
+/// A scheduling deferral, not a task failure or a transport veto.
+pub(crate) fn deferral_reason() -> Option<String> {
+    with_cycle(|cycle| {
+        let c = cycle?;
+        if optional_allowed_for(c) {
+            return None;
+        }
+        let reason = if c.usage.core_remaining == Some(0) || c.usage.graphql_remaining == Some(0) {
+            "github_budget_exhausted"
+        } else {
+            "github_budget_reserved"
+        };
+        Some(format!(
+            "{reason}: core_remaining={:?} core_reset={:?} graphql_remaining={:?} graphql_reset={:?}; PR maintenance deferred",
+            c.usage.core_remaining,
+            c.usage.core_reset,
+            c.usage.graphql_remaining,
+            c.usage.graphql_reset,
+        ))
+    })
+}
+
+pub(crate) fn task_deferral_reason(task: &str) -> Option<String> {
+    if !task_allowed(task) {
+        return None;
+    }
+    deferral_reason()
+}
+
+fn optional_allowed_for(c: &Cycle) -> bool {
+    c.usage.core_remaining.is_none_or(|n| n > c.policy.reserve)
+        && c.usage
+            .graphql_remaining
+            .is_none_or(|n| n > c.policy.reserve.saturating_add(c.graphql_peak_cost))
+}
+
 struct Cycle {
     policy: GithubPolling,
     usage: ApiUsage,
     deferred: HashSet<String>,
+    graphql_peak_cost: u64,
 }
 // Thread-keyed scopes isolate concurrent callers without a process-global
 // policy leak. No network or filesystem work is performed while locked.
@@ -51,6 +114,7 @@ impl CycleGuard {
                 policy: policy.clone(),
                 usage: ApiUsage::default(),
                 deferred: HashSet::new(),
+                graphql_peak_cost: 0,
             },
         ));
         Self
@@ -82,13 +146,7 @@ pub(crate) fn interval() -> u64 {
 }
 
 pub(crate) fn optional_allowed() -> bool {
-    with_cycle(|cycle| {
-        cycle.is_none_or(|c| {
-            [c.usage.core_remaining, c.usage.graphql_remaining]
-                .iter()
-                .all(|remaining| remaining.is_none_or(|n| n > c.policy.reserve))
-        })
-    })
+    with_cycle(|cycle| cycle.as_deref().is_none_or(optional_allowed_for))
 }
 
 pub(crate) fn command(args: &[&str]) {
@@ -186,3 +244,26 @@ pub(crate) fn set_quota(value: &serde_json::Value) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests;
+
+/// Account every response, including retries and failed GraphQL operations.
+pub(crate) fn graphql_response(bytes: &[u8]) -> std::io::Result<()> {
+    // Invalid JSON is diagnosed by the adapter, not reclassified as a quota error.
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return Ok(());
+    };
+    let quota = response::quota(&value)?;
+    with_cycle(|cycle| {
+        if let Some(c) = cycle {
+            if let Some(quota) = quota {
+                c.usage.graphql_points += quota.cost;
+                c.graphql_peak_cost = c.graphql_peak_cost.max(quota.cost);
+                c.usage.graphql_remaining = Some(quota.remaining);
+                c.usage.graphql_reset = Some(quota.reset);
+            }
+            if response::exhausted(&value) {
+                c.usage.graphql_remaining = Some(0);
+            }
+        }
+    });
+    Ok(())
+}

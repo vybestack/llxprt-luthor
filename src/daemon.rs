@@ -183,10 +183,35 @@ fn cycle_with_dependencies<L: SupervisorLauncher, I: IdCreator>(
     }
     crate::github::quota::refresh(&gh)?;
     let mut store = StateStore::open(&config.state_root, config.capacity)?;
+    let result = execute_cycle(
+        &mut store,
+        config,
+        options,
+        gh,
+        &mut projects,
+        launcher,
+        ids,
+    );
+    // Preserve quota evidence even when malformed upstream data or a local
+    // error aborts the cycle. Never turn such an error into successful idling.
+    let usage = crate::github::budget::usage();
+    crate::state::github_budget::save(&store, &usage)?;
+    result
+}
+
+fn execute_cycle<L: SupervisorLauncher, I: IdCreator>(
+    store: &mut StateStore,
+    config: &Config,
+    options: &Options,
+    gh: PathBuf,
+    projects: &mut GhProjectReader,
+    launcher: &mut L,
+    ids: &mut I,
+) -> Result<Option<ScheduleReport>, Error> {
     let mut prs = GhPullRequestReader::new(gh.clone());
     let (startup, mut pr_repair, operator_launches) =
-        reconcile_cycle(&mut store, config, &gh, &mut projects, &mut prs, launcher)?;
-    let (pr_merge, cleanup) = sweep_and_clean_prs(&mut store, config, &mut prs)?;
+        reconcile_cycle(store, config, &gh, projects, &mut prs, launcher)?;
+    let (pr_merge, cleanup) = sweep_and_clean_prs(store, config, &mut prs)?;
     let disk_space = crate::disk::inspect(&config.worktree_root, config.min_free_space_bytes)?;
     if disk_space.dispatch_held {
         let report = ScheduleReport {
@@ -198,34 +223,23 @@ fn cycle_with_dependencies<L: SupervisorLauncher, I: IdCreator>(
             pr_repair,
             ..Default::default()
         };
-        print_schedule_report(&report, &cleanup);
+        print_schedule_report(&report, &cleanup)?;
         return Ok(Some(report));
     }
     let repair = crate::coordinator::repair_verified_prs_after_cleanup(
-        &mut store,
-        config,
-        &mut projects,
-        &mut prs,
-        launcher,
-        ids,
-        &cleanup,
+        store, config, projects, &mut prs, launcher, ids, &cleanup,
     )
     .map_err(|_| "PR repair could not record task state; inspect local task state")?;
-    let selection = cycle_candidates(
-        &mut projects,
-        config,
-        options.targets.as_ref(),
-        Some(&store),
-    )?;
+    let selection = cycle_candidates(projects, config, options.targets.as_ref(), Some(store))?;
     verify_candidate_accounts(&gh, &selection.candidates)?;
     let mut assignments = GhAssignmentWriter { executable: gh };
     let result = schedule_candidates_after_startup(
-        &mut store,
+        store,
         selection.candidates,
         ScheduleDependencies {
             config,
             config_revision: &options.revision,
-            projects: &mut projects,
+            projects,
             prs: &mut prs,
             assignments: &mut assignments,
             launcher,
@@ -243,7 +257,7 @@ fn cycle_with_dependencies<L: SupervisorLauncher, I: IdCreator>(
     report.source_read_failures = selection.source_read_failures;
     report.pr_repair = pr_repair;
     finish_pr_report(&mut report, pr_merge, repair.launched, operator_launches);
-    print_schedule_report(&report, &cleanup);
+    print_schedule_report(&report, &cleanup)?;
     verify_report(&report)?;
     Ok(Some(report))
 }
@@ -289,7 +303,11 @@ fn verify_report(report: &ScheduleReport) -> Result<(), Error> {
     Ok(())
 }
 
-fn print_schedule_report(report: &ScheduleReport, cleanup: &crate::cleanup::CleanupReport) {
+fn print_schedule_report(
+    report: &ScheduleReport,
+    cleanup: &crate::cleanup::CleanupReport,
+) -> Result<(), Error> {
+    let exhausted = report.github.exhausted(crate::state::github_budget::now()?);
     for failure in report.admission_failures.iter().chain(
         report
             .automatic_retries
@@ -317,7 +335,7 @@ fn print_schedule_report(report: &ScheduleReport, cleanup: &crate::cleanup::Clea
         .collect::<Vec<_>>();
     println!(
         "{}",
-        json!({"mode":"execute", "github":report.github, "cleanup":cleanup, "reconciliation":attempts,
+        json!({"mode":"execute", "github":report.github, "github_budget_exhausted":exhausted, "github_optional_reads_deferred":crate::github::budget::deferral_reason(), "cleanup":cleanup, "reconciliation":attempts,
         "source_holds":report.startup.source_holds.iter().map(|hold| json!({"task_id":hold.task_id,"kind":hold.kind})).collect::<Vec<_>>(),
         "pr_repair":report.pr_repair, "pr_merge":report.pr_merge, "automatic_retries":report.automatic_retries,
         "waiting":report.waiting,
@@ -327,6 +345,7 @@ fn print_schedule_report(report: &ScheduleReport, cleanup: &crate::cleanup::Clea
         "launched":report.launched.iter().map(|plan| json!({"task_id":plan.task_id,"attempt_id":plan.attempt_id})).collect::<Vec<_>>(),
         "skipped_existing":report.skipped_existing.len(), "capacity_full":report.capacity_full,"disk_space":report.disk_space})
     );
+    Ok(())
 }
 
 #[cfg(test)]
@@ -400,7 +419,7 @@ fn sweep_and_clean_prs(
 
 fn report_scheduling_error(error: crate::coordinator::ScheduleError) -> Error {
     let failure = error.diagnostic();
-    let report = json!({"mode":"execute", "status":"cycle_error", "scheduling_error":failure});
+    let report = json!({"mode":"execute", "status":"cycle_error", "scheduling_error":failure, "github":crate::github::budget::usage(), "github_optional_reads_deferred":crate::github::budget::deferral_reason()});
     println!("{report}");
     // --once also returns this diagnostic through main's stderr error path.
     format!("daemon scheduling failed: {failure}").into()

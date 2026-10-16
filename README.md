@@ -865,15 +865,37 @@ re-read by repair in the same cycle. Configure the policy at the top level:
 }
 ```
 
+Eligibility discovery uses the Project items server-side `is:open no:assignee`
+filter and 20-item pages, so closed and assigned history is not paginated each
+cycle. Label, Project-field, milestone and mapping rules still apply locally;
+every surviving candidate still needs exact-identity REST confirmation and fresh
+pre-claim checks. Saved-task membership and continuation reads remain unfiltered.
+
 Each execute cycle bootstraps quota with `gh api rate_limit` (which does not
 consume GitHub core quota), then updates remaining/reset observations from API
-response headers. At or below the reserve in either core or GraphQL quota,
-optional merge, repair, restore, retirement and cleanup probes wait. Mandatory
-claim/dispatch checks, authorized merge followup and interrupted terminal-tracker
-confirmation are not suppressed. No cached observation authorizes a write.
+response headers and GraphQL `rateLimit { cost remaining resetAt }`. Optional
+merge, repair, restore, retirement and cleanup probes wait at or below the core
+reserve or the GraphQL reserve **plus the largest reported query charge this
+cycle**, leaving point-based headroom for the next read. Mandatory claim/dispatch
+checks, authorized merge followup and interrupted terminal-tracker confirmation
+are not suppressed. Fresh discovery waits when either quota is known exhausted.
+No cached observation authorizes a write.
 
 The JSON cycle report's `github` object exposes `rest` and `graphql` adapter
-request-attempt counts (including retries and explicit API writes), plus
-`core_remaining`, `core_reset`, `graphql_remaining`, and `graphql_reset` from the
-latest quota observations. Reset times are Unix seconds; counts reset each cycle.
-Quota/read failures are surfaced rather than treated as unlimited capacity.
+request-attempt counts (including retries and explicit API writes),
+`graphql_points` (the sum of reported query charges, including retry responses),
+and `core_remaining`, `core_reset`, `graphql_remaining`, and `graphql_reset` from
+the latest quota observations. GraphQL mutations do not expose the `rateLimit`
+query field; their response headers still update remaining/reset quota. Reset
+times are Unix seconds; counts reset each cycle. Quota/read failures are surfaced
+rather than treated as unlimited capacity.
+
+`github_budget_exhausted` lists exhausted resources and their
+`reset_at_unix_secs`; `github_optional_reads_deferred` explains reserve or
+exhaustion deferrals. Merge/repair maintenance deferred by budget says so rather
+than silently looking idle. The last cycle's quota and point observations are
+saved transactionally in local metadata, even when the cycle fails. Read-only
+`status` exposes that snapshot under `github` with `observed_at`, plus
+`github_budget_exhausted` and a `github_maintenance_wait` reason on completed PR
+tasks awaiting budget. Exhaustion indications expire at the observed reset time;
+this is not a fresh quota read or a claim that the budget has actually refilled.

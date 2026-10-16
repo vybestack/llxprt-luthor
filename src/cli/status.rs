@@ -49,6 +49,7 @@ fn status_row(r: &rusqlite::Row<'_>, root: &Path) -> rusqlite::Result<StatusTask
 }
 
 pub(crate) fn status(conn: &Connection, root: &Path) -> Result<Value, CliError> {
+    let budget = crate::state::github_budget::load(conn).map_err(|_| CliError::Database)?;
     let capacity: i64 = conn
         .query_row(
             "SELECT value FROM state_meta WHERE key='capacity'",
@@ -81,12 +82,22 @@ pub(crate) fn status(conn: &Connection, root: &Path) -> Result<Value, CliError> 
         .map_err(|_| CliError::Database)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| CliError::Database)?;
-    let tasks = tasks
+    let mut tasks = tasks
         .iter_mut()
         .map(|task| present_task(conn, root, task))
         .collect::<Result<Vec<_>, _>>()?;
+    if budget["github_budget_exhausted"]
+        .as_array()
+        .is_some_and(|items| !items.is_empty())
+    {
+        for task in &mut tasks {
+            if task["phase"] == "pr_complete" {
+                task["github_maintenance_wait"] = json!({"reason":"github_budget_exhausted", "budgets":budget["github_budget_exhausted"]});
+            }
+        }
+    }
     Ok(
-        json!({"tasks":tasks,"capacity":{"reserved":reserved,"limit":capacity},
+        json!({"tasks":tasks,"github":budget,"github_budget_exhausted":budget["github_budget_exhausted"],"capacity":{"reserved":reserved,"limit":capacity},
         "reserved_slot_count":reserved,"latest_telemetry":null,
         "telemetry_unavailable_reason":"no telemetry evidence recorded"}),
     )

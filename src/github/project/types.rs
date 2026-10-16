@@ -151,5 +151,14 @@ pub trait ProjectReader {
         project_id: &str,
         cursor: Option<&str>,
     ) -> Result<Page<ProjectItem>, ProjectReadError>;
+    /// Eligibility discovery can narrow history server-side. Exact membership
+    /// and continuation reads must continue using the unfiltered page method.
+    fn candidate_page(
+        &mut self,
+        project_id: &str,
+        cursor: Option<&str>,
+    ) -> Result<Page<ProjectItem>, ProjectReadError> {
+        self.page(project_id, cursor)
+    }
     fn issue(&mut self, item: &ProjectItem) -> Result<Issue, ProjectReadError>;
 }
