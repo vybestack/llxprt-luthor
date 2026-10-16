@@ -35,7 +35,7 @@ pub(crate) fn hold_incompatible(
     };
     let mut first: LaunchPlan =
         serde_json::from_str(&crate::state::initial_launch(store, &plan.task_id)?)?;
-    first.worker_build = crate::state::pin_adoption::effective_build(&store.connection, &first)?;
+    first.worker_build = crate::state::pin_replacement::effective_build(&store.connection, &first)?;
     let label = |plan: &LaunchPlan| {
         plan.worker_build.as_ref().map_or_else(
             || format!("{} (hash unrecorded)", plan.executable.display()),

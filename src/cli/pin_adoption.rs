@@ -10,7 +10,7 @@ use std::{fs, path::Path};
 
 const EXPECTED: &str = "expected TASK --config PATH --executable PATH --sha256 HEX --actor LOGIN --reason TEXT [--execute]";
 
-fn arguments(args: &[String]) -> Result<bool, &'static str> {
+pub(crate) fn arguments(args: &[String]) -> Result<bool, &'static str> {
     if !(args.len() == 11 || args.len() == 12) || args.len() == 12 && args[11] != "--execute" {
         return Err(EXPECTED);
     }

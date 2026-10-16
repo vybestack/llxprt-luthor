@@ -1,4 +1,5 @@
-//! Build identity is immutable session provenance, not a mutable template path.
+//! Build identities are immutable provenance, not mutable template paths.
+//! An authorized repin appends a new identity; it never rewrites an old one.
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{

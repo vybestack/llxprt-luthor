@@ -313,13 +313,21 @@ pub(crate) fn verify_worker_lineage(db: &Connection, plan: &LaunchPlan) -> Resul
         [&plan.task_id], |row| row.get(0),
     )?;
     let first: LaunchPlan = serde_json::from_str(&payload)?;
-    let build = super::pin_adoption::effective_build(db, &first)?;
-    let plan_build = super::pin_adoption::effective_build(db, plan)?;
+    let build = super::pin_replacement::effective_build(db, &first)?;
+    let plan_build = super::pin_replacement::effective_build(db, plan)?;
+    // Resolve authorized pin replacements without rewriting historical plans.
+    // Each recorded plan still binds its own executable to its own build; the
+    // pin-era resolver rejects an unauthorized build for that attempt.
     // Historical unpinned plans are observation evidence, not launch permission.
     if plan_build != build
         || (plan.attempt_id != first.attempt_id
             && plan.worker_build.is_some()
-            && plan.executable != build.ok_or(StateError::LaunchBlocked)?.path)
+            && plan.executable
+                != plan
+                    .worker_build
+                    .as_ref()
+                    .ok_or(StateError::LaunchBlocked)?
+                    .path)
     {
         return Err(StateError::LaunchBlocked);
     }

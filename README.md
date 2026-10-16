@@ -643,8 +643,9 @@ not authorize modifying or retrying either live attempt from issue #27.
 The first launch intent records the resolved worker executable path and SHA-256
 of its bytes. `status` and `show` expose this as `worker_build` (including
 `pin_status`). New selections capture the current initial template's build;
-resume, retry and PR repair keep the session's original build even when the
-operator updates executable templates. Authorized argv/prompt corrections do
+resume, retry and PR repair keep the session's authorized build even when the
+operator updates executable templates. Only an explicit, audited `repin` can
+replace an already-recorded pin. Authorized argv/prompt corrections do
 not change the pin. A worker-reported top-level JSON `session_state_version`
 is saved as `session_state_format` evidence and shown as
 `reported_session_state_version`; Luthor never guesses a format from a binary.
@@ -655,8 +656,9 @@ build holds continuation rather than trying a new binary. Existing dispatched
 sessions whose plans predate build pins show `legacy_unrecorded` and cannot
 silently acquire the current binary's identity. There is no automatic copying,
 rebuilding, repinning or session migration; restore the pinned build or use a
-separately authorized session migration workflow. Pin adoption below records
-operator-attested provenance; it does not convert session formats.
+compatible continuation repin below. Neither pin adoption nor repinning converts
+session formats; a format conversion still requires a separately authorized
+session migration workflow.
 
 ### Adopt a build pin for a legacy session
 
@@ -679,7 +681,8 @@ Luthor cannot infer past bytes from today's file. `--actor` and a nonempty
 Preview is read-only; `--execute` rechecks all requirements under the coordinator
 and worktree-owner locks. All attempts must have reconciled exits and released
 reservations: reconcile first, including a held task whose worker may still be
-running. Already-recorded or adopted pins are refused; no repinning is supported.
+running. Already-recorded or adopted pins are refused by `adopt-pin`; use the
+separate compatible-continuation `repin` command to replace a recorded pin.
 The command emits exactly one JSON document, including on refusal (nonzero exit).
 
 Execution appends `worker_pin_adopted` evidence with actor, reason, supplied path,
@@ -692,6 +695,63 @@ prior continuation phase; unrelated safety holds and incompatible-session checks
 remain in force. Adoption launches nothing and changes nothing on GitHub.
 Daemon auto-adoption is not enabled; adoption always requires this explicit
 operator action.
+
+### Repin a recorded session for compatible continuation
+
+When a recorded worker build is broken (for example, by provider protocol drift),
+an operator can authorize a replacement without discarding the task's session or
+worktree changes:
+
+```sh
+luthor repin TASK --config PATH --executable PATH --sha256 HEX \
+  --actor LOGIN --reason 'Provider protocol fix; compatible session continuation'
+# Review the single JSON preview, then repeat with --execute to commit.
+```
+
+The executable argument must **exactly equal** the current config's initial or
+resume executable, not an alias or a path from an obsolete selection snapshot.
+It must resolve from the saved task worktree to an executable whose current
+SHA-256 matches the supplied 64-hex-digit hash. The old pin must be recorded
+(launch-recorded or explicitly adopted), but its old executable need not still
+exist. Already-current replacements and `legacy_unrecorded` sessions are refused.
+
+Compatibility is mandatory, not an operator guess: the session must have a
+recorded `session_state_format` / `reported_session_state_version`. Luthor runs
+only the resolved replacement binary with the single argument
+`--session-state-versions`, no template arguments, prompt or session ID, with
+stdin closed. The worker must exit successfully and emit exactly one JSON
+object with this schema on stdout (versions are unsigned integers):
+
+```json
+{"session_state_versions":[2,3]}
+```
+
+The recorded version must appear in that list. Unknown fields, malformed or
+missing output, unsupported versions, unsuccessful exits, output over 64 KiB,
+or a probe exceeding 10 seconds refuse the repin. The executable is hash-checked
+before and after the probe. Workers without this capability cannot be repinned;
+there is no version inference, operator override, or alternate probe fallback.
+The probe must be a read-only capability query, not a session launch or migration.
+
+All attempts must have reconciled exits and released reservations, with no
+cleanup intent, registered live process/group, or busy/unavailable worktree
+owner. Process absence is checked independently of completed database accounting;
+even PID reuse is refused. Preview opens the database read-only and takes the
+existing owner lock. Execution repeats validation under the coordinator and
+owner locks before atomically appending `worker_pin_replaced` evidence. Both
+modes run the compatibility probe; a preview is not reusable authorization if
+bytes or capabilities change before execution.
+
+The audit records old and new resolved paths/hashes, supplied executable, actor,
+reason, timestamp, historical attempt IDs, recorded session version, worker
+capability response and task phase. `show` exposes the audit, and `status` / `show`
+report the new pin. Historical plans, attempts, dispatch artifacts, exits and
+selection snapshots are unchanged. Later resume, retry and PR repair use the
+new pin with the existing dispatch and worker-gate hash checks. Multiple repins
+form a validated chain; historical attempts retain their original build identity.
+Repinning does not launch work, contact GitHub, reassign an issue, release a
+reservation or clear a hold. Incompatible-session and amended-session safety
+holds remain blocked, and unrelated holds remain in force.
 
 A naturally failing worker's structured `error.message` reporting
 `unsupported state version N`, or `error.code` of `session_incompatible` /

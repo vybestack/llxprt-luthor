@@ -179,7 +179,7 @@ fn legacy_plans(db: &Connection, task: &str) -> Result<(LaunchPlan, Vec<String>)
     Ok((first.ok_or(StateError::LaunchBlocked)?, attempts))
 }
 
-fn require_quiescent(db: &Connection, task: &str) -> Result<String, StateError> {
+pub(crate) fn require_quiescent(db: &Connection, task: &str) -> Result<String, StateError> {
     let valid: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM tasks WHERE id=?1)
         AND EXISTS(SELECT 1 FROM attempts WHERE task_id=?1)
         AND NOT EXISTS(SELECT 1 FROM intents WHERE task_id=?1 AND kind='cleanup')

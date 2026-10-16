@@ -1,5 +1,6 @@
 mod git_fixture;
 mod pin_adoption_fixture;
+mod pin_replacement_fixture;
 mod supervisor_fixture;
 use luthor::{
     claim::{AssignmentError, AssignmentWriter},
@@ -60,6 +61,7 @@ mod supervisor {
     pub(super) mod operator_refusals;
     pub(super) mod operator_rollback;
     mod pin_adoption;
+    mod pin_replacement;
     pub(super) mod pr_identity;
     pub(super) mod pr_readers;
     mod pr_repair;

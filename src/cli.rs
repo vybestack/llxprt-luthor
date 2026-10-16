@@ -12,6 +12,7 @@ mod output;
 mod pin_adoption;
 mod process;
 mod read;
+mod repin;
 mod retry_outcome;
 mod show;
 mod status;
