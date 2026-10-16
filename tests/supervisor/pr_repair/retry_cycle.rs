@@ -68,7 +68,7 @@ fn serve(f: &mut Fixture) -> std::path::PathBuf {
     let list = f.prs.page("org/code", 1).unwrap();
     let c = &f.projects.0;
     let project = json!({"data":{"node":{"items":{
-        "nodes":[{"id":c.item_id,"content":{"__typename":"Issue","id":c.issue_node_id,"number":7,
+        "nodes":[{"id":c.item_id,"content":{"__typename":"Issue","state":"OPEN","labels":{"nodes":[{"name":"ready"}],"pageInfo":{"hasNextPage":false}},"assignees":{"nodes":[],"pageInfo":{"hasNextPage":false}},"milestone":null,"id":c.issue_node_id,"number":7,
             "repository":{"id":c.tracker_repo_id,"nameWithOwner":"org/tracker"}},
             "fieldValues":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}],
         "pageInfo":{"hasNextPage":false,"endCursor":null}

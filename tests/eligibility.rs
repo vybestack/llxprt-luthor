@@ -58,6 +58,12 @@ fn item(id: &str, issue: &str, fields: Vec<(String, String)>) -> ProjectItem {
         repository: "org/tracker".into(),
         tracker_repo_id: "R1".into(),
         issue_number: 7,
+        summary: Some(luthor::github::project::ProjectIssueSummary {
+            state: "open".into(),
+            assignees: vec![],
+            labels: vec!["ready".into(), "luthor-ready".into(), "other".into()],
+            milestone: Some("0.12.0".into()),
+        }),
         fields,
         unsupported_fields: Vec::new(),
     }
@@ -332,6 +338,8 @@ fn eligible_for(
         calls: 0,
         fail_page: false,
     };
+    fake.pages[0].items[0].summary.as_mut().unwrap().milestone =
+        expected_milestone.map(str::to_string);
     !select(
         &mut fake,
         &[source(

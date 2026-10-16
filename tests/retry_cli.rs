@@ -197,7 +197,7 @@ fn fixture_github(root: &Path) -> std::path::PathBuf {
         "labels":[{"name":"ready"}], "milestone":null})
     };
     let project = json!({"data":{"node":{"items":{"nodes":[{
-        "id":"item", "content":{"__typename":"Issue", "id":"issue", "number":7,
+        "id":"item", "content":{"__typename":"Issue","state":"OPEN","labels":{"nodes":[{"name":"ready"}],"pageInfo":{"hasNextPage":false}},"assignees":{"nodes":[],"pageInfo":{"hasNextPage":false}},"milestone":null, "id":"issue", "number":7,
         "repository":{"id":"repo", "nameWithOwner":"org/tracker"}},
         "fieldValues":{"nodes":[], "pageInfo":{"hasNextPage":false}}
     }],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}});

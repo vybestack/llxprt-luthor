@@ -298,7 +298,7 @@ fn fake_github(root: &Path) -> PathBuf {
     let calls = root.join("gh-calls");
     fs::write(&calls, "").unwrap();
     let project = json!({"data":{"node":{"items":{"nodes":[{
-        "id":"item","content":{"__typename":"Issue","id":"issue","number":7,"repository":{"id":"repo","nameWithOwner":"org/tracker"}},
+        "id":"item","content":{"__typename":"Issue","state":"OPEN","labels":{"nodes":[{"name":"ready"}],"pageInfo":{"hasNextPage":false}},"assignees":{"nodes":[],"pageInfo":{"hasNextPage":false}},"milestone":null,"id":"issue","number":7,"repository":{"id":"repo","nameWithOwner":"org/tracker"}},
         "fieldValues":{"nodes":[],"pageInfo":{"hasNextPage":false}}
     }],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}});
     fs::write(root.join("project.json"), project.to_string()).unwrap();

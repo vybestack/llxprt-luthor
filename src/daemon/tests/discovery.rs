@@ -170,3 +170,59 @@ fn project_500_does_not_prevent_retiring_a_known_closed_issue() {
     assert!(report.launched.is_empty());
     assert!(!f.assigned.exists());
 }
+
+#[test]
+fn idle_rest_report_does_not_grow_with_closed_ready_history() {
+    let f = Fixture::new();
+    let original = fs::read_to_string(&f.gh).unwrap();
+    let original_project = json!({"data":{"node":{"items":{
+        "nodes":[project_item(331),project_item(12)],
+        "pageInfo":{"hasNextPage":false,"endCursor":null}
+    }}}})
+    .to_string();
+    assert_eq!(original.matches(&original_project).count(), 1);
+    let mut options = f.options();
+    options.targets = None;
+    let mut baseline = None;
+    for count in [0, 1, 100] {
+        let nodes: Vec<_> = (1..=count)
+            .map(|number| {
+                let mut item = project_item(number);
+                item["content"]["state"] = json!("CLOSED");
+                item
+            })
+            .collect();
+        let project = json!({"data":{"node":{"items":{
+            "nodes":nodes,"pageInfo":{"hasNextPage":false,"endCursor":null}
+        }}}})
+        .to_string();
+        fs::write(&f.gh, original.replace(&original_project, &project)).unwrap();
+        for _ in 0..2 {
+            fs::write(&f.calls, "").unwrap();
+            let mut launcher = RecordingLauncher::default();
+            let report = cycle_with_dependencies(
+                &f.config,
+                &options,
+                f.gh.clone(),
+                &mut launcher,
+                &mut FixedIds,
+            )
+            .unwrap()
+            .unwrap();
+            assert!(report.launched.is_empty());
+            assert!(report.candidate_read_failures.is_empty());
+            assert!(report.source_read_failures.is_empty());
+            assert!(launcher.plans.is_empty());
+            assert_eq!(report.github.graphql, 1);
+            assert_eq!(
+                *baseline.get_or_insert(report.github.rest),
+                report.github.rest
+            );
+            let calls = fs::read_to_string(&f.calls).unwrap();
+            assert!(!calls.contains("/issues/"));
+            assert!(!calls.contains("-X"));
+        }
+    }
+    assert!(!f.assigned.exists());
+    assert!(!f.assigned12.exists());
+}

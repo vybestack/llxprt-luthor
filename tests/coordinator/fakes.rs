@@ -45,6 +45,12 @@ impl ProjectReader for FakeGithub {
                 repository: c.repository.clone(),
                 tracker_repo_id: c.tracker_repo_id.clone(),
                 issue_number: c.issue_number,
+                summary: Some(luthor::github::project::ProjectIssueSummary {
+                    state: "open".into(),
+                    assignees: vec![],
+                    labels: vec!["ready".into()],
+                    milestone: c.milestone_title.clone(),
+                }),
                 fields: vec![],
                 unsupported_fields: vec![],
             }],

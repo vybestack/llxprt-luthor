@@ -115,7 +115,7 @@ fn create_checkout(path: &Path) {
 fn project_item(number: u64) -> serde_json::Value {
     json!({
         "id":format!("ITEM{number}"),
-        "content":{"__typename":"Issue","id":format!("ISSUE{number}"),"number":number,
+        "content":{"__typename":"Issue","state":"OPEN","labels":{"nodes":[{"name":"ready"}],"pageInfo":{"hasNextPage":false}},"assignees":{"nodes":[],"pageInfo":{"hasNextPage":false}},"milestone":null,"id":format!("ISSUE{number}"),"number":number,
             "repository":{"id":"REPO331","nameWithOwner":"org/tracker"}},
         "fieldValues":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}
     })
