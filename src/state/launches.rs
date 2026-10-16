@@ -362,7 +362,11 @@ fn authorize_retry(
     if audit.previous_plan != prior
         || !retry_evidence_matches(tx, audit, &previous)?
         || audit.previous_config != previous.effective_config
-        || !same_task_config(&previous.effective_config, &audit.config)
+        || !same_task_config(
+            &previous.effective_config,
+            &audit.config,
+            &previous.candidate.repository,
+        )
         || audit.actor != previous.candidate.mapping.allowed_pr_author
         || audit.reason.trim().is_empty()
         || audit.plan.attempt_id != attempt_id

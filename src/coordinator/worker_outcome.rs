@@ -125,6 +125,8 @@ fn classify_error(error: &TerminalError, exit: i32) -> WorkerOutcome {
 #[serde(rename_all = "snake_case")]
 pub enum RetryDecision {
     Ineligible,
+    ConfigMismatch,
+    AdmissionFailed,
     NeedsHumanInput,
     NonTransient,
     Unclassified,

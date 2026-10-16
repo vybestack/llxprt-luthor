@@ -144,13 +144,20 @@ pub(crate) fn validate_retry_config(
     reason: &str,
 ) -> Result<(), DispatchError> {
     let current = crate::state::EffectiveConfigSnapshot::from(config);
+    config.validate().map_err(SupervisorError::from)?;
+    let mut fields = selection
+        .effective_config
+        .task_differing_fields(&current, &selection.candidate.repository);
+    if config.state_root != root && !fields.contains(&"state_root") {
+        fields.push("state_root");
+    }
+    if !fields.is_empty() {
+        return Err(DispatchError::ConfigMismatch {
+            fields: fields.into_iter().map(str::to_owned).collect(),
+        });
+    }
     let reason = if config_revision == previous.config_revision {
         Some("config revision unchanged")
-    } else if config.validate().is_err()
-        || config.state_root != root
-        || !crate::state::same_task_config(&selection.effective_config, &current)
-    {
-        Some("configuration differs from the selected task outside worker templates")
     } else if config_revision.trim().is_empty() {
         Some("config revision is empty")
     } else if reason.trim().is_empty() {

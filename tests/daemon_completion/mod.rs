@@ -12,6 +12,7 @@ use std::{
 };
 mod active_finish;
 mod fixture;
+mod retry_config;
 use fixture::Fixture;
 
 #[derive(Clone, Copy, Debug)]

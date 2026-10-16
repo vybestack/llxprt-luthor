@@ -17,9 +17,10 @@ pub(crate) fn reason(error: &DispatchError) -> String {
                 .into()
         }
         DispatchError::State(_) => "task state could not be validated".into(),
-        DispatchError::RetryHeld { .. } | DispatchError::ExistingPr => {
-            "repair launch was refused".into()
-        }
+        DispatchError::RetryOwnershipUnavailable
+        | DispatchError::RetryHeld { .. }
+        | DispatchError::ConfigMismatch { .. }
+        | DispatchError::ExistingPr => "repair launch was refused".into(),
     };
     format!("PR repair held: {cause}")
 }

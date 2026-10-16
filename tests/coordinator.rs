@@ -3,6 +3,7 @@ mod git_fixture;
 mod preflight;
 
 mod coordinator {
+    mod admission;
     mod dependencies;
     pub(crate) mod dispatch_scenarios;
     mod fakes;
