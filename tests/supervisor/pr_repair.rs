@@ -23,26 +23,13 @@ struct RepairPr {
     rerun_error: bool,
     logs_error: bool,
     gh_health: Option<luthor::github::pull_request::GhPullRequestReader>,
+    merge_state: Option<&'static str>,
+    update_to: Option<String>,
+    updates: Vec<String>,
+    merges: Vec<String>,
+    tracker_closed: bool,
 }
-impl PullRequestReader for RepairPr {
-    fn authenticated_identity(&mut self) -> Result<String, LookupError> {
-        self.inner.authenticated_identity()
-    }
-    fn page(&mut self, repo: &str, page: u32) -> Result<Vec<serde_json::Value>, LookupError> {
-        self.inner.page(repo, page)
-    }
-    fn detail(&mut self, repo: &str, number: u64) -> Result<serde_json::Value, LookupError> {
-        let mut detail = self.inner.detail(repo, number)?;
-        detail["head"]["sha"] = serde_json::json!(self.head);
-        if self.wrong_pr_id {
-            detail["id"] = serde_json::json!(9999);
-        }
-        Ok(detail)
-    }
-    fn repository_identity(&mut self, repo: &str) -> Result<u64, LookupError> {
-        self.inner.repository_identity(repo)
-    }
-}
+mod reader;
 impl PrHealthReader for RepairPr {
     fn rerun_failed_jobs<E: From<LookupError>>(
         &mut self,
@@ -170,6 +157,11 @@ impl Fixture {
             rerun_error: false,
             logs_error: false,
             gh_health: None,
+            merge_state: None,
+            update_to: None,
+            updates: vec![],
+            merges: vec![],
+            tracker_closed: false,
         };
         let mut projects = OtherProject(selection.candidate, 1);
         assert!(matches!(

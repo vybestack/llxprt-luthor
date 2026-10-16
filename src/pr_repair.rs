@@ -6,6 +6,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 
 mod hold;
+pub(crate) mod result;
 pub use hold::RepairHoldCause;
 pub(crate) use hold::open_hold_reasons;
 
