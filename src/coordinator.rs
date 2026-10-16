@@ -167,6 +167,15 @@ where
         return Ok(report);
     }
     schedule_continuations(store, &mut report, &mut d)?;
+    // Released retries retain queue priority, not a durable reservation. Do not
+    // let a new selection take the next slot during backoff or an owner wait.
+    if report
+        .automatic_retries
+        .iter()
+        .any(|retry| retry.decision.pending())
+    {
+        return Ok(report);
+    }
     let mut seen = HashSet::new();
     for candidate in candidates {
         let identity = (
