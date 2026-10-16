@@ -138,6 +138,15 @@ pub enum RetryDecision {
     Launched,
 }
 
+impl RetryDecision {
+    pub(crate) fn pending(&self) -> bool {
+        matches!(
+            self,
+            Self::Backoff | Self::CapacityFull | Self::WorktreeBusy
+        )
+    }
+}
+
 pub(crate) fn observe_outcome(
     store: &mut StateStore,
     plan: &LaunchPlan,
