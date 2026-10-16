@@ -832,3 +832,5 @@ mod typed_retry;
 
 mod retry_cycle;
 mod retry_guards;
+
+mod pin_replacement;

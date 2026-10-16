@@ -9,3 +9,5 @@ use refusals::retry_refusals_with_history;
 
 mod pin_adoption;
 mod prompts;
+
+mod pin_replacement;

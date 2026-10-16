@@ -37,3 +37,5 @@ pub mod pr_merge;
 pub mod pr_repair;
 
 pub mod worker_build;
+
+pub mod worker_capability;

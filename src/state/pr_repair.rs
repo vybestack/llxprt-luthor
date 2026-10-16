@@ -90,8 +90,8 @@ pub(crate) fn validate(
         || plan.session_id != prior.session_id
         || plan.session_id != plan.task_id
         || plan.worktree != prior.worktree
-        || super::pin_adoption::effective_build(db, plan)?
-            != super::pin_adoption::effective_build(db, prior)?
+        || super::pin_replacement::effective_build(db, plan)?
+            != super::pin_replacement::effective_build(db, prior)?
         || plan.session_environment != prior.session_environment
         || plan.config_revision != prior.config_revision
         || audit.saved_pr.attempt_id != prior.attempt_id

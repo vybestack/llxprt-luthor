@@ -41,6 +41,8 @@ pub enum StateError {
     UnsupportedDatabaseVersion(i32),
     #[error("pin adoption refused: {0}")]
     PinAdoptionRefused(&'static str),
+    #[error("pin replacement refused: {0}")]
+    PinReplacementRefused(&'static str),
     #[error("task cannot be retired: {0}")]
     NotRetirable(&'static str),
 }

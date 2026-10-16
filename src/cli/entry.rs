@@ -35,6 +35,7 @@ pub fn run(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn std::er
         Some("daemon") => crate::daemon::run(&args.collect::<Vec<_>>()),
         Some("dispatch") => dispatch::dispatch(args.collect()),
         Some("resume") => resume::resume(args.collect()),
+        Some("repin") => crate::cli::repin::run(args.collect()),
         Some("adopt-pin") => crate::cli::pin_adoption::run(args.collect()),
         Some("retry") => recovery::retry(args.collect()),
         Some("recover") => recovery::recover(args.collect()),
@@ -43,12 +44,12 @@ pub fn run(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn std::er
         Some("amend-undispatched") => crate::cli::amend_undispatched(args.collect()),
         Some("--help" | "-h") => {
             println!(
-                "Usage: luthor discover --config <path>\n       luthor daemon --config PATH --config-revision REV [--repository owner/repo --issues N,N,...] [--once] [--execute]\n       luthor dispatch --config <path> --repository owner/repo --issue N --config-revision REV [--execute]\n       luthor resume TASK --config <path> --execute\n       luthor retry TASK --attempt ID --config PATH --config-revision REV --actor LOGIN --reason TEXT [--revalidate-terminal-exit] --execute\n       luthor adopt-pin TASK --config PATH --executable PATH --sha256 HEX --actor LOGIN --reason TEXT [--execute]\n       luthor recover TASK --attempt ID --config PATH --actor LOGIN --reason TEXT --execute\n       luthor abandon TASK --config PATH --actor LOGIN --reason TEXT --execute\n       luthor continue-undispatched --task TASK --attempt ID --config PATH --config-revision REV --actor LOGIN --reason legacy_preflight_recovery --execute\n       luthor amend-undispatched --task TASK --attempt ID --config PATH --config-revision REV --actor LOGIN --reason native_initial_branch_is_conversation --execute\n       luthor status --config <path>\n       luthor show TASK --config <path>\n       luthor logs TASK [--attempt ATTEMPT] --config <path>"
+                "Usage: luthor discover --config <path>\n       luthor daemon --config PATH --config-revision REV [--repository owner/repo --issues N,N,...] [--once] [--execute]\n       luthor dispatch --config <path> --repository owner/repo --issue N --config-revision REV [--execute]\n       luthor resume TASK --config <path> --execute\n       luthor retry TASK --attempt ID --config PATH --config-revision REV --actor LOGIN --reason TEXT [--revalidate-terminal-exit] --execute\n       luthor repin TASK --config PATH --executable PATH --sha256 HEX --actor LOGIN --reason TEXT [--execute]\n       luthor adopt-pin TASK --config PATH --executable PATH --sha256 HEX --actor LOGIN --reason TEXT [--execute]\n       luthor recover TASK --attempt ID --config PATH --actor LOGIN --reason TEXT --execute\n       luthor abandon TASK --config PATH --actor LOGIN --reason TEXT --execute\n       luthor continue-undispatched --task TASK --attempt ID --config PATH --config-revision REV --actor LOGIN --reason legacy_preflight_recovery --execute\n       luthor amend-undispatched --task TASK --attempt ID --config PATH --config-revision REV --actor LOGIN --reason native_initial_branch_is_conversation --execute\n       luthor status --config <path>\n       luthor show TASK --config <path>\n       luthor logs TASK [--attempt ATTEMPT] --config <path>"
             );
             Ok(())
         }
         _ => {
-            Err("expected `discover`, `daemon`, `dispatch`, `resume`, `retry`, `adopt-pin`, `recover`, `abandon`, `continue-undispatched`, or `amend-undispatched`".into())
+            Err("expected `discover`, `daemon`, `dispatch`, `resume`, `retry`, `adopt-pin`, `repin`, `recover`, `abandon`, `continue-undispatched`, or `amend-undispatched`".into())
         }
     }
 }
