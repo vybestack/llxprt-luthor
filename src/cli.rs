@@ -1,4 +1,5 @@
 mod amendment;
+mod attempts;
 mod capacity;
 mod checks;
 mod entry;
