@@ -803,9 +803,15 @@ luthor status --config PATH
 
 The command requires the coordinator lock, refuses active/unreconciled launches
 or conflicting/unavailable worktree owners, and never releases reservations.
-A decrease cannot go below the verified reservation count. Stale expectations
-refuse without a capacity/audit write. The old/new limit, actor, reason, verified
-reservation count and timestamp are committed together and returned as JSON.
+An **increase only** may count permanent historical initial-attempt holds under
+issue #27: they remain reserved and gain no continuation or release authority.
+Modern prepared launches and complete dispatch inventories awaiting reconciliation
+still refuse. Registered-process absence and owner checks are unchanged.
+A decrease cannot go below the verified reservation count and cannot use the
+historical-hold exception. Stale expectations refuse without a capacity/audit
+write. The old/new limit, actor, reason, verified reservation count, timestamp
+and `permanent_holds` (task/attempt IDs and reason) are committed together and
+returned as JSON.
 Tasks, attempts, receipts, PR proof and selection snapshots are not rewritten;
 ordinary task-continuation authorization is unchanged. This is not a migration to
 a new state root. See the [capacity-change contract](dev-docs/config-and-state.md#audited-queue-capacity-changes)
