@@ -24,7 +24,7 @@ struct Completion {
 
 fn evidence(db: &Connection, plan: &LaunchPlan, kind: &str) -> Result<(i64, String), StateError> {
     let rows: Vec<(i64, String, Option<String>, String)> = db.prepare(
-        "SELECT sequence,task_id,attempt_id,payload FROM evidence WHERE (task_id=?1 OR attempt_id=?2) AND kind=?3",
+        "SELECT sequence,task_id,attempt_id,payload FROM evidence WHERE attempt_id=?2 AND kind=?3",
     )?.query_map(params![plan.task_id, plan.attempt_id, kind], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?.collect::<Result<_,_>>()?;
     match rows.as_slice() {
         [(sequence, task, attempt, payload)]
@@ -148,13 +148,14 @@ fn validate_pr(db: &Connection, plan: &LaunchPlan, c: &Completion) -> Result<(),
 }
 
 pub(crate) fn record(db: &Connection, task: &str, attempt: &str) -> Result<(), StateError> {
-    let Some(audit) =
-        super::proofs::unique_payload(db, true, task, Some(attempt), "initial_branch_removed")?
-    else {
+    if !super::amended_scope::has_amendment(db, task, attempt)? {
         return Ok(());
-    };
-    let audit: super::context::InitialBranchRemovalAudit = parse_saved(&audit)?;
-    let plan = &audit.effective_plan;
+    }
+    let proof: AmendedDispatchProof = parse_saved(
+        &super::proofs::unique_payload(db, false, task, Some(attempt), "supervisor_dispatch")?
+            .ok_or(StateError::LaunchBlocked)?,
+    )?;
+    let plan = &proof.effective_plan;
     let receipt = parse_saved(&evidence(db, plan, "attempt_exit")?.1)?;
     let binding = completion(db, plan, &receipt)?;
     db.execute(
@@ -175,9 +176,14 @@ pub(crate) fn validate(
     plan: &LaunchPlan,
     receipt: &ExitReceipt,
 ) -> Result<(), StateError> {
-    let rows: Vec<(String, String, Option<String>, String)> = db.prepare(
-        "SELECT id,task_id,attempt_id,detail FROM intents WHERE (task_id=?1 OR attempt_id=?2) AND kind=?3",
-    )?.query_map(params![plan.task_id,plan.attempt_id,KIND], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?.collect::<Result<_,_>>()?;
+    let rows: Vec<(String, String, Option<String>, String)> = db
+        .prepare(
+            "SELECT id,task_id,attempt_id,detail FROM intents WHERE attempt_id=?2 AND kind=?3",
+        )?
+        .query_map(params![plan.task_id, plan.attempt_id, KIND], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })?
+        .collect::<Result<_, _>>()?;
     let [(id, task, attempt, payload)] = rows.as_slice() else {
         return Err(StateError::LaunchBlocked);
     };
@@ -196,9 +202,10 @@ pub(crate) fn validate(
 
 pub(crate) fn require_absent(db: &Connection, plan: &LaunchPlan) -> Result<(), StateError> {
     let found: bool = db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM intents WHERE (task_id=?1 OR attempt_id=?2) AND kind=?3)
-         OR EXISTS(SELECT 1 FROM evidence WHERE (task_id=?1 OR attempt_id=?2) AND kind='verified_open_pr')",
-        params![plan.task_id,plan.attempt_id,KIND], |r| r.get(0),
+        "SELECT EXISTS(SELECT 1 FROM intents WHERE attempt_id=?2 AND kind=?3)
+         OR EXISTS(SELECT 1 FROM evidence WHERE attempt_id=?2 AND kind='verified_open_pr')",
+        params![plan.task_id, plan.attempt_id, KIND],
+        |r| r.get(0),
     )?;
     if found {
         return Err(StateError::LaunchBlocked);

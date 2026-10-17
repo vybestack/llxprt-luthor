@@ -130,6 +130,15 @@ pub fn begin_supervision(
     plan: &str,
     owner_protocol: &crate::ownership::WorktreeOwnerProtocol,
 ) -> Result<(), StateError> {
+    let native: crate::model::LaunchPlan = serde_json::from_str(plan)?;
+    if native.task_id != task_id || native.attempt_id != attempt_id {
+        return Err(StateError::LaunchBlocked);
+    }
+    if super::amended_dispatch::has_amendment(&store.connection, task_id, attempt_id)?
+        && super::native_continuation::is_successor(&store.connection, &native)?
+    {
+        return super::native_continuation::begin_dispatch(store, &native, owner_protocol);
+    }
     let tx = store.connection.transaction()?;
     let persisted: Option<String> = tx
         .query_row(

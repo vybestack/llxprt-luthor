@@ -27,6 +27,7 @@ pub(crate) fn read_context(
     validate_owner_protocol(db, &plan.task_id, &plan.attempt_id)?;
     validate_lifecycle(db, plan)?;
     let mut snapshot = continuation::saved_rows(db, &plan.task_id, &plan.attempt_id, true)?;
+    project_history(db, plan, &mut snapshot)?;
     normalize_rows(&mut snapshot)?;
     strip_annotations(&mut snapshot, *sequence, plan)?;
     let intents = retained_proofs(&snapshot, false)?;
@@ -46,17 +47,25 @@ pub(crate) fn read_context(
 }
 
 fn validate_lifecycle(db: &Connection, plan: &LaunchPlan) -> Result<(), StateError> {
-    let (phase, lifecycle, outcome, reservation): (String, String, Option<String>, String) = db.query_row(
+    let (mut phase, lifecycle, outcome, reservation): (String, String, Option<String>, String) = db.query_row(
         "SELECT t.state,a.lifecycle,a.outcome,r.status FROM tasks t
          JOIN attempts a ON a.task_id=t.id JOIN reservations r ON r.task_id=t.id AND r.attempt_id=a.id
-         WHERE t.id=?1 AND a.id=?2 AND (SELECT COUNT(*) FROM attempts WHERE task_id=?1)=1
-         AND (SELECT COUNT(*) FROM reservations WHERE task_id=?1 OR attempt_id=?2)=1",
+         WHERE t.id=?1 AND a.id=?2 AND a.id=(SELECT id FROM attempts WHERE task_id=?1 ORDER BY rowid LIMIT 1)
+         AND (SELECT COUNT(*) FROM reservations WHERE attempt_id=?2)=1",
         params![plan.task_id, plan.attempt_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
     )?;
     let exits: Vec<(String, Option<String>, String)> = db.prepare(
-        "SELECT task_id,attempt_id,payload FROM evidence WHERE (task_id=?1 OR attempt_id=?2) AND kind='attempt_exit'",
+        "SELECT task_id,attempt_id,payload FROM evidence WHERE attempt_id=?2 AND kind='attempt_exit'",
     )?.query_map(params![plan.task_id, plan.attempt_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
         .collect::<Result<_, _>>()?;
+    let later: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM attempts WHERE task_id=?1 AND id!=?2)",
+        params![plan.task_id, plan.attempt_id],
+        |r| r.get(0),
+    )?;
+    if later {
+        phase = "held".into();
+    }
     if phase != "pr_complete" {
         super::amended_completion::require_absent(db, plan)?;
     }
@@ -94,7 +103,7 @@ fn validate_lifecycle(db: &Connection, plan: &LaunchPlan) -> Result<(), StateErr
     }
 }
 
-fn validate_terminal_phase(
+pub(crate) fn validate_terminal_phase(
     db: &Connection,
     plan: &LaunchPlan,
     phase: &str,
@@ -221,4 +230,30 @@ fn retained_proofs(snapshot: &SavedRows, evidence: bool) -> Result<Vec<ProofRow>
         ));
     }
     Ok(rows)
+}
+
+// A later attempt cannot change the amended initial history. Project only its
+// own rows after requiring an explicit transition for every successor. Successor
+// gates separately validate the entire ordered chain, not merely this count.
+fn project_history(
+    db: &Connection,
+    plan: &LaunchPlan,
+    snapshot: &mut SavedRows,
+) -> Result<(), StateError> {
+    let valid: bool = db.query_row("SELECT (SELECT COUNT(*) FROM attempts WHERE task_id=?1)-1=(SELECT COUNT(*) FROM evidence WHERE task_id=?1 AND kind='native_continuation')", [&plan.task_id], |r|r.get(0))?;
+    if !valid {
+        return Err(StateError::LaunchBlocked);
+    }
+    for (table, index) in [(1, 1), (2, 1), (3, 3), (4, 2)] {
+        let mut retained = Vec::new();
+        for row in &snapshot.0[table] {
+            let values: Vec<Value> = serde_json::from_str(row)?;
+            let attempt = values.get(index).ok_or(StateError::LaunchBlocked)?;
+            if attempt.is_null() || attempt.as_str() == Some(&plan.attempt_id) {
+                retained.push(row.clone());
+            }
+        }
+        snapshot.0[table] = retained;
+    }
+    Ok(())
 }

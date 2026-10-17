@@ -1,4 +1,7 @@
+mod continuation_checks;
+mod native_continuation;
 use crate::state::{launches, scheduling, task_records};
+pub use native_continuation::{NativeContinuationDependencies, continue_amended};
 mod active;
 mod admission;
 mod auto_retry;

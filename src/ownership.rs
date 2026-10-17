@@ -196,7 +196,8 @@ fn validate_launch_dispatch_binding(
         && launch.get("attempt_id").and_then(serde_json::Value::as_str) == Some(attempt);
     if !launch_matches
         || (dispatch_detail != launch_detail
-            && !valid_amended_dispatch(tx, dispatch_detail, launch_detail, task, attempt))
+            && !valid_amended_dispatch(tx, dispatch_detail, launch_detail, task, attempt)
+            && !valid_continuation_dispatch(tx, dispatch_detail, launch_detail, task, attempt))
     {
         return Err(OwnershipProtocolError::Conflict);
     }
@@ -259,6 +260,34 @@ fn valid_amended_dispatch(
             .and_then(serde_json::Value::as_str)
             == Some(launch_detail)
         && audit.get("original_plan") == Some(&original_plan)
+}
+
+// Ownership validates this attempt's exact dispatch representation. The process
+// binding gates independently validate its sealed predecessor chain.
+fn valid_continuation_dispatch(
+    tx: &rusqlite::Transaction<'_>,
+    dispatch: &str,
+    launch: &str,
+    task: &str,
+    attempt: &str,
+) -> bool {
+    let (Ok(dispatch), Ok(launch)) = (
+        serde_json::from_str::<serde_json::Value>(dispatch),
+        serde_json::from_str::<serde_json::Value>(launch),
+    ) else {
+        return false;
+    };
+    let Some(sequence) = dispatch
+        .get("amendment_sequence")
+        .and_then(serde_json::Value::as_i64)
+    else {
+        return false;
+    };
+    let Ok(payload) = tx.query_row("SELECT payload FROM evidence WHERE sequence=?1 AND task_id=?2 AND attempt_id=?3 AND kind='native_continuation'", params![sequence,task,attempt], |r|r.get::<_,String>(0)) else { return false; };
+    let Ok(audit) = serde_json::from_str::<serde_json::Value>(&payload) else {
+        return false;
+    };
+    audit.get("plan") == Some(&launch) && dispatch.get("effective_plan") == Some(&launch)
 }
 
 impl WorktreeOwnerInternal for WorktreeOwner {
