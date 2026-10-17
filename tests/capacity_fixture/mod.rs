@@ -82,17 +82,21 @@ impl Fixture {
         .unwrap();
     }
 
+    fn plan(&self, id: &str, attempt: &str) -> String {
+        json!({"task_id":id, "attempt_id":attempt, "session_id":format!("session-{id}"),
+            "worktree":self.dir.path().join(id), "expected_worktree":{
+                "path":self.dir.path().join(id), "device":1, "inode":2, "branch":format!("luthor/{id}"),
+                "base":"main", "head":"original-head", "repository":"org/code", "git_directory":"/git", "remote":"origin"},
+            "executable":"/worker-must-not-run", "args":["original instructions"], "config_revision":"original-revision",
+            "session_environment":{"home":self.dir.path()}}).to_string()
+    }
+
     pub fn completed(&self, id: &str, number: u64) {
         self.task(id, number);
         let attempt = format!("attempt-{id}");
         let mut store = StateStore::open(self.root(), self.config.capacity).unwrap();
         scheduling::reserve(&mut store, id, &attempt).unwrap();
-        let plan = json!({"task_id":id, "attempt_id":attempt, "session_id":format!("session-{id}"),
-            "worktree":self.dir.path().join(id), "expected_worktree":{
-                "path":self.dir.path().join(id), "device":1, "inode":2, "branch":format!("luthor/{id}"),
-                "base":"main", "head":"original-head", "repository":"org/code", "git_directory":"/git", "remote":"origin"},
-            "executable":"/worker-must-not-run", "args":["original instructions"], "config_revision":"original-revision",
-            "session_environment":{"home":self.dir.path()}}).to_string();
+        let plan = self.plan(id, &attempt);
         journal::record_intent(
             &mut store,
             &format!("launch-{id}"),
@@ -221,7 +225,7 @@ impl Fixture {
             id,
             Some(attempt),
             "launch",
-            "original-plan",
+            &self.plan(id, attempt),
         )
         .unwrap();
         drop(WorktreeOwner::acquire(self.root(), id).unwrap());

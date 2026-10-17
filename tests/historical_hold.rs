@@ -653,3 +653,56 @@ fn historical_process_fixture_distinguishes_live_identity_from_reaped_child() {
         "reaped fixture must not retain a process identity"
     );
 }
+
+#[test]
+fn increasing_capacity_preserves_both_historical_hold_classes_and_all_release_guards() {
+    for managed in [false, true] {
+        let mut f = Historical::new();
+        if managed {
+            f.managed_dispatch();
+        }
+        let root = f.store.root().to_path_buf();
+        let modern = rows(&f.db());
+        drop(f.store);
+        assert!(
+            luthor::state::capacity::change(
+                &root,
+                luthor::state::capacity::CapacityChangeRequest {
+                    expected_capacity: 2,
+                    expected_reservations: 1,
+                    new_capacity: 3,
+                    actor: "operator",
+                    reason: "modern launches still require reconciliation",
+                },
+            )
+            .is_err()
+        );
+        f.store = StateStore::open(&root, 2).unwrap();
+        assert_eq!(rows(&f.db()), modern);
+        f.predates_preparation();
+        f.assert_hold();
+        let before = rows(&f.db());
+        drop(f.store);
+        let change = luthor::state::capacity::change(
+            &root,
+            luthor::state::capacity::CapacityChangeRequest {
+                expected_capacity: 2,
+                expected_reservations: 1,
+                new_capacity: 3,
+                actor: "operator",
+                reason: "count, never release, the historical hold",
+            },
+        )
+        .unwrap();
+        assert_eq!(change.permanent_holds.len(), 1);
+        assert_eq!(change.permanent_holds[0].task_id, "task");
+        assert_eq!(change.permanent_holds[0].attempt_id, "attempt-historical");
+        f.store = StateStore::open(&root, 3).unwrap();
+        // Only the queue-level audit sequence may change, never task history.
+        let after = rows(&f.db());
+        assert_eq!(&after[..6], &before[..6]);
+        assert_eq!(scheduling::reservation_count(&f.store).unwrap(), 1);
+        f.assert_hold();
+        f.assert_hold();
+    }
+}

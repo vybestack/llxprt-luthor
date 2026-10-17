@@ -66,7 +66,7 @@ fn open_store(root: &Path, capacity: usize, create: bool) -> Result<StateStore, 
     };
     let mut connection = Connection::open_with_flags(root.join("state.sqlite3"), flags)?;
     let version: i32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if !(0..=7).contains(&version) || !create && version < 2 {
+    if !(0..=8).contains(&version) || !create && version < 2 {
         return Err(StateError::UnsupportedDatabaseVersion(version));
     }
     connection.pragma_update(None, "journal_mode", "WAL")?;
@@ -179,16 +179,14 @@ fn initialize_schema(
         )?;
         tx.pragma_update(None, "user_version", 6)?;
     }
-    if version < 7 {
-        initialize_capacity_audit(tx)?;
-        tx.pragma_update(None, "user_version", 7)?;
-    }
+    migrate_capacity_audit(tx, version)?;
     Ok(())
 }
 
-fn initialize_capacity_audit(tx: &rusqlite::Transaction<'_>) -> Result<(), StateError> {
-    tx.execute_batch(
-        "CREATE TABLE capacity_changes (
+fn migrate_capacity_audit(tx: &rusqlite::Transaction<'_>, version: i32) -> Result<(), StateError> {
+    if version < 7 {
+        tx.execute_batch(
+            "CREATE TABLE capacity_changes (
             sequence INTEGER PRIMARY KEY AUTOINCREMENT,
             actor TEXT NOT NULL,
             reason TEXT NOT NULL,
@@ -196,6 +194,14 @@ fn initialize_capacity_audit(tx: &rusqlite::Transaction<'_>) -> Result<(), State
             new_capacity INTEGER NOT NULL CHECK(new_capacity > 0),
             reservations INTEGER NOT NULL CHECK(reservations >= 0),
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);",
-    )?;
+        )?;
+        tx.pragma_update(None, "user_version", 7)?;
+    }
+    if version < 8 {
+        tx.execute_batch(
+            "ALTER TABLE capacity_changes ADD COLUMN permanent_holds TEXT NOT NULL DEFAULT '[]';",
+        )?;
+        tx.pragma_update(None, "user_version", 8)?;
+    }
     Ok(())
 }

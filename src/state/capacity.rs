@@ -1,9 +1,10 @@
 //! Explicit queue-level capacity authorization; never rewrites task provenance.
-use super::{database, proofs};
+use super::{capacity_holds, database, proofs};
 use crate::{
     model::{ExitReceipt, StateError},
     ownership::WorktreeOwner,
 };
+pub use capacity_holds::PermanentHold;
 use rusqlite::{Connection, TransactionBehavior, params};
 use serde::Serialize;
 use std::path::Path;
@@ -24,6 +25,7 @@ pub struct CapacityChange {
     pub old_capacity: usize,
     pub new_capacity: usize,
     pub reservations: usize,
+    pub permanent_holds: Vec<PermanentHold>,
     pub created_at: String,
 }
 
@@ -62,11 +64,12 @@ pub fn change(
             capacity: request.new_capacity,
         });
     }
-    require_accounted_launches(&tx)?;
+    let permanent_holds =
+        require_accounted_launches(&tx, request.new_capacity > request.expected_capacity)?;
     let _owners = lock_owners(&tx, root)?;
     tx.execute(
-        "INSERT INTO capacity_changes(actor,reason,old_capacity,new_capacity,reservations) VALUES(?1,?2,?3,?4,?5)",
-        params![request.actor, request.reason, request.expected_capacity as i64, request.new_capacity as i64, reserved as i64],
+        "INSERT INTO capacity_changes(actor,reason,old_capacity,new_capacity,reservations,permanent_holds) VALUES(?1,?2,?3,?4,?5,?6)",
+        params![request.actor, request.reason, request.expected_capacity as i64, request.new_capacity as i64, reserved as i64, serde_json::to_string(&permanent_holds)?],
     )?;
     let sequence = tx.last_insert_rowid();
     let created_at = tx.query_row(
@@ -92,6 +95,7 @@ pub fn change(
         old_capacity: request.expected_capacity,
         new_capacity: request.new_capacity,
         reservations: reserved,
+        permanent_holds,
         created_at,
     })
 }
@@ -113,7 +117,10 @@ fn validate(request: &CapacityChangeRequest<'_>) -> Result<(), StateError> {
     Ok(())
 }
 
-fn require_accounted_launches(db: &Connection) -> Result<(), StateError> {
+fn require_accounted_launches(
+    db: &Connection,
+    increasing: bool,
+) -> Result<Vec<PermanentHold>, StateError> {
     let invalid_reservation: bool = db.query_row(
         "SELECT EXISTS(SELECT 1 FROM reservations r WHERE NOT EXISTS
          (SELECT 1 FROM attempts a JOIN tasks t ON t.id=a.task_id WHERE a.id=r.attempt_id AND a.task_id=r.task_id))",
@@ -125,14 +132,16 @@ fn require_accounted_launches(db: &Connection) -> Result<(), StateError> {
     let launches: Vec<(String, Option<String>)> = db.prepare(
         "SELECT DISTINCT task_id,attempt_id FROM intents WHERE kind IN ('launch','supervisor_dispatch','gate_release') ORDER BY task_id,attempt_id",
     )?.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?.collect::<Result<_, _>>()?;
+    let mut holds = Vec::new();
     for (task, attempt) in launches {
-        require_accounted(
-            db,
-            &task,
-            attempt.as_deref().ok_or(refused("launch has no attempt"))?,
-        )?;
+        let attempt = attempt.as_deref().ok_or(refused("launch has no attempt"))?;
+        if increasing && let Some(hold) = capacity_holds::classify(db, &task, attempt)? {
+            holds.push(hold);
+        } else {
+            require_accounted(db, &task, attempt)?;
+        }
     }
-    Ok(())
+    Ok(holds)
 }
 
 fn require_accounted(db: &Connection, task: &str, attempt: &str) -> Result<(), StateError> {

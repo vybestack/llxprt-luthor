@@ -6,6 +6,7 @@ mod amendment;
 mod attempts;
 mod branch_removal;
 pub mod capacity;
+mod capacity_holds;
 pub(crate) mod cleanup_records;
 mod context;
 mod continuation;

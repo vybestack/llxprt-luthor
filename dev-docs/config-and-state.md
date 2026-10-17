@@ -291,7 +291,7 @@ luthor reconcile task-7f3a --config "$CONFIG"
 
 Dispatch without `--execute` stops with an authorization message and makes no scheduling writes. Resume without it likewise does not launch. `pause` and `reconcile` are state-changing controls, so use them only when you intend to affect the task lifecycle. `reconcile TASK --config` also handles source-intent reconciliation when the task has no attempt; with an attempt, it reconciles process and pull-request evidence.
 
-The marker name/value and optional milestone are exact selectors. Omitting milestone removes only that eligibility check. State uses SQLite schema version 7 with task, attempt, intent, reservation, evidence, metadata, launch-preparation, PR-poll and queue-capacity audit tables. New initial preparations capture attempt-bound worktree ownership in the same transaction as the attempt, reservation and original launch intent. Version 4 databases gain an empty preparation table: there is deliberately no backfill, and historical absence of dispatch records alone cannot authorize continuation or abandonment. See [issue 27's permanent-hold contract](issue27-historical-hold.md). Reservations are durable per-attempt history keyed by attempt ID, with a partial unique index allowing at most one active reservation per task. Opening a fresh database creates the current schema. Version 3 databases gain an abandoned-history-aware issue identity index transactionally; all child records, foreign keys and sequence values are preserved. Only abandoned tasks permit a replacement selection; other issue identities remain unique. Version 1 databases gain persisted capacity metadata, and version 1 or 2 databases are upgraded transactionally through the known schema versions to version 7, preserving task, attempt, intent, reservation and evidence rows. If a migration cannot complete, its schema changes and version update roll back together. Negative versions and versions above 7 are rejected. Version 6 adds PR polling metadata; version 7 adds an empty queue-level capacity audit table without rewriting task history. Configured capacity is persisted and must match on later opens. Creating a task stores a typed selection-evidence record in the same transaction as task identity, preserving the selected Project and item, issue URL and identity, marker, milestone, repository mapping, observation time, source, configuration revision, and a typed effective configuration snapshot (state/worktree roots, capacity, sources, mappings, and initial/resume executable and argv). The snapshot is validated before task creation and committed atomically with the task and selection evidence. Credentials are excluded by configuration validation; invalid-configuration errors do not echo supplied values or raw JSON. Duplicate task creation rolls back without leaving a second selection record. A process-level coordinator lock (where used) supplements database transactions; reservations remain authoritative and uncertain work must retain capacity.
+The marker name/value and optional milestone are exact selectors. Omitting milestone removes only that eligibility check. State uses SQLite schema version 8 with task, attempt, intent, reservation, evidence, metadata, launch-preparation, PR-poll and queue-capacity audit tables. New initial preparations capture attempt-bound worktree ownership in the same transaction as the attempt, reservation and original launch intent. Version 4 databases gain an empty preparation table: there is deliberately no backfill, and historical absence of dispatch records alone cannot authorize continuation or abandonment. See [issue 27's permanent-hold contract](issue27-historical-hold.md). Reservations are durable per-attempt history keyed by attempt ID, with a partial unique index allowing at most one active reservation per task. Opening a fresh database creates the current schema. Version 3 databases gain an abandoned-history-aware issue identity index transactionally; all child records, foreign keys and sequence values are preserved. Only abandoned tasks permit a replacement selection; other issue identities remain unique. Version 1 databases gain persisted capacity metadata, and version 1 or 2 databases are upgraded transactionally through the known schema versions to version 8, preserving task, attempt, intent, reservation and evidence rows. If a migration cannot complete, its schema changes and version update roll back together. Negative versions and versions above 8 are rejected. Version 6 adds PR polling metadata; version 7 adds an empty queue-level capacity audit table without rewriting task history. Version 8 adds the `permanent_holds` JSON array to that audit; existing audits gain `[]` and retain all original values. Configured capacity is persisted and must match on later opens. Creating a task stores a typed selection-evidence record in the same transaction as task identity, preserving the selected Project and item, issue URL and identity, marker, milestone, repository mapping, observation time, source, configuration revision, and a typed effective configuration snapshot (state/worktree roots, capacity, sources, mappings, and initial/resume executable and argv). The snapshot is validated before task creation and committed atomically with the task and selection evidence. Credentials are excluded by configuration validation; invalid-configuration errors do not echo supplied values or raw JSON. Duplicate task creation rolls back without leaving a second selection record. A process-level coordinator lock (where used) supplements database transactions; reservations remain authoritative and uncertain work must retain capacity.
 
 ## Audited queue capacity changes
 
@@ -309,7 +309,7 @@ other explicit operator controls.
 
 The operation opens only an **existing** database under the coordinator lock,
 using the expected old capacity through the ordinary mismatch check. Known
-versions 2–6 are migrated transactionally to version 7. A pre-metadata database
+versions 2–7 are migrated transactionally to version 8. A pre-metadata database
 (version 0/1) has no persisted capacity to verify: initialize/migrate it normally
 under its original config first. Unknown versions are refused, not guessed.
 There is no automatic adoption of a conflicting audit schema.
@@ -318,7 +318,8 @@ Under an immediate SQLite transaction it verifies the current reservation count
 and reservation/attempt/task identities. The new limit must be different,
 positive, representable by SQLite, and at least the verified reservation count;
 inconsistent counts above the old limit are refused. Unlaunched reservations may
-remain, but active or unreconciled launch intents are refused even on an increase.
+remain, but active or unreconciled launch intents are refused even on an increase,
+except for the narrow historical-hold classification below.
 Released launches must already have their reconciled receipt/outcome or existing
 explicit recovery/retirement audit; resizing never creates exit or absence proof.
 Registered processes/groups must be provably absent, and existing worktree-owner
@@ -326,8 +327,28 @@ locks are acquired and held through commit. Missing or conflicting historical
 owner locks are not recreated to manufacture proof. Reused PIDs and unavailable
 process inspection remain fail-closed.
 
+An **increase only** may count a permanent historical hold without releasing it.
+The task must be `held`, with exactly one initial attempt, still `launch_intended`
+with unknown outcome and an active reservation, and exactly one original launch.
+There must be no contemporaneous launch-preparation record (even malformed or
+misbound preparation records do not qualify), terminal/recovery proof, retry or
+repair authorization, or initial-branch amendment. The original dispatch
+inventory must be incomplete: a complete set of supervisor-dispatch, gate-release,
+owner-protocol, supervisor-ready, child-registration and gate-sent records must
+instead go through reconciliation. A modern prepared launch is never classified
+as historical simply because its receipt or dispatch stages are missing.
+
+This is read-only classification of #27's unknown historical attempts for queue
+arithmetic, not an assertion of worker exit or a new release protocol. All
+registered-process and worktree-owner checks above still run, and unavailable
+owners are not repaired. Every counted reservation stays reserved, and the audit
+and CLI result name each counted task/attempt and its reason in `permanent_holds`.
+No task phase, attempt outcome, launch/preparation bytes or continuation authority
+changes. Decreases cannot use this exception, including decreases still above
+the reservation count. The new limit must always cover **all** reservations.
+
 One `capacity_changes` record stores actor, reason, old/new capacity, reservation
-count, sequence and UTC timestamp atomically with the persisted limit update.
+count, named `permanent_holds`, sequence and UTC timestamp atomically with the persisted limit update.
 Errors roll back both writes; the command returns one JSON changed/refused
 result and exits nonzero on refusal. No task, attempt, intent, reservation,
 receipt, log, PR proof or selection snapshot is edited. A restart with the new
