@@ -65,7 +65,7 @@ pub(crate) fn validate_owner_protocol(
 ) -> Result<i64, StateError> {
     use crate::ownership::WorktreeOwnerProtocolInternal;
     let rows: Vec<(i64, String, Option<String>, String)> = db
-        .prepare("SELECT sequence,task_id,attempt_id,payload FROM evidence WHERE kind='worktree_owner_protocol' AND (task_id=?1 OR attempt_id=?2) ORDER BY sequence")?
+        .prepare("SELECT sequence,task_id,attempt_id,payload FROM evidence WHERE kind='worktree_owner_protocol' AND attempt_id=?2 ORDER BY sequence")?
         .query_map(params![task, attempt], |row| {
             Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
         })?

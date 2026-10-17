@@ -581,6 +581,50 @@ it is not reset by waiting or restart. Non-pending decisions omit the deadline.
 Cached `status` and `show` expose the latest `worker_outcome`; those views, previews,
 plain reconciliation, and stopped-task resume do not initiate retries.
 
+### Explicit native continuation after an amended first attempt
+
+Ordinary `resume`, `retry`, automatic retry and amendment observation do not
+turn an amended native task into a new launch authorization. Use the explicit
+predecessor-bound path after reconciling its receipt and PR lookup:
+
+```sh
+luthor continue-amended --task TASK --predecessor PREVIOUS_ATTEMPT \
+  --attempt NEW_ATTEMPT --mode stopped-resume \
+  --config PATH --config-revision REV --actor LOGIN --execute
+```
+
+Use `stopped-resume` only for a proven stopped/canceled attempt in `paused`, or
+`natural-exit-retry` for a natural worker exit in `attention`. Natural retry is an
+explicit operator decision, not automatic retry classification. A missing,
+conflicting or ambiguous receipt, live process/group/descendant, incompatible
+session, changed claim, existing/ambiguous PR, terminal task, unavailable slot,
+wrong predecessor, or reused attempt ID refuses the command without a new launch.
+
+The original launch, amendment and dispatch remain immutable. Each successor
+atomically records its own sealed transition and launch intent, binding the
+original/effective predecessor plans, original amendment sequence, preceding
+transition, dispatch/gate/receipt/stop journal, actor, mode, corrected configuration
+and revision, and fresh claim/PR-absence evidence. A dual-template amendment
+requires its exact corrected configuration revision. An initial-only amendment
+requires the same narrowly corrected resume template, not arbitrary configuration
+changes. The audit is bounded by the existing seal-size limit; it never prunes or
+rewrites history to fit.
+
+The native resume command keeps the task/session, authorized worker build,
+worktree, branch, remote and PR mapping. It passes no conversation `--branch`,
+adds a distinct attempt-specific continuation prompt, and tells the worker to
+inspect files left by the interrupted or exited worker instead of assuming its
+transcript was restored. Existing worktree changes are preserved. The exclusive
+owner, process absence, current session environment, executable pin, storage,
+disk and capacity checks remain mandatory. Source/PR checks are repeated before
+dispatch, and the process gates revalidate the exact sealed local lineage.
+
+Every successor gets one dispatch. An uncertain launch retains its reservation
+and cannot be replayed. Later reconciliation and matching-PR completion validate
+that successor's own dispatch and receipt; completion is observation only and
+never authorizes another retry. This command does not edit private operator
+configuration, migrate state, or enable terminal-exit exceptions or pin replacement.
+
 ### Typed failures during PR repair
 
 The same opt-in `retry_policy`, typed-code classification and exit-code
