@@ -15,10 +15,15 @@ pub(crate) fn read(
     } else {
         "pause_pr_lookup"
     };
-    let rows: Vec<(i64, String, Option<String>, String, String)> = db.prepare(
-        "SELECT sequence,task_id,attempt_id,kind,payload FROM evidence
-         WHERE (task_id=?1 OR attempt_id=?2) AND kind IN ('exit_pr_lookup','pause_pr_lookup') ORDER BY sequence",
-    )?.query_map(params![plan.task_id,plan.attempt_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)))?.collect::<Result<_,_>>()?;
+    let rows: Vec<(i64, String, Option<String>, String, String)> = db
+        .prepare(
+            "SELECT sequence,task_id,attempt_id,kind,payload FROM evidence
+         WHERE attempt_id=?2 AND kind IN ('exit_pr_lookup','pause_pr_lookup') ORDER BY sequence",
+        )?
+        .query_map(params![plan.task_id, plan.attempt_id], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+        })?
+        .collect::<Result<_, _>>()?;
     let (last, prior) = rows.split_last().ok_or(StateError::LaunchBlocked)?;
     let current: ExitPrEvidence = super::proofs::parse_saved(&last.4)?;
     let mut retained = Vec::new();

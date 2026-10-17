@@ -7,6 +7,7 @@ mod files;
 mod history;
 mod logs;
 mod merge;
+mod native_continuation;
 mod observation;
 mod observation_labels;
 mod output;

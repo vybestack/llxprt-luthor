@@ -1,8 +1,11 @@
+mod amended_binding;
 mod amended_completion;
 mod amended_completion_lookup;
 pub(crate) mod amended_dispatch;
 mod amended_observation;
+mod amended_scope;
 mod amendment;
+mod attempt_evidence;
 mod attempts;
 mod branch_removal;
 pub mod capacity;
@@ -20,6 +23,7 @@ pub(crate) mod github_budget;
 pub mod journal;
 pub mod launches;
 pub(crate) mod merge_followup;
+pub mod native_continuation;
 pub mod pin_adoption;
 mod pin_quiescence;
 pub mod pin_replacement;
@@ -140,3 +144,20 @@ impl StateStore {
 
 #[cfg(test)]
 mod recovery_tests;
+
+pub(crate) fn validate_native_continuation_config(
+    context: &NeverDispatchedContext,
+    config: &Config,
+    revision: &str,
+) -> Result<(), StateError> {
+    if amendment::policy::correction_for_config(context, &config.into())?.is_none() {
+        return Err(StateError::LaunchBlocked);
+    }
+    let audit = context.amendment().ok_or(StateError::LaunchBlocked)?;
+    if audit.future_template_correction.is_some()
+        && (audit.current_config != config.into() || audit.current_config_revision != revision)
+    {
+        return Err(StateError::LaunchBlocked);
+    }
+    Ok(())
+}

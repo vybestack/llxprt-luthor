@@ -1,3 +1,4 @@
+mod native;
 use luthor::WorktreeOwner;
 use luthor::state::{journal, launches, scheduling, task_records};
 mod future_templates;

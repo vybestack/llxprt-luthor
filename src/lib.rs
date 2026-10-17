@@ -3,11 +3,13 @@ pub mod cleanup;
 mod cleanup_error;
 pub mod cli;
 pub mod config;
+mod continuation_plan;
 pub mod coordinator;
 pub mod daemon;
 pub mod dependencies;
 pub mod disk;
 pub mod eligibility;
+pub mod native_transition;
 pub mod platform;
 pub mod pr_evidence;
 pub mod github {
