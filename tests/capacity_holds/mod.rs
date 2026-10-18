@@ -165,14 +165,14 @@ fn historical_exception_preserves_owner_and_live_process_refusals() {
     drop(owner);
     fs::remove_file(f.root().join("worktree-legacy.lock")).unwrap();
     assert!(f.change(2, 3, 1).is_err());
-    // Restoring a lock does not override the unchanged process absence check.
+    // Restoring a lock does not override a live registered process identity.
     drop(WorktreeOwner::acquire(f.root(), "legacy").unwrap());
+    let (boot, start) = crate::capacity_processes::identity(std::process::id());
     f.evidence(
         "legacy",
         Some("attempt-legacy"),
         "supervisor_ready",
-        &json!({"pid":std::process::id(),"boot_identity":"fixture","start_identity":"fixture"})
-            .to_string(),
+        &json!({"pid":std::process::id(),"boot_identity":boot,"start_identity":start}).to_string(),
     );
     let with_process = f.history();
     assert!(f.change(2, 3, 1).is_err());

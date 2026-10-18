@@ -128,10 +128,11 @@ fn assert_refused(
 fn repin_refuses_registered_process_even_after_completed_database_accounting() {
     let (_dir, mut config, mut store, _) = paused();
     let build = fixture::replacement(&mut config, &mut store);
+    let (boot, start) = test_process_identity(std::process::id());
     for kind in ["supervisor_ready", "child_registered", "tracked_descendant"] {
         let db = fixture::db(&config);
         db.execute("INSERT INTO evidence(task_id,attempt_id,kind,payload) VALUES('task','attempt-real',?1,?2)",
-            rusqlite::params![kind, json!({"pid":std::process::id(), "group_id":std::process::id(), "boot_identity":"boot", "start_identity":"start"}).to_string()]).unwrap();
+            rusqlite::params![kind, json!({"pid":std::process::id(), "group_id":std::process::id(), "boot_identity":boot, "start_identity":start}).to_string()]).unwrap();
         assert_refused(&config, &mut store, &build, "registered process");
         db.execute(
             "DELETE FROM evidence WHERE sequence=(SELECT MAX(sequence) FROM evidence)",
@@ -254,4 +255,20 @@ fn repin_preserves_unrelated_holds_and_refuses_legacy_unrecorded_sessions() {
             .unwrap()
             .is_none()
     );
+}
+
+#[test]
+fn repin_allows_reused_historical_pid_without_rewriting_registration() {
+    let (_dir, mut config, mut store, _) = paused();
+    let build = fixture::replacement(&mut config, &mut store);
+    let (boot, _) = test_process_identity(std::process::id());
+    for kind in ["supervisor_ready", "child_registered", "tracked_descendant"] {
+        journal::record_evidence(&mut store, "task", Some("attempt-real"), kind,
+            &json!({"pid":std::process::id(), "group_id":std::process::id(), "boot_identity":boot, "start_identity":"previous-start"}).to_string()).unwrap();
+    }
+    let before = crate::pin_adoption_fixture::rows(&config);
+    pin_replacement::preview(&config, "task", fixture::request(&build)).unwrap();
+    pin_replacement::replace(&mut store, &config, "task", fixture::request(&build)).unwrap();
+    assert_eq!(crate::pin_adoption_fixture::rows(&config), before);
+    assert_eq!(scheduling::reservation_count(&store).unwrap(), 0);
 }
