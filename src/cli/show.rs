@@ -1,6 +1,7 @@
 use super::{
     CliError,
-    history::{attempt_history, cached_verified_pr, events, terminal},
+    attempts::{self, AttemptHistory},
+    history::{cached_verified_pr, events, terminal},
     observation::{ObservationSummaries, displayed_reason, observations},
     output::{OutputAge, log_observation},
     process::operator_state,
@@ -21,28 +22,13 @@ pub(crate) fn show(conn: &Connection, root: &Path, task: &str) -> Result<Value, 
         candidate,
         worktree,
     } = show_details(conn, task)?;
-    let (mut attempts, session) = attempt_history(conn, task)?;
+    let mut history = attempts::load(conn, task)?;
     let reserved = reserved_slot(conn, task)?;
-    let active_attempt = attempts
-        .iter()
-        .rev()
-        .find(|a| a["reservation"] == "reserved");
-    let latest_attempt_id = attempts
-        .last()
-        .and_then(|a| a["id"].as_str())
-        .map(str::to_owned);
-    let latest_attempt_outcome = attempts
-        .last()
-        .and_then(|a| a["outcome"].as_str())
-        .map(str::to_owned);
     let verified_pr = if phase == "pr_complete" {
         Some(cached_verified_pr(conn, task)?)
     } else {
         None
     };
-    let active_attempt_id = active_attempt
-        .and_then(|a| a["id"].as_str())
-        .map(str::to_owned);
     let DisplayObservation {
         phase: display_phase,
         process,
@@ -54,15 +40,17 @@ pub(crate) fn show(conn: &Connection, root: &Path, task: &str) -> Result<Value, 
                 latest: last_observation,
                 ..
             },
-    } = display_observation(conn, root, task, &phase, &mut attempts, &evidence)?;
+    } = display_observation(conn, root, task, &phase, &mut history, &evidence)?;
+    let active_attempt_id = history.active_id();
+    let latest_attempt_outcome = history.latest_outcome();
     let mut output = json!({"task":{"id":task,"repository":repository,"issue_number":number,
         "issue_url":candidate.as_ref().and_then(|v|v.get("issue_url")),
         "source":candidate.as_ref().and_then(|v|v.get("source")),
         "mapping":candidate.as_ref().and_then(|v|v.get("mapping"))},
-        "phase":display_phase,"reason":reason,"reserved_slot":reserved,"attempts":attempts,
-        "process":process,"intents":intents,"evidence":evidence,"session":session,
+        "phase":display_phase,"reason":reason,"reserved_slot":reserved,"attempts":history.attempts,
+        "process":process,"intents":intents,"evidence":evidence,"session":history.session,
         "worktree":worktree.and_then(|v|serde_json::from_str::<Value>(&v).ok()),
-        "latest_attempt_id":latest_attempt_id,
+        "latest_attempt_id":history.latest_id(),
         "latest_attempt_outcome":latest_attempt_outcome,
         "latest_attempt_outcome_unavailable_reason":if latest_attempt_outcome.is_none(){Some("attempt has no verified exit outcome")}else{None},
         "pr_state":if verified_pr.is_some(){"open_at_last_verification"}else{"unavailable"},
@@ -81,12 +69,7 @@ pub(crate) fn show(conn: &Connection, root: &Path, task: &str) -> Result<Value, 
     super::retry_outcome::present(conn, task, &mut output)?;
     output["worker_build"] = super::history::worker_build(conn, task)?;
     output["cleanup_failure"] = json!(super::history::cleanup_failure(conn, task)?);
-    log_observation(
-        &mut output,
-        root,
-        active_attempt_id.as_deref(),
-        OutputAge::LogOnly,
-    );
+    log_observation(&mut output, root, active_attempt_id, OutputAge::LogOnly);
     Ok(output)
 }
 
@@ -130,13 +113,9 @@ fn display_observation(
     root: &Path,
     task: &str,
     phase: &str,
-    attempts: &mut [Value],
+    history: &mut AttemptHistory,
     evidence: &[Value],
 ) -> Result<DisplayObservation, CliError> {
-    let active_attempt = attempts
-        .iter()
-        .rev()
-        .find(|a| a["reservation"] == "reserved");
     let reason = evidence
         .iter()
         .rev()
@@ -151,11 +130,7 @@ fn display_observation(
     let reason_sequence: i64 = conn.query_row(
         "SELECT sequence FROM evidence WHERE task_id=?1 AND kind='held_reason' ORDER BY sequence DESC LIMIT 1",
         [task], |row| row.get(0)).optional().map_err(|_| CliError::Database)?.unwrap_or(0);
-    let active_attempt_id = active_attempt
-        .and_then(|a| a["id"].as_str())
-        .map(str::to_owned);
-    let (display_phase, process) =
-        operator_state(conn, root, task, active_attempt_id.as_deref(), phase)?;
+    let (display_phase, process) = operator_state(conn, root, task, history.active_id(), phase)?;
     let reason = displayed_reason(
         &display_phase,
         reason,
@@ -164,7 +139,8 @@ fn display_observation(
         observation_sequence,
     );
     if (display_phase == "running" || display_phase == "stop_requested")
-        && let Some(attempt) = attempts
+        && let Some(attempt) = history
+            .attempts
             .iter_mut()
             .rev()
             .find(|a| a["reservation"] == "reserved")
