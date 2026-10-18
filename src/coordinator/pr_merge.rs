@@ -167,15 +167,17 @@ fn inspect_open<Q: PrMerger>(
         return Ok(eligibility_reason.map_or(Outcome::Merged(Default::default()), Outcome::Waiting));
     }
     verify_account(prs, saved)?;
+    // Stale-head checks cannot authorize a strict behind-base merge. Update
+    // first; the existing repair verifier must prove the new head before merge.
+    if followup::update_eligible(&detail) {
+        return followup::update_branch(store, task, saved, prs).map(Outcome::Waiting);
+    }
     let checks = prs.merge_checks(&saved.repository, saved.number, required_checks)?;
     if checks.health.id != saved.id || checks.health.head != saved.head_commit_sha {
         return Err(MergeError::Refused("check head differs from verified PR"));
     }
     if let Some(reason) = check_gate(store, task, saved, &checks)? {
         return Ok(Outcome::Waiting(reason));
-    }
-    if detail["mergeable_state"] == "behind" && detail["mergeable"] == true {
-        return followup::update_branch(store, task, saved, prs).map(Outcome::Waiting);
     }
     if let Some(reason) = eligibility_reason {
         return Ok(Outcome::Waiting(reason));

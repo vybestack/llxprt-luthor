@@ -88,6 +88,13 @@ fn behind_green_pr_updates_once_then_waits_for_existing_lineage_verification() {
     assert_eq!(f.run().unwrap().waiting.len(), 1);
     assert!(f.prs.writes.is_empty());
     f.prs.checks.health.required_checks_pending = false;
+    f.prs.checks.health.failed_required_checks = vec!["CI".into()];
+    f.prs.checks.summary[0].state = "FAILURE".into();
+    assert_eq!(f.run().unwrap().waiting[0].reason, "failing checks: CI");
+    assert!(f.prs.writes.is_empty());
+    assert!(pr_merge::authorization(&f.store, "task").unwrap().is_none());
+    f.prs.checks.health.failed_required_checks.clear();
+    f.prs.checks.summary[0].state = "SUCCESS".into();
     assert_eq!(f.run().unwrap().merged, ["task"]);
     assert_eq!(f.evidence().merged_head, "b".repeat(40));
 }

@@ -81,6 +81,10 @@ pub(crate) fn updated_head(
     Ok(true)
 }
 
+pub(crate) fn update_eligible(detail: &Value) -> bool {
+    detail["mergeable_state"] == "behind" && detail["mergeable"] == true && detail["draft"] == false
+}
+
 pub(crate) fn update_branch<Q: PrMerger>(
     store: &mut StateStore,
     task: &str,

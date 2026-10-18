@@ -141,6 +141,7 @@ pub struct FakePrs {
     pub login: String,
     pub writes: Vec<String>,
     pub reads: usize,
+    pub check_reads: usize,
     pub fail_write: bool,
     pub fail_terminal: bool,
     pub race: bool,
@@ -179,6 +180,7 @@ impl FakePrs {
             login: saved.active_login.clone(),
             writes: vec![],
             reads: 0,
+            check_reads: 0,
             fail_write: false,
             fail_terminal: false,
             race: false,
@@ -244,6 +246,7 @@ impl PrMerger for FakePrs {
         _: u64,
         _: &crate::config::RequiredChecks,
     ) -> Result<crate::github::pull_request::MergeChecks, LookupError> {
+        self.check_reads += 1;
         if self.race {
             self.detail["head"]["sha"] = json!("b".repeat(40));
         }
@@ -273,7 +276,8 @@ impl PrMerger for FakePrs {
         self.tracker_closed = true;
         Ok(())
     }
-    fn update_branch(&mut self, _: &VerifiedOpenPr) -> Result<(), LookupError> {
+    fn update_branch(&mut self, pr: &VerifiedOpenPr) -> Result<(), LookupError> {
+        assert_eq!(self.detail["head"]["sha"], pr.head_commit_sha);
         self.updates += 1;
         if self.fail_write {
             return Err(upstream());
