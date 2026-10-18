@@ -1,3 +1,4 @@
+mod capacity_audit;
 mod capacity_fixture;
 mod capacity_holds;
 use capacity_fixture::{Fixture, cli, success};
@@ -235,7 +236,7 @@ fn missing_historical_owner_proof_and_live_registered_processes_fail_closed() {
 
 #[test]
 fn unknown_database_versions_are_rejected_without_altering_history_or_limit() {
-    for version in [-1, 9, 99] {
+    for version in [-1, 10, 99] {
         let f = Fixture::new(1);
         f.completed("task", 1);
         let before = f.history();

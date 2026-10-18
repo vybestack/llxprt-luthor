@@ -21,7 +21,7 @@ pub(crate) fn migrates_v2_released_reservation_and_preserves_attempt_history() {
     let version: i32 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 8);
+    assert_eq!(version, 9);
     let rows: Vec<(String, String)> = connection
         .prepare("SELECT attempt_id,status FROM reservations ORDER BY attempt_id")
         .unwrap()
@@ -70,7 +70,7 @@ pub(crate) fn migrates_v1_database_atomically_and_preserves_records_and_capacity
     let version: i32 = connection
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 8);
+    assert_eq!(version, 9);
     for (table, expected) in [
         ("tasks", 1),
         ("attempts", 1),

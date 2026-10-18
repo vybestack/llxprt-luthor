@@ -2,6 +2,8 @@ mod git_fixture;
 mod cli {
     pub(crate) mod arguments;
     mod attempts;
+    #[cfg(unix)]
+    mod capacity;
     mod checks;
     #[cfg(unix)]
     pub(crate) mod dispatch;

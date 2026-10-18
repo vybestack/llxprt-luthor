@@ -1,5 +1,6 @@
 //! Explicit queue-level capacity authorization; never rewrites task provenance.
 use super::{capacity_holds, database, proofs};
+pub use crate::supervisor::capacity_observation::RunningAttempt;
 use crate::{
     model::{ExitReceipt, StateError},
     ownership::WorktreeOwner,
@@ -26,6 +27,7 @@ pub struct CapacityChange {
     pub new_capacity: usize,
     pub reservations: usize,
     pub permanent_holds: Vec<PermanentHold>,
+    pub running_attempts: Vec<RunningAttempt>,
     pub created_at: String,
 }
 
@@ -35,13 +37,18 @@ fn refused(reason: &'static str) -> StateError {
 
 /// Acquire the coordinator lock using the expected *old* limit, not a bypass
 /// of the normal mismatch guard. An existing versioned database is mandatory.
-/// Hold all existing task owners until the audit and limit commit together.
+/// Hold quiescent task owners through commit; confirmed live attempts retain
+/// their independently verified existing ownership throughout the operation.
 pub fn change(
     root: &Path,
     request: CapacityChangeRequest<'_>,
 ) -> Result<CapacityChange, StateError> {
     validate(&request)?;
     let mut store = database::open_existing(root, request.expected_capacity)?;
+    // The coordinator stays held across read-only OS/dispatch observation and
+    // the immediate transaction. No reservation/launch writer can intervene.
+    let running_attempts =
+        observe_running(&store, request.new_capacity > request.expected_capacity)?;
     let tx = store
         .connection
         .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -64,12 +71,15 @@ pub fn change(
             capacity: request.new_capacity,
         });
     }
-    let permanent_holds =
-        require_accounted_launches(&tx, request.new_capacity > request.expected_capacity)?;
-    let _owners = lock_owners(&tx, root)?;
+    let permanent_holds = require_accounted_launches(
+        &tx,
+        request.new_capacity > request.expected_capacity,
+        &running_attempts,
+    )?;
+    let _owners = lock_owners(&tx, root, &running_attempts)?;
     tx.execute(
-        "INSERT INTO capacity_changes(actor,reason,old_capacity,new_capacity,reservations,permanent_holds) VALUES(?1,?2,?3,?4,?5,?6)",
-        params![request.actor, request.reason, request.expected_capacity as i64, request.new_capacity as i64, reserved as i64, serde_json::to_string(&permanent_holds)?],
+        "INSERT INTO capacity_changes(actor,reason,old_capacity,new_capacity,reservations,permanent_holds,running_attempts) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+        params![request.actor, request.reason, request.expected_capacity as i64, request.new_capacity as i64, reserved as i64, serde_json::to_string(&permanent_holds)?, serde_json::to_string(&running_attempts)?],
     )?;
     let sequence = tx.last_insert_rowid();
     let created_at = tx.query_row(
@@ -96,6 +106,7 @@ pub fn change(
         new_capacity: request.new_capacity,
         reservations: reserved,
         permanent_holds,
+        running_attempts,
         created_at,
     })
 }
@@ -120,6 +131,7 @@ fn validate(request: &CapacityChangeRequest<'_>) -> Result<(), StateError> {
 fn require_accounted_launches(
     db: &Connection,
     increasing: bool,
+    running: &[RunningAttempt],
 ) -> Result<Vec<PermanentHold>, StateError> {
     let invalid_reservation: bool = db.query_row(
         "SELECT EXISTS(SELECT 1 FROM reservations r WHERE NOT EXISTS
@@ -135,6 +147,12 @@ fn require_accounted_launches(
     let mut holds = Vec::new();
     for (task, attempt) in launches {
         let attempt = attempt.as_deref().ok_or(refused("launch has no attempt"))?;
+        if running
+            .iter()
+            .any(|r| r.task_id == task && r.attempt_id == attempt)
+        {
+            continue;
+        }
         if increasing && let Some(hold) = capacity_holds::classify(db, &task, attempt)? {
             holds.push(hold);
         } else {
@@ -210,13 +228,21 @@ fn abandoned_before_dispatch(
     )?)
 }
 
-fn lock_owners(db: &Connection, root: &Path) -> Result<Vec<WorktreeOwner>, StateError> {
+fn lock_owners(
+    db: &Connection,
+    root: &Path,
+    running: &[RunningAttempt],
+) -> Result<Vec<WorktreeOwner>, StateError> {
     let tasks: Vec<(String, bool)> = db.prepare(
         "SELECT t.id, EXISTS(SELECT 1 FROM evidence e WHERE e.task_id=t.id AND e.kind IN ('worktree_created','worktree_owner_protocol'))
          OR EXISTS(SELECT 1 FROM intents i WHERE i.task_id=t.id AND i.kind IN ('launch','worktree_create')) FROM tasks t ORDER BY t.id",
     )?.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?.collect::<Result<_, _>>()?;
     let mut owners = Vec::new();
     for (task, required) in tasks {
+        if let Some(active) = running.iter().find(|r| r.task_id == task) {
+            super::process_quiescence::require_absent_except(db, &task, Some(&active.attempt_id))?;
+            continue;
+        }
         if !crate::cli_identifiers::valid_attempt(&task) {
             return Err(refused("invalid task owner identity"));
         }
@@ -242,4 +268,26 @@ fn lock_owners(db: &Connection, root: &Path) -> Result<Vec<WorktreeOwner>, State
         }
     }
     Ok(owners)
+}
+
+fn observe_running(
+    store: &database::StateStore,
+    increasing: bool,
+) -> Result<Vec<RunningAttempt>, StateError> {
+    let mut running = Vec::new();
+    if !increasing {
+        return Ok(running);
+    }
+    let candidates: Vec<(String, String)> = store.connection.prepare(
+        "SELECT task_id,attempt_id FROM reservations WHERE status='reserved' ORDER BY task_id,attempt_id",
+    )?.query_map([], |r| Ok((r.get(0)?,r.get(1)?)))?.collect::<Result<_,_>>()?;
+    for (task, attempt) in candidates {
+        if crate::supervisor::capacity_observation::confirmed(store, &task, &attempt)? {
+            running.push(RunningAttempt {
+                task_id: task,
+                attempt_id: attempt,
+            });
+        }
+    }
+    Ok(running)
 }

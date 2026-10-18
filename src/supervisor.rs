@@ -4,6 +4,7 @@ pub(crate) mod abort_recovery;
 mod binding;
 #[cfg(unix)]
 mod binding_gate;
+pub(crate) mod capacity_observation;
 mod command;
 #[cfg(unix)]
 pub(crate) mod dispatch_abort;

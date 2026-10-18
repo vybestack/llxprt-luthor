@@ -833,9 +833,10 @@ its slot; no PR completion or new retry is authorized for that session.
 
 ## Resize an existing queue (issue #21)
 
-Stop the daemon/coordinator and reconcile any launched workers first. Keep the
-same `state_root`; changing only the config cannot override its persisted limit.
-With a config containing the **desired new capacity** (for example, `2`), inspect
+Stop the daemon/coordinator first. A capacity **increase** can count confirmed
+running workers; in-progress or unreconciled launches must still be reconciled.
+Keep the same `state_root`; changing only the config cannot override its
+persisted limit. With a config containing the **desired new capacity** (for example, `2`), inspect
 `luthor status --config PATH` for the current persisted `capacity.limit` and
 `capacity.reserved`, then explicitly authorize that exact transition:
 
@@ -845,17 +846,20 @@ luthor resize-capacity --config PATH --expected-capacity 1 \
 luthor status --config PATH
 ```
 
-The command requires the coordinator lock, refuses active/unreconciled launches
-or conflicting/unavailable worktree owners, and never releases reservations.
-An **increase only** may count permanent historical initial-attempt holds under
+The command requires the coordinator lock and never releases reservations.
+An **increase only** may count a confirmed running attempt with exact dispatch,
+child-registration, gate-send, live process and existing owner proof. Its worker
+and owner lock are left alone. In-progress launches, pending stops, unreconciled
+receipts and conflicting/unavailable owners still refuse.
+An increase may also count permanent historical initial-attempt holds under
 issue #27: they remain reserved and gain no continuation or release authority.
-Modern prepared launches and complete dispatch inventories awaiting reconciliation
-still refuse. Registered-process absence and owner checks are unchanged.
-A decrease cannot go below the verified reservation count and cannot use the
-historical-hold exception. Stale expectations refuse without a capacity/audit
-write. The old/new limit, actor, reason, verified reservation count, timestamp
-and `permanent_holds` (task/attempt IDs and reason) are committed together and
-returned as JSON.
+That historical exception retains its process-absence and owner checks.
+A decrease cannot go below the verified reservation count and cannot use either
+exception: running attempts still block decreases, even at the reservation count.
+Stale expectations refuse without a capacity/audit write. The old/new limit,
+actor, reason, verified reservation count, timestamp, `running_attempts`
+(task/attempt IDs) and `permanent_holds` (task/attempt IDs and reason) are committed
+together and returned as JSON.
 Tasks, attempts, receipts, PR proof and selection snapshots are not rewritten;
 ordinary task-continuation authorization is unchanged. This is not a migration to
 a new state root. See the [capacity-change contract](dev-docs/config-and-state.md#audited-queue-capacity-changes)

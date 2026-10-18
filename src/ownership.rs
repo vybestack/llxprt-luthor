@@ -488,3 +488,5 @@ fn lock_error(error: io::Error) -> OwnershipError {
 
 #[cfg(test)]
 mod tests;
+
+pub(crate) mod observation;
