@@ -291,6 +291,15 @@ fn classifies_safe_api_failure_categories_and_malformed_output() {
 
 #[test]
 fn direct_issue_caches_repository_and_validates_identity_and_urls() {
+    assert_direct_issue_cache(std::time::Duration::ZERO);
+}
+
+#[test]
+fn direct_issue_cache_allows_reads_across_a_second_boundary() {
+    assert_direct_issue_cache(std::time::Duration::from_secs(1));
+}
+
+fn assert_direct_issue_cache(observation_gap: std::time::Duration) {
     use luthor::github::project::ProjectItem;
 
     let dir = tempdir().unwrap();
@@ -317,12 +326,28 @@ fn direct_issue_caches_repository_and_validates_identity_and_urls() {
     };
 
     let first = reader.issue(&item).unwrap();
+    std::thread::sleep(observation_gap);
     let second = reader.issue(&item).unwrap();
-    assert_eq!(first.repository, "org/tracker");
-    assert_eq!(first.tracker_repo_id, "REPO1");
-    assert_eq!(first.url, "https://github.com/org/tracker/issues/7");
-    assert_eq!(first.node_id, "ISSUE1");
-    assert_eq!(first, second);
+    for observed in [first, second] {
+        // Only repository identity is cached; observation times may differ.
+        assert_eq!(
+            observed,
+            Issue {
+                repository: "org/tracker".into(),
+                tracker_repo_id: "REPO1".into(),
+                url: "https://github.com/org/tracker/issues/7".into(),
+                node_id: "ISSUE1".into(),
+                number: 7,
+                state: "open".into(),
+                closed_at: None,
+                assignees: vec![],
+                labels: vec![],
+                milestone: None,
+                milestone_id: None,
+                observed_at_unix_secs: observed.observed_at_unix_secs,
+            }
+        );
+    }
     assert_eq!(fs::read_to_string(calls).unwrap().lines().count(), 1);
 }
 
