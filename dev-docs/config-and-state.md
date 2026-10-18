@@ -302,14 +302,15 @@ existing queue. Run `status --config PATH` first: its `capacity.limit` always co
 from persisted metadata, not the supplied config, and `capacity.reserved` reports
 the current reservation count. Stop the coordinator/daemon before resizing. A
 running daemon is not signalled or silently bypassed: the command fails with
-`coordinator busy; try again`. Workers may survive a coordinator, so reconcile
-their launches before retrying the resize. No GitHub calls or worker launches are
+`coordinator busy; try again`. Workers may survive a coordinator; an increase
+can count confirmed running attempts, but unsettled launches still require
+reconciliation before retrying the resize. No GitHub calls or worker launches are
 part of this operation, and actor is the operator-provided audit identity, as for
 other explicit operator controls.
 
 The operation opens only an **existing** database under the coordinator lock,
 using the expected old capacity through the ordinary mismatch check. Known
-versions 2–7 are migrated transactionally to version 8. A pre-metadata database
+versions 2–8 are migrated transactionally to version 9. A pre-metadata database
 (version 0/1) has no persisted capacity to verify: initialize/migrate it normally
 under its original config first. Unknown versions are refused, not guessed.
 There is no automatic adoption of a conflicting audit schema.
@@ -318,14 +319,32 @@ Under an immediate SQLite transaction it verifies the current reservation count
 and reservation/attempt/task identities. The new limit must be different,
 positive, representable by SQLite, and at least the verified reservation count;
 inconsistent counts above the old limit are refused. Unlaunched reservations may
-remain, but active or unreconciled launch intents are refused even on an increase,
-except for the narrow historical-hold classification below.
+remain, but in-progress or unreconciled launch intents are refused even on an
+increase. The two increase-only classifications below do not authorize decreases.
 Released launches must already have their reconciled receipt/outcome or existing
 explicit recovery/retirement audit; resizing never creates exit or absence proof.
-Registered processes/groups must be provably absent, and existing worktree-owner
-locks are acquired and held through commit. Missing or conflicting historical
-owner locks are not recreated to manufacture proof. Reused PIDs and unavailable
+Except for a confirmed running attempt, registered processes/groups must be
+provably absent, and existing worktree-owner locks are acquired and held through
+commit. Missing or conflicting historical owner locks are not recreated to manufacture proof. Reused PIDs and unavailable
 process inspection remain fail-closed.
+
+An **increase only** may count a confirmed running attempt without stopping or
+reconciling it. The existing read-only reconciliation evidence checks must bind
+its saved plan, launch/dispatch, selection, worktree, claim, child registration,
+supervisor, gate release and gate send. The held task must retain its exact
+active reservation and unknown outcome. Both child and supervisor must have
+verified live identities and process groups; a stop intent, receipt, supervisor
+error, terminal evidence or malformed/duplicate/misbound stage blocks this
+classification. The persisted owner protocol must match the existing lock's
+inode and nonce, and that lock must still be busy. Resizing neither takes over
+nor recreates the live worker's ownership. Registrations outside this exact
+attempt still require absence proof.
+
+Read-only running observation and the immediate transaction share one continuously
+held coordinator lock: no cooperative launch/reservation writer can intervene.
+Workers can finish during observation, but only reconciliation can change their
+reserved slots, and resizing never does so. The audit and JSON result identify
+each counted running task/attempt in stable order in `running_attempts`.
 
 An **increase only** may count a permanent historical hold without releasing it.
 The task must be `held`, with exactly one initial attempt, still `launch_intended`
@@ -348,7 +367,9 @@ changes. Decreases cannot use this exception, including decreases still above
 the reservation count. The new limit must always cover **all** reservations.
 
 One `capacity_changes` record stores actor, reason, old/new capacity, reservation
-count, named `permanent_holds`, sequence and UTC timestamp atomically with the persisted limit update.
+count, named `permanent_holds` and `running_attempts`, sequence and UTC timestamp
+atomically with the persisted limit update. Version 9 adds `running_attempts`;
+older audits gain `[]` without rewriting their existing values.
 Errors roll back both writes; the command returns one JSON changed/refused
 result and exits nonzero on refusal. No task, attempt, intent, reservation,
 receipt, log, PR proof or selection snapshot is edited. A restart with the new

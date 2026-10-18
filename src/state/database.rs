@@ -66,7 +66,7 @@ fn open_store(root: &Path, capacity: usize, create: bool) -> Result<StateStore, 
     };
     let mut connection = Connection::open_with_flags(root.join("state.sqlite3"), flags)?;
     let version: i32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if !(0..=8).contains(&version) || !create && version < 2 {
+    if !(0..=9).contains(&version) || !create && version < 2 {
         return Err(StateError::UnsupportedDatabaseVersion(version));
     }
     connection.pragma_update(None, "journal_mode", "WAL")?;
@@ -202,6 +202,12 @@ fn migrate_capacity_audit(tx: &rusqlite::Transaction<'_>, version: i32) -> Resul
             "ALTER TABLE capacity_changes ADD COLUMN permanent_holds TEXT NOT NULL DEFAULT '[]';",
         )?;
         tx.pragma_update(None, "user_version", 8)?;
+    }
+    if version < 9 {
+        tx.execute_batch(
+            "ALTER TABLE capacity_changes ADD COLUMN running_attempts TEXT NOT NULL DEFAULT '[]';",
+        )?;
+        tx.pragma_update(None, "user_version", 9)?;
     }
     Ok(())
 }

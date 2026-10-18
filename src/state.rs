@@ -16,7 +16,7 @@ mod continuation;
 mod continuation_hold;
 mod database;
 pub(crate) mod dispatch_abort;
-mod dispatch_stages;
+pub(crate) mod dispatch_stages;
 pub mod exit_observation;
 pub(crate) mod exits;
 pub(crate) mod github_budget;

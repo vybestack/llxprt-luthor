@@ -27,7 +27,7 @@ fn v4_migration_adds_no_historical_preparation_and_preserves_exact_rows() {
     assert_eq!(
         db.pragma_query_value::<i32, _>(None, "user_version", |row| row.get(0))
             .unwrap(),
-        8
+        9
     );
     assert_eq!(
         db.query_row::<i64, _, _>("SELECT COUNT(*) FROM launch_preparations", [], |row| row

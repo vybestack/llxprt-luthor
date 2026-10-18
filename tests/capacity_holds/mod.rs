@@ -261,6 +261,7 @@ fn version_seven_capacity_audits_gain_empty_hold_lists_without_rewriting_old_val
     f.db()
         .execute_batch(
             "ALTER TABLE capacity_changes DROP COLUMN permanent_holds;
+        ALTER TABLE capacity_changes DROP COLUMN running_attempts;
         INSERT INTO capacity_changes(actor,reason,old_capacity,new_capacity,reservations,created_at)
         VALUES('previous-operator','original audit',1,2,0,'2000-01-01 00:00:00');
         PRAGMA user_version=7;",
@@ -275,7 +276,7 @@ fn version_seven_capacity_audits_gain_empty_hold_lists_without_rewriting_old_val
         f.db()
             .pragma_query_value::<i32, _>(None, "user_version", |r| r.get(0))
             .unwrap(),
-        8
+        9
     );
 }
 
