@@ -1,6 +1,7 @@
 mod capacity_audit;
 mod capacity_fixture;
 mod capacity_holds;
+mod capacity_processes;
 use capacity_fixture::{Fixture, cli, success};
 use luthor::{
     WorktreeOwner,
@@ -216,12 +217,13 @@ fn missing_historical_owner_proof_and_live_registered_processes_fail_closed() {
     fs::write(&owner, saved).unwrap();
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(&owner, fs::Permissions::from_mode(0o600)).unwrap();
+    let (boot, start) = capacity_processes::identity(std::process::id());
     f.evidence(
         "task",
         Some("attempt-task"),
         "supervisor_ready",
         &json!({
-            "pid":std::process::id(), "boot_identity":"fixture", "start_identity":"fixture"
+            "pid":std::process::id(), "boot_identity":boot, "start_identity":start
         })
         .to_string(),
     );
